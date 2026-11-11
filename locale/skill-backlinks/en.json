@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Bundled Backlink Skills",
+    "description": "Registers /backlink-publish (with 6 category playbooks) and /google-session skills."
+  }
+}

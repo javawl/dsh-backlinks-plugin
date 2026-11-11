@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "外链核心运行时",
+    "description": "注册外链批次源与接码邮箱提供方注册表（ctx.backlinks）。"
+  }
+}

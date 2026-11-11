@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "持久化浏览器运行时",
+    "description": "多标签并发隔离与懒启动会话管理服务（ctx.browser）。"
+  }
+}

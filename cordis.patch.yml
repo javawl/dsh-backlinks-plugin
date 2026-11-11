@@ -1,0 +1,147 @@
+# Full-stack Backlink Publishing Bundle for DeepSeek Harness (web, desktop, headless)
+- insert:
+    # 1. Bundled skills (`backlink-publish` + 6 playbooks + `google-session`), cwd-independent.
+    - id: skill-backlinks
+      name: '@javawl/dsh-backlinks-bundle/skill-backlinks'
+      config:
+        providerName: backlink-operator
+
+    # 2. Persistent real-Chrome automation (`ctx.browser` + `browser` tool with `closeBrowser`).
+    - id: browser
+      name: '@javawl/dsh-backlinks-bundle/browser'
+    - id: browser-playwright
+      name: '@javawl/dsh-backlinks-bundle/browser-playwright'
+      config:
+        userDataDir: !!js process.env.DSH_BACKLINK_BROWSER_PROFILE ?? dshHomePath('backlink-browser-profile')
+        headless: false
+        channel: chrome
+        defaultTimeoutMs: 8000
+        windowPosition: -32000,-32000
+        ignoreDefaultArgs:
+          - --enable-automation
+        launchArgs:
+          - --disable-blink-features=AutomationControlled
+    - id: tool-browser
+      name: '@javawl/dsh-backlinks-bundle/tool-browser'
+      config:
+        timeoutMs: 180000
+        maxOutputChars: 60000
+
+    # 3. Backlinks batch work source & verification mailbox (`ctx.backlinks` + `backlinks` tool).
+    - id: backlinks
+      name: '@javawl/dsh-backlinks-bundle/backlinks'
+    - id: backlinks-supermanager
+      name: '@javawl/dsh-backlinks-bundle/supermanager'
+      config:
+        baseUrl: !!js process.env.SUPERMANAGER_BASE_URL ?? 'http://127.0.0.1:3000'
+    - id: backlinks-cloud-mail
+      name: '@javawl/dsh-backlinks-bundle/cloud-mail'
+      config:
+        baseUrl: !!js process.env.CLOUDMAIL_BASE_URL ?? 'https://mail.screwdom.org/api'
+    - id: tool-backlinks
+      name: '@javawl/dsh-backlinks-bundle/tool-backlinks'
+      config:
+        timeoutMs: 300000
+
+    # 4. Package root entry: Host `backlinksConsole` Remote + Web/Desktop UI console & settings cards.
+    - id: backlinks-console
+      name: '@javawl/dsh-backlinks-bundle'
+
+    # 5. Dedicated `backlink-operator` Agent Preset for Web/Desktop console sessions
+    #    (automatically skipped in headless/protocol profiles that mount no `agentPresets`).
+    - id: preset-backlink-operator
+      name: '@deepseek-ai/dsh-agent-preset'
+      disabled: !!js "!ctx.get('profileContext')?.startupBundles?.includes('@deepseek-ai/dsh-web-app')"
+      config:
+        id: backlink-operator
+        name: 外链发布专员
+        description: 专用于执行外链批次自动发布、验证码接码与谷歌会话保活的独立预设（不干扰默认编程预设）。
+        order: 5
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: |
+                You are backlink-agent, an autonomous backlink publishing operator powered by the {{model}} model.
+                You run publish batches from the backlink management backend: pick a batch, drive the target
+                sites in the shared browser, verify by reading back public pages, and report every item honestly.
+                Any 发外链/发布批次/批次 request goes through the backlink-publish skill; follow it exactly.
+          - id: time-context
+            name: '@deepseek-ai/dsh-time-context'
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+          - id: tool-pwsh
+            name: '@deepseek-ai/dsh-tool-pwsh'
+            disabled: !!js process.platform !== 'win32'
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+          - id: tool-jobs
+            name: '@deepseek-ai/dsh-tool-jobs'
+          - id: tool-schedule
+            name: '@deepseek-ai/dsh-tool-schedule'
+          - id: skill-filesystem
+            name: '@deepseek-ai/dsh-skill-filesystem'
+          - id: tool-skill
+            name: '@deepseek-ai/dsh-tool-skill'
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+          - id: delegation
+            name: cordis:group
+            group: true
+            isolate:
+              workflowEngine: true
+            config:
+              - id: tool-subagent-control
+                name: '@deepseek-ai/dsh-tool-subagent-control'
+              - id: tool-subagent-list-agents
+                name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
+              - id: tool-subagent
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: spawn
+                  toolName: subagent
+                  modelSelectionSettings: true
+              - id: tool-subagent-fork
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: fork
+                  toolName: subagent_fork
+              - id: workflow-ptc
+                name: '@deepseek-ai/dsh-workflow-ptc'
+                config:
+                  provider: spawn
+              - id: tool-workflow
+                name: '@deepseek-ai/dsh-tool-workflow'
+          - id: tool-ask-user
+            name: '@deepseek-ai/dsh-tool-ask-user'
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true
+          - id: tool-web
+            name: '@deepseek-ai/dsh-tool-web'
+            config:
+              fetch: true
+              searchTimeoutMs: 60000
+          - id: present
+            name: '@deepseek-ai/dsh-tool-present'

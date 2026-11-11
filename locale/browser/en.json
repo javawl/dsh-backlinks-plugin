@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Persistent Browser Runtime",
+    "description": "Lazy persistent browser session runtime with per-tab concurrency isolation (ctx.browser)."
+  }
+}

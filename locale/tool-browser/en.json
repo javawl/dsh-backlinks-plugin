@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Browser Tool",
+    "description": "Model-facing browser automation tool with ARIA snapshots, semantic selectors, and closeBrowser."
+  }
+}

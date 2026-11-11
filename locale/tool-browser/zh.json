@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "浏览器工具（browser）",
+    "description": "向模型提供 ARIA 快照、语义选择器、多标签并发与 closeBrowser 停靠控制。"
+  }
+}

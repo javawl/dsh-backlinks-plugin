@@ -1,0 +1,223 @@
+{
+  "name": "@javawl/dsh-backlinks-bundle",
+  "version": "1.0.0",
+  "description": "Standalone backlink publishing bundle for DeepSeek Harness: batch console, persistent Chrome automation, Supermanager & Cloud-mail providers, and publishing skills.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/javawl/dsh-backlinks-plugin.git"
+  },
+  "type": "module",
+  "icon": "./icon.svg",
+  "main": "lib/index.js",
+  "types": "lib/types/host/index.d.ts",
+  "bin": {
+    "dsh-backlinks-init-models": "./scripts/ensure-profile-settings.mjs"
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0",
+    "dsh": ">=0.2.1-0"
+  },
+  "exports": {
+    ".": {
+      "types": "./lib/types/host/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./typert": {
+      "types": "./lib/types/host/typert-host.d.ts",
+      "default": "./lib/typert.host.js"
+    },
+    "./remote": {
+      "types": "./lib/types/shared/typert-remote.d.ts",
+      "default": "./lib/typert.remote-client.js"
+    },
+    "./client": {
+      "types": "./lib/types/client/index.d.ts",
+      "default": "./lib/client.js"
+    },
+    "./backlinks": {
+      "types": "./lib/types/host/backlinks/index.d.ts",
+      "default": "./lib/backlinks.js"
+    },
+    "./backlinks/locale/*.json": "./locale/backlinks/*.json",
+    "./supermanager": {
+      "types": "./lib/types/host/supermanager/index.d.ts",
+      "default": "./lib/supermanager.js"
+    },
+    "./supermanager/locale/*.json": "./locale/supermanager/*.json",
+    "./cloud-mail": {
+      "types": "./lib/types/host/cloud-mail/index.d.ts",
+      "default": "./lib/cloud-mail.js"
+    },
+    "./cloud-mail/locale/*.json": "./locale/cloud-mail/*.json",
+    "./tool-backlinks": {
+      "types": "./lib/types/host/tool-backlinks/index.d.ts",
+      "default": "./lib/tool-backlinks.js"
+    },
+    "./tool-backlinks/locale/*.json": "./locale/tool-backlinks/*.json",
+    "./browser": {
+      "types": "./lib/types/host/browser/index.d.ts",
+      "default": "./lib/browser.js"
+    },
+    "./browser/locale/*.json": "./locale/browser/*.json",
+    "./browser-playwright": {
+      "types": "./lib/types/host/browser-playwright/index.d.ts",
+      "default": "./lib/browser-playwright.js"
+    },
+    "./browser-playwright/locale/*.json": "./locale/browser-playwright/*.json",
+    "./tool-browser": {
+      "types": "./lib/types/host/tool-browser/index.d.ts",
+      "default": "./lib/tool-browser.js"
+    },
+    "./tool-browser/locale/*.json": "./locale/tool-browser/*.json",
+    "./skill-backlinks": {
+      "types": "./lib/types/host/skill-backlinks/index.d.ts",
+      "default": "./lib/skill-backlinks.js"
+    },
+    "./skill-backlinks/locale/*.json": "./locale/skill-backlinks/*.json",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "skills",
+    "scripts/ensure-profile-settings.mjs",
+    "profile-settings.yml",
+    "cordis.patch.yml",
+    "locale",
+    "icon.svg",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-plugin-manager",
+        "@deepseek-ai/dsh-api-session-controller",
+        "@deepseek-ai/dsh-api-workspace-controller"
+      ]
+    }
+  },
+  "scripts": {
+    "clean": "node -e \"import('node:fs').then(fs => fs.rmSync('lib', { recursive: true, force: true }))\"",
+    "typecheck": "tsc -p tsconfig.host.json --noEmit && tsc -p tsconfig.client.json --noEmit",
+    "build:types": "tsc -p tsconfig.host.json && tsc -p tsconfig.client.json",
+    "build:bundle": "tsdown --config tsdown.config.ts",
+    "build": "pnpm run clean && pnpm run build:types && pnpm run build:bundle",
+    "test": "vitest run",
+    "init-models": "node ./scripts/ensure-profile-settings.mjs"
+  },
+  "dependencies": {
+    "playwright-core": "^1.50.0",
+    "zod": "^4.4.3"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-agent-preset": "*",
+    "@deepseek-ai/dsh-command-compact": "*",
+    "@deepseek-ai/dsh-compaction-basic": "*",
+    "@deepseek-ai/dsh-compaction-tool-result-pruner": "*",
+    "@deepseek-ai/dsh-home-paths": "*",
+    "@deepseek-ai/dsh-launch-environment": "*",
+    "@deepseek-ai/dsh-llm": "*",
+    "@deepseek-ai/dsh-persona": "*",
+    "@deepseek-ai/dsh-skill": "*",
+    "@deepseek-ai/dsh-skill-filesystem": "*",
+    "@deepseek-ai/dsh-system-prompt": "*",
+    "@deepseek-ai/dsh-time-context": "*",
+    "@deepseek-ai/dsh-tool-ask-user": "*",
+    "@deepseek-ai/dsh-tool-bash": "*",
+    "@deepseek-ai/dsh-tool-fs": "*",
+    "@deepseek-ai/dsh-tool-fs-search": "*",
+    "@deepseek-ai/dsh-tool-jobs": "*",
+    "@deepseek-ai/dsh-tool-present": "*",
+    "@deepseek-ai/dsh-tool-pwsh": "*",
+    "@deepseek-ai/dsh-tool-schedule": "*",
+    "@deepseek-ai/dsh-tool-skill": "*",
+    "@deepseek-ai/dsh-tool-subagent": "*",
+    "@deepseek-ai/dsh-tool-subagent-control": "*",
+    "@deepseek-ai/dsh-tool-todo": "*",
+    "@deepseek-ai/dsh-tool-web": "*",
+    "@deepseek-ai/dsh-tool-workflow": "*",
+    "@deepseek-ai/dsh-tools": "*",
+    "@deepseek-ai/dsh-typert-protocol": "*",
+    "@deepseek-ai/dsh-workflow-ptc": "*",
+    "@deepseek-ai/schemastery": "*"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": { "optional": true },
+    "@deepseek-ai/dsh-agent-preset": { "optional": true },
+    "@deepseek-ai/dsh-command-compact": { "optional": true },
+    "@deepseek-ai/dsh-compaction-basic": { "optional": true },
+    "@deepseek-ai/dsh-compaction-tool-result-pruner": { "optional": true },
+    "@deepseek-ai/dsh-home-paths": { "optional": true },
+    "@deepseek-ai/dsh-launch-environment": { "optional": true },
+    "@deepseek-ai/dsh-llm": { "optional": true },
+    "@deepseek-ai/dsh-persona": { "optional": true },
+    "@deepseek-ai/dsh-skill": { "optional": true },
+    "@deepseek-ai/dsh-skill-filesystem": { "optional": true },
+    "@deepseek-ai/dsh-system-prompt": { "optional": true },
+    "@deepseek-ai/dsh-time-context": { "optional": true },
+    "@deepseek-ai/dsh-tool-ask-user": { "optional": true },
+    "@deepseek-ai/dsh-tool-bash": { "optional": true },
+    "@deepseek-ai/dsh-tool-fs": { "optional": true },
+    "@deepseek-ai/dsh-tool-fs-search": { "optional": true },
+    "@deepseek-ai/dsh-tool-jobs": { "optional": true },
+    "@deepseek-ai/dsh-tool-present": { "optional": true },
+    "@deepseek-ai/dsh-tool-pwsh": { "optional": true },
+    "@deepseek-ai/dsh-tool-schedule": { "optional": true },
+    "@deepseek-ai/dsh-tool-skill": { "optional": true },
+    "@deepseek-ai/dsh-tool-subagent": { "optional": true },
+    "@deepseek-ai/dsh-tool-subagent-control": { "optional": true },
+    "@deepseek-ai/dsh-tool-todo": { "optional": true },
+    "@deepseek-ai/dsh-tool-web": { "optional": true },
+    "@deepseek-ai/dsh-tool-workflow": { "optional": true },
+    "@deepseek-ai/dsh-tools": { "optional": true },
+    "@deepseek-ai/dsh-typert-protocol": { "optional": true },
+    "@deepseek-ai/dsh-workflow-ptc": { "optional": true },
+    "@deepseek-ai/schemastery": { "optional": true }
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.5",
+    "@deepseek-ai/dsh-api-remotes": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-api-session-controller": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-api-workspace-controller": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-locale": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-store": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-conversation": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-layout": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-plugin-manager": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-renderer": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-settings": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-sidebar": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-slots": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-client-ui-workspace": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-home-paths": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-launch-environment": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-llm": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-skill": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-skill-filesystem": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-system-prompt": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-tools": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-typert-protocol": "0.2.1-rc.2",
+    "@deepseek-ai/schemastery": "3.18.5",
+    "@types/node": "^22.15.0",
+    "@types/react": "~18.3.1",
+    "lightningcss": "^1.30.1",
+    "react": "^18.2.0",
+    "tsdown": "^0.22.2",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Supermanager Batch Source",
+    "description": "HTTP client for Supermanager /api/agent/* batches, leases, item results, badges, and source tags."
+  }
+}

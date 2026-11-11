@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Supermanager 批次工作源",
+    "description": "对接外链管理后台 /api/agent/* 接口（批次查询、租约保活、结果回写、徽标与自动打标）。"
+  }
+}

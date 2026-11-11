@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Cloud-mail Verification Mailbox",
+    "description": "Creates verification mailboxes and polls incoming verification codes and links."
+  }
+}

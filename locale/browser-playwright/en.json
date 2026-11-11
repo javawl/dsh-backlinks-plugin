@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Playwright Persistent Chrome",
+    "description": "Launches real Google Chrome offscreen over a persistent profile directory."
+  }
+}

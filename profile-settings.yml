@@ -1,0 +1,20 @@
+# 默认可选模型路由预置文件（通过 pnpm run init-models [profile] 按需写入目标 profile 的 cordis.patch.yml）
+- id: agent-default-model
+  config:
+    provider: newapi
+    model: grok-4.6
+
+- id: llm-pi-ai
+  name: '@deepseek-ai/dsh-llm-pi-ai'
+  config:
+    providers:
+      newapi:
+        apiKeyEnv: NEWAPI_API_KEY
+        api: openai-completions
+        baseURL: https://newapi.code0.vip/v1
+        models:
+          - id: gemini-3.7-flash-high
+          - id: grok-4.6
+          - id: gpt-5.6-sol
+          - id: gpt-5.6-terra
+          - id: gpt-5.6-luna

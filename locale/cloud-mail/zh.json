@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Cloud-mail 验证邮箱",
+    "description": "自动创建验证邮箱并轮询提取验证码与激活链接。"
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Playwright 真机 Chrome 驱动",
+    "description": "基于持久化 Chrome Profile 静默运行，支持跨会话保留 Google 登录态与人工召回。"
+  }
+}
