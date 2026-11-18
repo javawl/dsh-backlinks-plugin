@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Browser Tool",
-    "description": "Model-facing browser automation tool with ARIA snapshots, semantic selectors, and closeBrowser."
+    "description": "Browser automation with text, ARIA and interactive snapshots. Interactive snapshots show icon-only sign-in controls, iframe evidence and click targets."
   }
 }

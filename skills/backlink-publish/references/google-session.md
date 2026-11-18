@@ -7,13 +7,25 @@
 
 ## 批次执行中的决策树
 
-遇登录墙 → `browser snapshot` 看页面：
+遇登录墙 → 打开实际登录/注册面板（异步挂载时先等控件出现），然后必须跑 `browser snapshot format=interactive`。
 
-1. 有 Google 按钮 → 先 `browser navigate` 到 `https://accounts.google.com` 确认会话（检查完 navigate 回站点登录页）：
+| 控件形态 | text | aria | interactive 的证据 |
+| --- | --- | --- | --- |
+| 仅图片的链接 | 无文字 | 可能从图片 alt 得到名称（本项目实测可以） | 图片 alt/src、href |
+| 仅 SVG 的暗色按钮 | 无文字 | 可能只有无名 button | class、id、data 属性、SVG 标记 |
+| 仅 CSS 背景图的链接 | 无文字 | 可能无元素 | 背景图 URL |
+| Google Identity Services iframe | 无文字 | 可能只有无名 iframe | iframe 的 src |
+
+**硬纪律：** 只有登录界面已渲染且 interactive 快照完整时，才按 `sign-in candidates:` 判断是否找到 Google 入口。`signin=google?` 也是 Google 候选；不要因 text/aria 没有名字就判无入口。输出截断或存在无身份痕迹的图标时，先重新采集或用截图核对。
+
+**English:** On login walls, open the login panel and run `snapshot format=interactive`. Use its complete `sign-in candidates:` line; count `signin=google?` as Google. If the report is truncated or shows anonymous icons, inspect them before deciding. Text and ARIA alone cannot rule out a sign-in entry.
+
+1. 候选有 `google` → 先 `browser navigate` 到 `https://accounts.google.com` 确认会话（检查完 navigate 回站点登录页，再取快照定位）：
    - 已登录 → 回站点点 Google 按钮 → 选账号（单账号常直接跳过选择器）→ 授权页 Allow → 跳回继续。OAuth 若新开窗口，活动页自动切到新页；跳回后如需回到原站，navigate 回去即可。
-   - 未登录 → 回写 `failed + manual_required`，failureReason 写明"谷歌会话未初始化或已过期，请说『初始化谷歌会话』"，保留标签页。
+   - 无唯一 `css=` 时用 `xy:<x>,<y>`；标记 `(scroll first)` 就先滚动再取快照。若 Google 控件是 iframe，按需用 `frame(<iframe css>)>>` 定位框内按钮。
+   - 未登录 → 有邮箱注册时走下一步；仅有 Google 登录时才回写 `failed + manual_required`，failureReason 写明"谷歌会话未初始化或已过期，请说『初始化谷歌会话』"，保留标签页。
    - Google 弹"确认是你本人"/二次验证/设备验证 → 回写 `manual_required` 等人工处理；用户处理一次后该授权通常不再出现。
-2. 有邮箱注册 → 走 mailbox_create/mail_wait 流程（本技能主流程第 3 步）。
+2. 有邮箱注册 → 走 mailbox_create/mail_wait 流程（本技能单条目循环第 5 步）。
 3. 只有 CAPTCHA → 现有人工兜底。
 
 ## 初始化 / 检查（触发词：初始化谷歌会话、登录谷歌、检查谷歌会话）

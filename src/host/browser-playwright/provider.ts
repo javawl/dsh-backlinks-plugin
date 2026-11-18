@@ -12,6 +12,7 @@ import type {
   BrowserSession,
 } from '../browser/index.ts'
 import { BrowserError } from '../browser/index.ts'
+import { parseControlReport, renderPageControls, VISIBLE_CONTROLS_SCRIPT } from './interactive.ts'
 
 export const PLAYWRIGHT_BROWSER_PROVIDER_ID = 'playwright'
 export const DEFAULT_SNAPSHOT_MAX_CHARS = 60_000
@@ -177,12 +178,19 @@ class PlaywrightSession implements BrowserSession {
         }
         case 'snapshot': {
           const { page, ref } = await this.requirePage(command.page)
+          const maxChars = command.maxChars ?? this.defaultMaxChars
           if (command.format === 'aria') {
             const tree = await page.locator(command.selector ?? 'body').ariaSnapshot()
-            const { text, truncated } = truncate(tree, command.maxChars ?? this.defaultMaxChars)
+            const { text, truncated } = truncate(tree, maxChars)
             return { kind: 'page', page: ref, url: page.url(), title: await page.title(), text, truncated }
           }
-          return await this.pageResult(page, ref, command.maxChars ?? this.defaultMaxChars, command.selector)
+          if (command.format === 'interactive') {
+            const report = parseControlReport(await page.evaluate<unknown>(VISIBLE_CONTROLS_SCRIPT))
+            const title = await page.title()
+            const { text, truncated } = truncate(renderPageControls(title, report), maxChars)
+            return { kind: 'page', page: ref, url: page.url(), title, text, truncated: truncated || report.truncated }
+          }
+          return await this.pageResult(page, ref, maxChars, command.selector)
         }
         case 'click': {
           const { page } = await this.requirePage(command.page)

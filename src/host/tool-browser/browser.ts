@@ -7,7 +7,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { GenericCallView, GenericResultView, ToolResult } from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import { assertNever, type JsonValue } from '../../shared/backlinks-types.ts'
-import type { BrowserCommand, BrowserResult } from '../browser/index.ts'
+import type { BrowserCommand, BrowserResult, BrowserSnapshotCommand } from '../browser/index.ts'
 
 const ACTIONS = [
   'navigate', 'snapshot', 'click', 'fill', 'select', 'press',
@@ -41,12 +41,14 @@ export function parseBrowserArgs(args: Record<string, unknown>): BrowserCommand 
       if (target === undefined) throw new Error('browser navigate requires an http(s) url.')
       return addressed({ kind: 'navigate', url: target, ...(waitUntil === undefined ? {} : { waitUntil }) })
     }
-    case 'snapshot':
+    case 'snapshot': {
+      const format = readSnapshotFormat(args.format)
       return addressed({
         kind: 'snapshot',
         ...(selector === undefined ? {} : { selector }),
-        ...(args.format === 'aria' ? { format: 'aria' as const } : {}),
+        ...(format === undefined ? {} : { format }),
       })
+    }
     case 'click':
       if (selector === undefined) throw new Error('browser click requires a selector.')
       return addressed({ kind: 'click', selector })
@@ -89,6 +91,11 @@ export function parseBrowserArgs(args: Record<string, unknown>): BrowserCommand 
     default:
       return assertNever(action as never, `browser action must be one of ${ACTIONS.join(', ')}.`)
   }
+}
+
+function readSnapshotFormat(value: unknown): BrowserSnapshotCommand['format'] {
+  if (value === undefined || value === 'text' || value === 'aria' || value === 'interactive') return value
+  throw new Error('browser format must be text, aria, or interactive.')
 }
 
 function readSelector(value: unknown): string | undefined {
@@ -147,9 +154,8 @@ export function formatBrowserOutput(result: BrowserResult, maxChars: number): st
   switch (result.kind) {
     case 'page': {
       const header = `[page ${result.page}] ${result.title}\n${result.url}`
-      const body = result.text.length > maxChars
-        ? `${result.text.slice(0, maxChars)}\n… (truncated)`
-        : result.text
+      const truncated = result.truncated || result.text.length > maxChars
+      const body = result.text.slice(0, maxChars) + (truncated ? '\n… (truncated)' : '')
       return `${header}\n\n${body}`
     }
     case 'acked':
@@ -215,10 +221,12 @@ export function applyBrowserTool(ctx: Context, timeoutMs: number, maxOutputChars
     text: [
       'Use the browser tool to drive one shared, persistent real-browser session across tabs.',
       'Tabs: navigate returns a page ref like p2; pass that page on every later command for the tab you are working. Work several sites in parallel by giving each its own ref. Omit page only for single-tab serial work.',
-      'Selectors address semantically first: role:<role>|<name> (for example role:button|Submit), label:<text>, placeholder:<text>, text:<text>, or bare CSS as fallback; prefix frame(<iframe css>)>> to reach inside an iframe; click also takes xy:<x>,<y> viewport coordinates from a screenshot.',
+      'Selectors address semantically first: role:<role>|<name> (for example role:button|Submit), label:<text>, placeholder:<text>, text:<text>, or bare CSS as fallback; prefix frame(<iframe css>)>> to reach inside an iframe; click also takes xy:<x>,<y> viewport coordinates from a screenshot or interactive snapshot.',
       'Prefer snapshot with format=aria to read element roles and names, then address them by role/label/placeholder — far more reliable than guessing CSS.',
+      'Icon-only sign-in controls may have no text or accessible name: Google/Facebook/GitHub sign-in may be an unnamed link or button, or an accounts.google.com/gsi iframe. Run snapshot with format=interactive on sign-in or registration pages and when a header or footer looks empty. It reports image alt/src, href, class/id, other DOM evidence, sign-in candidates, and click targets (pass css as the selector, or use xy:<x>,<y>; scroll and resnapshot if marked scroll first).',
+      'Use sign-in candidates from a complete interactive snapshot to determine whether a provider was found; never infer absence from text or aria. Treat signin=google? as a Google candidate too. If the snapshot is truncated or icons have no identifying evidence, investigate before declaring there is no Google entry.',
       'The window may run offscreen; when a human must step in (CAPTCHA, login), call bringToFront first so the window surfaces.',
-      'Actions: navigate (absolute http(s) url), snapshot (url/title/text of the page or a selector), click/fill/select (CSS selector; fill and select need value), press (key like Enter), upload (selector + files), screenshot (PNG base64), waitFor (selector or url), closePage, closeBrowser.',
+      'Actions: navigate (absolute http(s) url), snapshot (format text|aria|interactive), click/fill/select (selector; fill and select need value), press (key like Enter), upload (selector + files), screenshot (PNG base64), waitFor (selector or url), closePage, closeBrowser.',
       'closeBrowser ends the whole browser session; cookies and logins persist in the profile and the next command relaunches it. Use it once browser work is done and no parked tab is waiting for a human, so the browser does not idle on memory.',
       'The session persists cookies and logins across calls and runs; prefer it for sites that need JavaScript, logins, or form submission. Confirm outcomes with snapshot or waitFor after state-changing actions.',
     ].join(' '),
@@ -247,7 +255,7 @@ export function applyBrowserTool(ctx: Context, timeoutMs: number, maxOutputChars
       },
       format: {
         type: 'string',
-        description: 'snapshot capture shape: text (visible text) or aria (accessibility tree with roles and names).',
+        description: 'Snapshot format: text (visible text), aria (roles and accessible names), or interactive (page-wide DOM evidence and click targets for icon-only buttons and iframes without visible text or accessible names).',
       },
       value: {
         type: 'string',

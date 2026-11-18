@@ -123,6 +123,17 @@ describe('@javawl/dsh-backlinks-bundle standalone unit checks', () => {
     await ctx.fiber.dispose()
   })
 
+  it('validates snapshot formats and surfaces provider truncation', () => {
+    expect(parseBrowserArgs({ action: 'snapshot' })).toEqual({ kind: 'snapshot' })
+    for (const format of ['text', 'aria', 'interactive']) {
+      expect(parseBrowserArgs({ action: 'snapshot', format, page: 'p1' })).toEqual({ kind: 'snapshot', format, page: 'p1' })
+    }
+    expect(() => parseBrowserArgs({ action: 'snapshot', format: 'html' })).toThrow('browser format must be text, aria, or interactive.')
+    const result = { kind: 'page', page: 'p1', url: 'https://example.com', title: 'Login', text: 'abcdef' } as const
+    expect(formatBrowserOutput({ ...result, truncated: true }, 30)).toContain('abcdef\n… (truncated)')
+    expect(formatBrowserOutput({ ...result, truncated: false }, 3)).toContain('abc\n… (truncated)')
+  })
+
   it('loads built ESM lib/index.js directly under Node with lowered @Remote decorators', async () => {
     const mod = await import('../lib/index.js')
     const ctx = new Context()

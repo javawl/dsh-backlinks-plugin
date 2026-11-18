@@ -1,0 +1,24 @@
+<!doctype html>
+<title>Sign in to submit</title>
+<style>
+  body { margin: 0 }
+  body > a, button, iframe, footer a { position: absolute; box-sizing: border-box; width: 40px; height: 40px }
+  a.gbtn { left: 20px; top: 20px }
+  button.google-dark { left: 80px; top: 20px }
+  #gbg { left: 140px; top: 20px; background-image: url(/img/google_dark.svg) }
+  iframe { left: 200px; top: 20px }
+  footer a { width: 160px; top: 100px }
+  footer a + a { left: 180px }
+  form button { left: 280px; top: 900px }
+  #anonymous { left: 260px; top: 20px }
+</style>
+<a class="gbtn" href="/oauth/google"><img width="20" height="20" alt="Sign in with Google" src="/g.png"></a>
+<button class="google-dark" aria-label="" onclick="this.textContent='Activated'"><svg width="20" height="20"></svg></button>
+<a id="gbg"></a>
+<iframe src="https://accounts.google.com/gsi/button?client_id=x"></iframe>
+<footer>
+  <a href="https://play.google.com/store/apps">Get it on Google Play</a>
+  <a href="https://twitter.com/intent/tweet">Share on Twitter</a>
+</footer>
+<form action="/signup"><input type="email"><input type="password"><button>Log in</button></form>
+<button id="anonymous" class="dark" aria-label=""><svg width="20" height="20"></svg></button>

@@ -30,8 +30,10 @@ export interface BrowserNavigateCommand extends BrowserPageAddress {
 
 export interface BrowserSnapshotCommand extends BrowserPageAddress {
   readonly kind: 'snapshot'
+  /** Scope text/aria to a selector; interactive always inspects the whole page. */
   readonly selector?: string
-  readonly format?: 'text' | 'aria'
+  /** Interactive exposes icon-only controls, sign-in evidence, and click targets. */
+  readonly format?: 'text' | 'aria' | 'interactive'
   readonly maxChars?: number
 }
 

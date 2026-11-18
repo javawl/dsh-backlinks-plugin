@@ -87,3 +87,27 @@ pnpm install
 pnpm run build
 pnpm run test
 ```
+
+## 浏览器快照 / Browser snapshots
+
+遇到登录墙，打开登录/注册面板后调用 `browser`：
+
+```json
+{"action":"snapshot","format":"interactive","page":"p1"}
+```
+
+`text` 读可见文字，`aria` 读角色和无障碍名称，`interactive` 检查整页，额外列出图片、CSS 背景、iframe 和点击定位。查 Google 入口时看完整快照的 `sign-in candidates:`；`signin=google?` 也算候选。点击时把 `css=` 后的值传给 `selector`，没有唯一 CSS 就用 `xy:<x>,<y>`；标记 `(scroll first)` 的控件先滚动再取快照。匿名资源（如 `/static/a3f9.svg`）只会列为图标，需查看截图确认；面板还没出现或快照截断时，先复查再下结论。
+
+For login walls, run the interactive snapshot above after opening the sign-in panel. Unlike `text` or `aria`, it includes image, background, and iframe evidence even when no accessible name is present. Read `sign-in candidates:` on the complete report and count `signin=google?` as a Google candidate. Click using the reported CSS or `xy:<x>,<y>`; scroll and resnapshot when marked. Inspect anonymous icons visually and recheck reports taken before the panel rendered or marked truncated.
+
+```text
+interactive: 8 visible controls on "Sign in to submit" (1 form, password field: yes ×1, email field: yes ×1, mailto links: ×0)
+sign-in candidates: google ×4
+#1 link "Sign in with Google" signin=google css=a.gbtn xy=40,40 alt="Sign in with Google" href=/oauth/google src=/g.png cls=gbtn
+#2 button (icon only) signin=google? css=button.google-dark xy=100,40 cls=google-dark
+#3 link (icon only) signin=google? css=#gbg xy=160,40 id=gbg bg=/img/google_dark.svg
+#4 iframe signin=google css=iframe xy=220,40 src=https://accounts.google.com/gsi/button?client_id=x
+…
+```
+
+复现 Chrome 回归测试 / Run the regression with locally installed Chrome: `DSH_TEST_CHROME=1 pnpm test`。
