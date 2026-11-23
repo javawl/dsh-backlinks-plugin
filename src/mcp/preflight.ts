@@ -18,7 +18,7 @@ import {
 import { collectPublishedSourceIds, isPublishedItem } from '../host/backlinks/validation.ts'
 import type { FetchLike, SleepLike } from './backlinks-tool.ts'
 
-const MAX_PREFLIGHT_BODY_BYTES = 32_768
+const MAX_PREFLIGHT_BODY_BYTES = 65_536
 const RETRY_5XX_DELAY_MS = 200
 
 const PARKING_HOST_SUFFIXES = [
@@ -100,6 +100,27 @@ export type PreflightRetryableReason = 'timeout' | 'http_408' | 'http_429' | 'ne
 
 export type WafProvider = 'cloudfront' | 'cloudflare' | 'waf'
 
+export type PreflightSiteHint =
+  | 'wordpress_comment'
+  | 'wix_blog'
+  | 'comments_closed_hint'
+  | 'directory_or_form'
+  | 'other'
+
+export interface PreflightRunnableItem {
+  readonly itemId: number
+  readonly domain: string
+  readonly siteHint: PreflightSiteHint
+}
+
+export interface PreflightHeldForManualItem {
+  readonly id: number
+  readonly sourceId: number
+  readonly host: string
+  readonly matchedTags: readonly string[]
+  readonly reason: 'already_tagged_waf_403' | 'already_tagged_soft_block'
+}
+
 export interface PreflightTaggedBlockedItem {
   readonly id: number
   readonly sourceId: number
@@ -153,6 +174,8 @@ export interface BatchPreflightOptions {
   readonly concurrency?: number
   readonly autoSkip?: boolean
   readonly autoSkipTagged?: boolean
+  readonly skipSoftTagged?: boolean
+  readonly autoFailWaf?: boolean
   readonly skipTags?: readonly string[]
   readonly retry5xx?: number
   readonly itemIds?: readonly number[]
@@ -164,6 +187,7 @@ export interface BatchPreflightResult {
   readonly summary: string
   readonly skippedDeadItemIds: readonly number[]
   readonly skippedTaggedItemIds: readonly number[]
+  readonly failedWafItemIds: readonly number[]
   readonly data: {
     readonly batchId: number
     readonly batchName: string
@@ -173,17 +197,25 @@ export interface BatchPreflightResult {
       readonly considered: number
       readonly alreadyPublished: number
       readonly taggedBlocked: number
+      readonly heldForManual: number
       readonly probed: number
       readonly runnable: number
       readonly dead: number
       readonly wafBlocked: number
       readonly retryable: number
       readonly autoSkipped: number
+      readonly autoFailedWaf: number
     }
     readonly publishedSourceIds: readonly number[]
     readonly runnableItemIds: readonly number[]
+    readonly runnableItems: readonly PreflightRunnableItem[]
     readonly cautionItems?: readonly PreflightCautionItem[]
     readonly taggedBlocked?: readonly PreflightTaggedBlockedItem[]
+    readonly heldForManual?: readonly PreflightHeldForManualItem[]
+    readonly skippedByTag?: {
+      readonly hardItemIds: readonly number[]
+      readonly softItemIds: readonly number[]
+    }
     readonly deadItems?: readonly PreflightDeadItem[]
     readonly wafBlocked?: readonly PreflightWafItem[]
     readonly retryableItems?: readonly PreflightRetryableItem[]
@@ -196,11 +228,16 @@ export interface BatchPreflightResult {
       readonly downgradeNotice?: string
       readonly errors?: readonly PreflightAutoSkipError[]
     }
+    readonly autoFailWafResult?: {
+      readonly failedItemIds: readonly number[]
+      readonly taggedSourceIds?: readonly number[]
+      readonly errors?: readonly PreflightAutoSkipError[]
+    }
   }
 }
 
 type ProbeOutcome =
-  | { readonly kind: 'alive'; readonly httpStatus: number }
+  | { readonly kind: 'alive'; readonly httpStatus: number; readonly siteHint: PreflightSiteHint }
   | { readonly kind: 'dead'; readonly reason: PreflightDeadReason; readonly httpStatus?: number; readonly detail?: string }
   | { readonly kind: 'waf_403'; readonly provider: WafProvider }
   | { readonly kind: 'retryable'; readonly reason: PreflightRetryableReason; readonly httpStatus?: number; readonly detail?: string }
@@ -364,6 +401,61 @@ function detectParkedOrSuspended(finalUrl: string, headers: Headers, body: strin
   return undefined
 }
 
+const COMMENTS_CLOSED_HINT_PATTERN =
+  /comments\s+are\s+closed|commenting\s+(?:is|has\s+been)\s+closed|comments\s+(?:have\s+been\s+)?disabled|评论已关闭|评论功能已关闭|已关闭评论/iu
+const DIRECTORY_URL_PATTERN =
+  /\/(submit|add-site|add-tool|add-listing|submit-site|submit-tool|suggest)(?:[/?#]|$)/iu
+const SUBMIT_LINK_PATTERN = /<a\b[^>]*href\s*=\s*["'][^"']*\/submit(?:[/?#"']|$)/iu
+
+function hasNonSearchForm(body: string): boolean {
+  const formRegex = /<form\b([^>]*)>/giu
+  let match: RegExpExecArray | null
+  while ((match = formRegex.exec(body)) !== null) {
+    const attrs = match[1] ?? ''
+    const isSearchRole = /\brole\s*=\s*["']search["']/iu.test(attrs)
+    const isSearchAction = /\baction\s*=\s*["'][^"']*search[^"']*["']/iu.test(attrs)
+    const isSearchIdent = /\b(?:id|class)\s*=\s*["'][^"']*search[^"']*["']/iu.test(attrs)
+      && !/\bmethod\s*=\s*["']post["']/iu.test(attrs)
+    if (!isSearchRole && !isSearchAction && !isSearchIdent) {
+      return true
+    }
+  }
+  return false
+}
+
+/** Extract a lightweight site-type hint from a single HTTP preflight response (0 Chrome cost). */
+export function detectSiteHint(finalUrl: string, headers: Headers, body: string): PreflightSiteHint {
+  if (
+    /wp-comments-post\.php/iu.test(body)
+    || /\bid\s*=\s*["']commentform["']/iu.test(body)
+    || (/<textarea\b[^>]*\bname\s*=\s*["']comment["']/iu.test(body) && /comment_post_ID|wp-content|wordpress/iu.test(body))
+  ) {
+    return 'wordpress_comment'
+  }
+
+  if (
+    headers.has('x-wix-request-id')
+    || /wixstatic\.com|wix-warmup-data|_wixCIDX|static\.parastorage\.com/iu.test(body)
+  ) {
+    return 'wix_blog'
+  }
+
+  const visibleText = body
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/giu, ' ')
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/giu, ' ')
+    .replace(/<[^>]+>/gu, ' ')
+    .replace(/\s+/gu, ' ')
+  if (COMMENTS_CLOSED_HINT_PATTERN.test(visibleText)) {
+    return 'comments_closed_hint'
+  }
+
+  if (DIRECTORY_URL_PATTERN.test(finalUrl) || SUBMIT_LINK_PATTERN.test(body) || hasNonSearchForm(body)) {
+    return 'directory_or_form'
+  }
+
+  return 'other'
+}
+
 function detectWafProvider(headers: Headers, body: string): WafProvider {
   const server = (headers.get('server') ?? '').toLowerCase()
   const via = (headers.get('via') ?? '').toLowerCase()
@@ -498,7 +590,11 @@ async function probeItemUrl(
     if (response.status === 429) {
       return { kind: 'retryable', reason: 'http_429', httpStatus: 429 }
     }
-    return { kind: 'alive', httpStatus: response.status }
+    return {
+      kind: 'alive',
+      httpStatus: response.status,
+      siteHint: detectSiteHint(finalUrl, response.headers, body),
+    }
   }
 
   return { kind: 'retryable', reason: 'network_error', detail: 'probe exhausted' }
@@ -751,6 +847,116 @@ async function applyAutoSkips(
   }
 }
 
+interface AutoFailWafEntry {
+  readonly itemId: number
+  readonly sourceId: number
+  readonly failureReason: string
+  readonly needsTag: boolean
+}
+
+async function applyAutoFailWaf(
+  batchSource: BacklinkBatchSourceProvider,
+  batchId: number,
+  entries: readonly AutoFailWafEntry[],
+  signal?: AbortSignal,
+): Promise<{
+  readonly failedItemIds: readonly number[]
+  readonly taggedSourceIds: readonly number[]
+  readonly errors: readonly PreflightAutoSkipError[]
+}> {
+  if (entries.length === 0) {
+    return { failedItemIds: [], taggedSourceIds: [], errors: [] }
+  }
+
+  const failedItemIds: number[] = []
+  const taggedSourceIds: number[] = []
+  const errors: PreflightAutoSkipError[] = []
+
+  let startLeaseAt: number | undefined
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i]!
+    try {
+      await batchSource.reportItemResult(
+        entry.itemId,
+        { status: 'failed', failureMode: 'manual_required', failureReason: entry.failureReason },
+        signal,
+      )
+      failedItemIds.push(entry.itemId)
+    } catch (error) {
+      if (signal?.aborted) throw error
+      if (isLeaseRequiredError(error)) {
+        startLeaseAt = i
+        break
+      }
+      errors.push({
+        itemId: entry.itemId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+
+  if (startLeaseAt !== undefined) {
+    const remaining = entries.slice(startLeaseAt)
+    const remainingIds = remaining.map(entry => entry.itemId)
+    let leaseId: number | undefined
+    try {
+      const claim = await batchSource.claim(batchId, remainingIds, signal)
+      leaseId = claim.leaseId
+      const claimedIds = new Set(claim.items.map(item => item.id))
+      for (const entry of remaining) {
+        if (claimedIds.size > 0 && !claimedIds.has(entry.itemId)) {
+          errors.push({ itemId: entry.itemId, error: 'item was not included in ephemeral preflight lease' })
+          continue
+        }
+        try {
+          await batchSource.reportItemResult(
+            entry.itemId,
+            { status: 'failed', failureMode: 'manual_required', failureReason: entry.failureReason },
+            signal,
+          )
+          failedItemIds.push(entry.itemId)
+        } catch (error) {
+          if (signal?.aborted) throw error
+          errors.push({
+            itemId: entry.itemId,
+            error: error instanceof Error ? error.message : String(error),
+          })
+        }
+      }
+    } catch (error) {
+      if (signal?.aborted) throw error
+      const message = error instanceof Error ? error.message : String(error)
+      for (const entry of remaining) {
+        errors.push({ itemId: entry.itemId, error: `ephemeral claim failed: ${message}` })
+      }
+    } finally {
+      if (leaseId !== undefined) {
+        await batchSource.release(leaseId, signal).catch(() => undefined)
+      }
+    }
+  }
+
+  const tagSourceIds = new Set<number>()
+  for (const entry of entries) {
+    if (entry.needsTag) tagSourceIds.add(entry.sourceId)
+  }
+  for (const sourceId of tagSourceIds) {
+    try {
+      await batchSource.tagSource(sourceId, ['waf_403'], signal)
+      taggedSourceIds.push(sourceId)
+    } catch (error) {
+      if (signal?.aborted) throw error
+      const relatedItem = entries.find(entry => entry.needsTag && entry.sourceId === sourceId)
+      errors.push({
+        itemId: relatedItem?.itemId ?? sourceId,
+        error: `tagSource waf_403 failed for source ${sourceId}: ${error instanceof Error ? error.message : String(error)}`,
+      })
+    }
+  }
+
+  return { failedItemIds, taggedSourceIds, errors }
+}
+
 function formatDeadSkipReason(dead: PreflightDeadItem): string {
   const details = [dead.reason, ...(dead.httpStatus === undefined ? [] : [`HTTP ${dead.httpStatus}`])]
   if (dead.detail !== undefined && dead.detail.length > 0 && dead.reason === 'parked_or_suspended') {
@@ -769,6 +975,7 @@ export async function runBatchPreflight(
   const concurrency = options.concurrency ?? DEFAULT_PREFLIGHT_CONCURRENCY
   const autoSkip = options.autoSkip === true
   const autoSkipTagged = options.autoSkipTagged === true
+  const autoFailWaf = options.autoFailWaf === true
   const retry5xx = options.retry5xx ?? 1
 
   const publishedSourceIds = collectPublishedSourceIds(detail.items)
@@ -782,6 +989,7 @@ export async function runBatchPreflight(
 
   const alreadyPublishedItemIds: number[] = []
   const taggedBlocked: PreflightTaggedBlockedItem[] = []
+  const heldForManual: PreflightHeldForManualItem[] = []
   const probeQueue: Array<{ readonly item: BacklinkBatchItem; readonly url: string; readonly softTags: readonly string[] }> = []
 
   for (const item of candidates) {
@@ -804,6 +1012,23 @@ export async function runBatchPreflight(
       })
       continue
     }
+
+    const heldSoftTags = options.skipSoftTagged === true
+      ? tagMatch.soft
+      : options.skipSoftTagged === false
+        ? []
+        : tagMatch.soft.filter(tag => tag === 'waf_403')
+    if (heldSoftTags.length > 0) {
+      heldForManual.push({
+        id: item.id,
+        sourceId: item.sourceId,
+        host: item.sourceHost,
+        matchedTags: heldSoftTags,
+        reason: heldSoftTags.includes('waf_403') ? 'already_tagged_waf_403' : 'already_tagged_soft_block',
+      })
+      continue
+    }
+
     const targetUrl = item.submitUrl !== null && item.submitUrl.trim().length > 0
       ? item.submitUrl.trim()
       : item.sourceUrl.trim()
@@ -836,6 +1061,7 @@ export async function runBatchPreflight(
   )
 
   const runnableItemIds: number[] = []
+  const runnableItems: PreflightRunnableItem[] = []
   const cautionItems: PreflightCautionItem[] = []
   const deadItems: PreflightDeadItem[] = []
   const wafBlocked: PreflightWafItem[] = []
@@ -847,6 +1073,11 @@ export async function runBatchPreflight(
     switch (outcome.kind) {
       case 'alive':
         runnableItemIds.push(item.id)
+        runnableItems.push({
+          itemId: item.id,
+          domain: item.sourceHost,
+          siteHint: outcome.siteHint,
+        })
         if (softTags.length > 0) {
           cautionItems.push({
             id: item.id,
@@ -917,12 +1148,43 @@ export async function runBatchPreflight(
   const totalAutoSkipped = skipEffect.skippedDeadItemIds.length + skipEffect.skippedTaggedItemIds.length
   const combinedSkippedIds = [...skipEffect.skippedDeadItemIds, ...skipEffect.skippedTaggedItemIds]
 
-  const summary = `preflight batch ${detail.batch.id}: ${runnableItemIds.length} runnable, ${deadItems.length} dead, ${taggedBlocked.length} tagged-blocked, ${wafBlocked.length} waf_403, ${retryableItems.length} retryable (auto-skipped ${totalAutoSkipped})`
+  const wafFailEntries: AutoFailWafEntry[] = []
+  if (autoFailWaf) {
+    for (const waf of wafBlocked) {
+      wafFailEntries.push({
+        itemId: waf.id,
+        sourceId: waf.sourceId,
+        failureReason: `预检命中 WAF 403 拦截(${waf.provider})，需人工处理`,
+        needsTag: true,
+      })
+    }
+    for (const held of heldForManual) {
+      if (held.matchedTags.includes('waf_403')) {
+        wafFailEntries.push({
+          itemId: held.id,
+          sourceId: held.sourceId,
+          failureReason: '预检命中已有 waf_403 标签，避免重复入队，需人工处理',
+          needsTag: false,
+        })
+      }
+    }
+  }
+
+  const wafFailEffect = await applyAutoFailWaf(batchSource, detail.batch.id, wafFailEntries, signal)
+  const hardItemIds = taggedBlocked.map(entry => entry.id)
+  const softItemIds = heldForManual.map(entry => entry.id)
+
+  const summary = `preflight batch ${detail.batch.id}: ${runnableItemIds.length} runnable, ${deadItems.length} dead, ${taggedBlocked.length} tagged-blocked, ${wafBlocked.length} waf_403, ${retryableItems.length} retryable`
+    + (heldForManual.length > 0 ? `, ${heldForManual.length} held-manual` : '')
+    + ` (auto-skipped ${totalAutoSkipped}`
+    + (wafFailEffect.failedItemIds.length > 0 ? `, auto-failed-waf ${wafFailEffect.failedItemIds.length}` : '')
+    + ')'
 
   return {
     summary,
     skippedDeadItemIds: skipEffect.skippedDeadItemIds,
     skippedTaggedItemIds: skipEffect.skippedTaggedItemIds,
+    failedWafItemIds: wafFailEffect.failedItemIds,
     data: {
       batchId: detail.batch.id,
       batchName: detail.batch.name,
@@ -932,17 +1194,24 @@ export async function runBatchPreflight(
         considered: candidates.length,
         alreadyPublished: alreadyPublishedItemIds.length,
         taggedBlocked: taggedBlocked.length,
+        heldForManual: heldForManual.length,
         probed: probeQueue.length,
         runnable: runnableItemIds.length,
         dead: deadItems.length,
         wafBlocked: wafBlocked.length,
         retryable: retryableItems.length,
         autoSkipped: totalAutoSkipped,
+        autoFailedWaf: wafFailEffect.failedItemIds.length,
       },
       publishedSourceIds,
       runnableItemIds,
+      runnableItems,
       ...(cautionItems.length > 0 ? { cautionItems } : {}),
       ...(taggedBlocked.length > 0 ? { taggedBlocked } : {}),
+      ...(heldForManual.length > 0 ? { heldForManual } : {}),
+      ...(hardItemIds.length > 0 || softItemIds.length > 0
+        ? { skippedByTag: { hardItemIds, softItemIds } }
+        : {}),
       ...(deadItems.length > 0 ? { deadItems } : {}),
       ...(wafBlocked.length > 0 ? { wafBlocked } : {}),
       ...(retryableItems.length > 0 ? { retryableItems } : {}),
@@ -956,6 +1225,15 @@ export async function runBatchPreflight(
               ...(skipEffect.taggedSourceIds.length > 0 ? { taggedSourceIds: skipEffect.taggedSourceIds } : {}),
               ...(skipEffect.downgradeNotice === undefined ? {} : { downgradeNotice: skipEffect.downgradeNotice }),
               ...(skipEffect.errors.length > 0 ? { errors: skipEffect.errors } : {}),
+            },
+          }
+        : {}),
+      ...(autoFailWaf
+        ? {
+            autoFailWafResult: {
+              failedItemIds: wafFailEffect.failedItemIds,
+              ...(wafFailEffect.taggedSourceIds.length > 0 ? { taggedSourceIds: wafFailEffect.taggedSourceIds } : {}),
+              ...(wafFailEffect.errors.length > 0 ? { errors: wafFailEffect.errors } : {}),
             },
           }
         : {}),

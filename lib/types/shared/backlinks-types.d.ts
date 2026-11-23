@@ -172,6 +172,10 @@ export interface BacklinkTagResult {
         name: string;
         created: boolean;
     }[];
+    readonly degraded?: boolean;
+    readonly fallbackUsed?: boolean;
+    readonly warning?: string;
+    readonly sentTags?: readonly string[];
 }
 /** A created mailbox address. */
 export interface MailboxAddress {

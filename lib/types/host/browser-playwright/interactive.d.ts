@@ -23,6 +23,7 @@ interface Control {
     inViewport: boolean;
     hasImage: boolean;
     hasSvg: boolean;
+    inBoilerplate?: boolean;
 }
 interface PageControls {
     controls: Control[];
@@ -37,5 +38,7 @@ export declare function readSignIn(control: Control): {
     provider: string;
     strength: 'auth' | 'provider';
 } | undefined;
-export declare function renderPageControls(title: string, report: PageControls): string;
+export declare function renderPageControls(title: string, report: PageControls, options?: {
+    readonly compact?: boolean;
+}): string;
 export {};

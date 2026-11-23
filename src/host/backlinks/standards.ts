@@ -59,6 +59,68 @@ export const DEFAULT_CIRCUIT_BREAKER_THRESHOLD = 2
 const HARD_BLOCKING_TAG_SET = new Set<string>(HARD_BLOCKING_TAGS)
 const SOFT_BLOCKING_TAG_SET = new Set<string>(SOFT_BLOCKING_TAGS)
 
+/**
+ * Wire mapping for outbound Supermanager `/tags` / `/preflight-skip` requests.
+ * Live Supermanager currently rejects English `comments_closed` with HTTP 500,
+ * whereas Chinese `评论关闭` succeeds cleanly.
+ */
+export const SUPERMANAGER_WIRE_TAG_MAP: Readonly<Record<string, string>> = {
+  comments_closed: '评论关闭',
+}
+
+/**
+ * Safe Chinese fallback aliases used when live Supermanager returns HTTP 5xx
+ * for English canonical blocking tag names.
+ */
+export const SUPERMANAGER_SAFE_ZH_TAG_FALLBACK: Readonly<Record<string, string>> = {
+  paid_only: '付费',
+  no_form: '无表单',
+  dead_site: '死链',
+  has_captcha: '验证码',
+  waf_403: '有盾',
+  submitmatic_verify_fail: '徽标校验失败',
+  comments_closed: '评论关闭',
+}
+
+/** Map outbound source tags to Supermanager wire-compatible names (deduped). */
+export function mapTagsForSupermanagerWire(tags: readonly string[]): readonly string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const raw of tags) {
+    const trimmed = raw.trim()
+    if (trimmed.length === 0) continue
+    const mapped = SUPERMANAGER_WIRE_TAG_MAP[trimmed.toLowerCase()] ?? trimmed
+    if (!seen.has(mapped)) {
+      seen.add(mapped)
+      out.push(mapped)
+    }
+  }
+  return out
+}
+
+/** Map tags to safe Chinese aliases for Supermanager 5xx compatibility fallback. */
+export function mapTagsToSafeChineseFallback(tags: readonly string[]): readonly string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const raw of tags) {
+    const trimmed = raw.trim()
+    if (trimmed.length === 0) continue
+    const canonical = normalizeBlockingTag(trimmed)
+    const mapped = SUPERMANAGER_SAFE_ZH_TAG_FALLBACK[canonical] ?? trimmed
+    if (!seen.has(mapped)) {
+      seen.add(mapped)
+      out.push(mapped)
+    }
+  }
+  return out
+}
+
+/** Detect whether an error represents an HTTP 5xx response from Supermanager. */
+export function isSupermanager5xxError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  return /\bHTTP\s+5\d\d\b/iu.test(error.message)
+}
+
 /** Normalize a raw source tag name to its canonical blocking tag when known. */
 export function normalizeBlockingTag(raw: string): string {
   const trimmed = raw.trim()

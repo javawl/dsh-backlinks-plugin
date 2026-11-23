@@ -1,5 +1,7 @@
 # 博客评论（category: 博客）
 
+> **v2 确定性快路径优先**：常规 WordPress 与 Wix 博客请**直接调用 `browser action="comment_publish"`**（传入 `url`、`commentText`、`authorName`、`authorEmail`、`websiteUrl`、`anchorText`），1 次调用完成导航、滚底懒加载探测、关评/CAPTCHA 识别、填表提交与重载核验；仅当 `comment_publish` 返回 `needs_llm_fallback` 或需要登录注册时，再回退到下文手工勘察流程。遇评论关闭时直接打 `评论关闭`（或 `comments_closed`，客户端会自动映射为现网兼容标签）。
+
 在相关博客文章下留评论形成外链：表单有 Website 字段时填填写者主页 URL，没有时把链接嵌进评论正文。
 
 ## 流程

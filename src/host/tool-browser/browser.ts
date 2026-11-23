@@ -169,6 +169,8 @@ export function formatBrowserOutput(result: BrowserResult, maxChars: number): st
       return `screenshot captured (${result.pngBase64.length} base64 characters)`
     case 'probe':
       return `[page ${result.page}] ${result.title}\n${result.url}`
+    case 'comment_publish':
+      return `[page ${result.page}] comment_publish: ${result.outcome} (${result.siteType}) -> ${result.publicUrl ?? result.finalUrl}`
     default:
       return assertNever(result, 'unhandled browser result kind')
   }
@@ -304,6 +306,7 @@ export function applyBrowserTool(ctx: Context, timeoutMs: number, maxOutputChars
                   title: { type: 'string', required: true },
                   text: { type: 'string', required: true },
                   truncated: { type: 'boolean', required: true },
+                  compactSummary: { type: 'string' },
                 },
               },
               {
@@ -342,7 +345,7 @@ export function applyBrowserTool(ctx: Context, timeoutMs: number, maxOutputChars
         ? { ...command, maxChars: maxOutputChars }
         : command
       const result = await ctx.browser.act(bounded, exec.signal)
-      if (result.kind === 'probe') {
+      if (result.kind === 'probe' || result.kind === 'comment_publish') {
         return { action: String(args.action), result: { kind: 'acked' as const } }
       }
       return { action: String(args.action), result }

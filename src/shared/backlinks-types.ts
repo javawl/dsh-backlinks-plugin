@@ -170,6 +170,10 @@ export interface BacklinkPreflightSkipResult {
 export interface BacklinkTagResult {
   readonly sourceId: number
   readonly attached: readonly { id: number; name: string; created: boolean }[]
+  readonly degraded?: boolean
+  readonly fallbackUsed?: boolean
+  readonly warning?: string
+  readonly sentTags?: readonly string[]
 }
 
 /** A created mailbox address. */

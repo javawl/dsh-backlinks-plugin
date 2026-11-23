@@ -7,17 +7,39 @@ description: 本工作区所有"发外链/发布外链/发布批次/跑批次/�
 
 你运行的是一套**有纪律的发布流水线**，不是随手发帖。两条铁律高于一切：
 
-1. **幂等**：一个条目只允许一次"最终提交"动作，一个来源对一个网站只发一次——发布前先验证发布记录和状态（见单条目循环第 1 步），已提交/已上线的条目自己跳过，绝不重复发布。提交后拿不到明确回执（结果未知）时，回写 `failed + manual_required`，**绝不自动重试**。
+1. **幂等**：一个条目只允许一次"最终提交"动作，一个来源对一个网站只发一次——发布前先验证发布记录和状态（见单条目循环第 1 步），已提交/已上线的条目自己跳过，绝不重复发布。提交后拿不到明确回执（结果未知 / `uncertain_after_submit`）时，回写 `failed + manual_required`，**绝不自动重试**。
 2. **诚实回写**：`live` 必须是你亲自抓取公开页面并确认包含可点击目标链接后的结论；"提交成功但待审核"只能回写 `submitted`。
+
+## 一页式高效执行速查卡（v2 快路径 · 常规站点禁止 `read_file` 翻参考文档）
+
+> **零 `read_file` 原则**：本速查卡与下方主流程已覆盖全部常规目录、博客、表单规则；**常规站点无需调用 `read_file` 翻阅 `references/*` 多个参考手册**，仅在遇到异常登录态或特殊模板问题时按需查阅。
+
+1. **前置预检（1 次）**：`backlinks action="batch_preflight"`（`batchId`、`autoSkip: true`、`autoSkipTagged: true`、`autoFailWaf: true`）。
+   - 默认自动排除已带 `waf_403` 的条目（进 `heldForManual` / `skippedByTag.softItemIds`），且 `autoFailWaf: true` 直接将新老 `waf_403` 标记为 `failed(manual_required)` 防下一波死循环。
+   - 拿到存活清单 `runnableItems: [{ itemId, domain, siteHint }]`（`wordpress_comment` / `wix_blog` / `comments_closed_hint` / `directory_or_form` / `other`）。
+2. **读取批次（仅 1 次）**：`backlinks action="batch_get"`（`compact: true`, `pendingOnly: true`），一次拿齐 `website` 6 字段、`anchors` 与 `publishedSourceIds`。
+3. **分片认领**：仅从 `runnableItemIds` 挑 **5–6 条** `batch_claim`（同域 `sourceHost` 串行；单会话 10–12 条 / 2 片）。
+4. **博客评论 1-Call 确定性快路径（`comment_publish`）**：
+   - 对 `siteHint` 为 `wordpress_comment` / `wix_blog` / `comments_closed_hint`（或任意博客文章页），**直接调用 `browser action="comment_publish"`**（传 `url`、`commentText`、`authorName`、`authorEmail`、`websiteUrl`、`anchorText`、可选 `page`），1 次调用完成导航→滚底等懒加载→识别→填表→提交→重载核验！
+   - 返回 `outcome` 映射：
+     - `live` → `item_result(live, publicUrl)`
+     - `submitted` → `item_result(submitted, publicUrl)`
+     - `comments_closed` → `item_result(skipped, skipReason)` + `source_tags(["评论关闭"])`
+     - `no_form` → `item_result(skipped, skipReason)` + `source_tags(["no_form"])`
+     - `blocked_captcha` → `bringToFront`，`item_result(failed, manual_required, templateSignature)` + `source_tags(["has_captcha"])`（绝不绕过验证码）
+     - `uncertain_after_submit` → **`item_result(failed, manual_required)`（严守幂等，绝不重发）**
+     - `needs_llm_fallback` → 页面已打开且附带 `formSummary`，**直接接着做紧凑 `snapshot` + `batch_fill`**，不要重新 `navigate`！
+5. **非博客/回退站点**：`snapshot` 默认开启**紧凑压缩模式（4,500 字符）**，自动裁剪页头导航/页脚/SVG 噪音并保留表单与评论区；仅当关键控件缺失时传 `full: true` 展开（上限 16,000）。多字段用 `batch_fill`，人工登录用 `wait_for_login`。
+6. **回写与打标**：调用 `item_result` + `source_tags`（服务端自动将 `comments_closed` 映射为现网兼容的 `评论关闭`，且遇 5xx 会自动中文别名回退或非致命降级警告，绝不中断主流程）。每 1–2 条 `lease_heartbeat`，片尾 `lease_release`。
 
 ## 工具纪律与降 Token 规范（适用于所有 Antigravity 客户端）
 
 > 注意：经典版 Antigravity Desktop App 仅加载 `skills/` 与 `mcp_config.json`，不一定自动注入插件 `rules/AGENTS.md`。执行本技能时**必须严格遵守以下内置工具规范**：
 
 1. **`backlinks` 零 LLM 预检、全局标签过滤与防并发**：
-   - **开跑必选第一步 `batch_preflight`**：在任何 `batch_claim` 之前，必须先调 `backlinks action="batch_preflight"`（传 `batchId`、`autoSkip: true`、`autoSkipTagged: true`、默认 `timeoutMs: 5000`、`concurrency: 6`）。工具不启动 Chrome、不耗 LLM，读取服务端透出的 `sourceTags`/`blockingTags` 并并发完成 HTTP 轻量预检：自动识别 `404`/`410`/持续 `5xx`/DNS/TLS/停服占位页（`Vercel Deployment Paused`、`suspendedpage.cgi`、`Account Suspended`、`Domain for Sale`），优先通过租约安全的 `POST /api/agent/batches/{batchId}/preflight-skip` 原子跳过并打 `dead_site`（遇 409 冲突保护不抢租约，遇旧版 Supermanager 404 自动降级为短租约回写）；CloudFront/WAF 403 单独归类为 `waf_403`（绝不误删为死链）；已带硬阻断标签的来源零请求直接跳过。
-   - **标准阻断标签常量集合**（遇到对应阻断时必须在 `item_result` 同步调用 `source_tags` 打标）：
-     - 硬阻断标签（预检 `autoSkipTagged: true` 直接跳过）：`paid_only`（强制收费）、`no_form`（无提交入口）、`dead_site`（死链/停服/占位）、`comments_closed`（关评）。
+   - **开跑必选第一步 `batch_preflight`**：在任何 `batch_claim` 之前，必须先调 `backlinks action="batch_preflight"`（传 `batchId`、`autoSkip: true`、`autoSkipTagged: true`、`autoFailWaf: true`、默认 `timeoutMs: 5000`、`concurrency: 6`）。工具不启动 Chrome、不耗 LLM，读取服务端透出的 `sourceTags`/`blockingTags` 并并发完成 HTTP 轻量预检与前 64KB `siteHint` 探测（`wordpress_comment`/`wix_blog`/`comments_closed_hint`/`directory_or_form`/`other`）：自动识别死链/停服占位页并原子跳过打 `dead_site`；默认将已带 `waf_403` 标签条目隔离到 `heldForManual`（传 `skipSoftTagged: true` 可同时隔离 `has_captcha`/`submitmatic_verify_fail`，`false` 可放行重探），配合 `autoFailWaf: true` 自动将新老 `waf_403` 标为 `failed(manual_required)` 防重复入队；已带硬阻断标签的来源零请求直接跳过。
+   - **标准阻断标签常量集合**（遇到对应阻断时必须在 `item_result` 同步调用 `source_tags` 打标；服务端会自动把 `comments_closed` 映射为现网稳定的 `评论关闭`，且遇 5xx 自动中文回退/非致命降级）：
+     - 硬阻断标签（预检 `autoSkipTagged: true` 直接跳过）：`paid_only`（强制收费）、`no_form`（无提交入口）、`dead_site`（死链/停服/占位）、`comments_closed`（/ `评论关闭`）。
      - 软阻断/警示标签：`has_captcha`（reCAPTCHA/SecureImg/Turnstile/数学题验证码）、`waf_403`（CloudFront/WAF 403 拦截）、`submitmatic_verify_fail`（`@submitmatic` 模板 Verify Badge 校验失败）。
      - 描述性标签可并存：`免徽章`、`要徽章`、`可复用`。
    - `batch_list` 默认 `onlyPending: true`、`compact: true`、`limit: 20`、`offset: 0`（输出约 2–5 KB，避免超长落盘）；仅在确需查看历史已完成批次时传 `onlyPending: false` 或 `offset`。
@@ -28,7 +50,8 @@ description: 本工作区所有"发外链/发布外链/发布批次/跑批次/�
    - **懒加载鉴权**：`CLOUDMAIL_TOKEN` 仅在调用 `mailbox_create` / `mail_wait` 时检查；未配置接码令牌时其余 Supermanager 批次动作照常可用。
 2. **`browser` 降 Token 与快速失败阈值**：
    - **导航与慢等收紧**：`browser navigate` 默认超时已下调为 **10,000ms**（推荐显式传 `timeoutMs: 8000`–`10000` 快速失败，不再死等慢站）；`backlinks mail_wait` 默认上限已收紧至 **30,000ms**（30 秒未收到验证邮件直接回写 `failed + manual_required`，不卡死整片）；登录/OAuth 挂起超过 **15–20s** 直接判定阻塞并回写 `failed + manual_required`，禁止死循环重复点击。
-   - `navigate` 默认只返回精简文本摘要（3,000 字符）；`snapshot`（`text`/`aria`/`interactive`）默认上限 **8,000 字符**（避免触发 `agy` >10 KB 落盘）。仅在复杂页面确需完整内容时，显式传 `maxChars`（最高至服务端硬上限 `16,000`），且不要保留超大 snapshot 或冗余重试。
+   - `navigate` 默认只返回精简文本摘要（3,000 字符）；`snapshot`（`text`/`aria`/`interactive`）默认开启**紧凑压缩模式（上限 4,500 字符**，避免触发 `agy` >10 KB 落盘及 `read_file` 重读）。仅在复杂页面确需完整未裁剪内容时，传 `full: true`（上限 16,000）或显式 `maxChars`，且不要保留超大 snapshot 或冗余重试。
+   - **WP/Wix 博客评论优先 `comment_publish`**：命中 `siteHint` 为 `wordpress_comment` / `wix_blog` / `comments_closed_hint` 时，用 `browser action="comment_publish"` 一次完成探测、填表、提交与重载核验，禁止走 12+ 步手动 `navigate/snapshot/click/fill`。
    - **多字段表单优先 `batch_fill`**：整张填表 + 可选提交尽量合并为一次 `browser action="batch_fill"`（传 `fields` 数组与可选 `submitTarget` / `submitNth`），大幅减少往返轮次。
    - **等待人工登录用 `wait_for_login`**：遇到首次 Google 登录或需要人工介入的登录墙，先 `bringToFront`（或直接调 `wait_for_login`，内置自动拉回窗口到可见屏幕并轮询），**禁止 LLM 自己循环每 10 秒 `snapshot` 轮询**。
    - **防 `strict mode violation` 与标签隔离**：`navigate` 返回 `[page pN]`，后续同一标签命令都传 `page`。点击 Submit / Sign in / Send Code / 申请入驻 / 发送验证码 等高频按钮时，**优先使用精确 `role:button|<精确名称>` / `role:link|<精确名称>`**，避免宽泛 `text:<子串>` 匹配到多处；如发生多元素匹配，按错误返回的 `[0]`、`[1]`… 候选列表传 `nth`（0-based，支持 `click`/`fill`/`select`/`upload`/`waitFor` 与 `batch_fill` 的 `fields[].nth`/`submitNth`）或改用精确 `role:` 选择器。iframe 加 `frame(<css>)>>` 前缀，无名控件用 `interactive` 快照给出的 `css` 或 `xy:<x>,<y>`。
@@ -39,7 +62,7 @@ description: 本工作区所有"发外链/发布外链/发布批次/跑批次/�
 
 1. `backlinks action="batch_list"`（默认 `onlyPending: true, compact: true, limit: 20`）→ 若支持交互提问工具（如 `ask_question`）则渲染选项卡让用户选择，否则清晰列出最近待发批次请用户回复确认批次号：**用户确认后才继续；若取消或未获明确答复，立即停止，绝不自行认领任何批次。**
 2. **前置零 LLM 预检与读取批次**：
-   - 先调 `backlinks action="batch_preflight"`（`batchId`、`autoSkip: true`、`autoSkipTagged: true`），一次性完成死链/停服/占位页预检跳过与硬阻断标签过滤，拿到存活可跑 `runnableItemIds`、`cautionItems`、`wafBlocked` 与 `publishedSourceIds`。
+   - 先调 `backlinks action="batch_preflight"`（`batchId`、`autoSkip: true`、`autoSkipTagged: true`、`autoFailWaf: true`），一次性完成死链/停服/占位页预检跳过、硬阻断标签过滤、`waf_403` 自动防重复入队与 `siteHint` 识别，拿到 `runnableItemIds`、`runnableItems`、`cautionItems`、`heldForManual`、`wafBlocked` 与 `publishedSourceIds`。
    - 随后调一次 `backlinks action="batch_get"`（`compact: true, pendingOnly: true`）读取 `website` 6 字段资料包与 `anchors`（已发布条目与预检已跳过的条目本次**不认领、不执行**，汇总时单列）。向用户确认三项设置（可通过 `ask_question` 或简洁文本选项确认）：
    a. **范围**：全部存活待发布（`runnableItemIds`） / 指定 `itemIds`；
    b. **执行模式**（本次运行生效）：
@@ -62,7 +85,9 @@ description: 本工作区所有"发外链/发布外链/发布批次/跑批次/�
 1. **发布前验证（防重复发布）**：
    - 条目 `publishStatus` 为 `submitted`/`live` 或 `publishedUrl` 非空，或同批次同 `sourceId` 条目已发布 → 已发布，**不要打开目标站提交**：已认领的回写 `skipped`（skipReason："发布记录已存在：<publishStatus 或 publishedUrl>，跳过重复发布"），继续下一条。
    - 勘察目标站时检索本站域名/目标 URL：能找到本站可点击链接 → 同样回写 `skipped`（"目标站已存在本站链接，跳过重复发布"）。已提交待审来源优先复核公开页，确认已上线可直接回写 `live`，仍未见则维持跳过，**绝不再提交一次**。
-2. **选择 playbook**：先 `navigate` + `snapshot format="aria"` 勘察实貌，按特征匹配剧本（导航/博客/论坛/内容站/游戏站/工具站）；`submitUrl` 优先于 `sourceUrl`。
+2. **优先快路径与选择 playbook**：`submitUrl` 优先于 `sourceUrl`。
+   - 若 `runnableItems` 的 `siteHint` 为 `wordpress_comment` / `wix_blog` / `comments_closed_hint`（或已知为博客评论站），**先直接调用 `browser action="comment_publish"`**（仅返回 `needs_llm_fallback` 时才接着用紧凑 `snapshot` 接管）。
+   - 其他站点按 `navigate` + 紧凑 `snapshot format="aria"` 勘察实貌，匹配剧本（导航/博客/论坛/内容站/游戏站/工具站）。
    - **智能匹配模式**：勘察后六类都不匹配 → 回写 `skipped`（"类型不识别，智能匹配模式下跳过"）。
    - **全部尝试模式**：不匹配 → 走通用主循环，绝不因类型跳过。
    登录墙挡住表单时先走第 5 步，别因此跳过条目。

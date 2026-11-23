@@ -126,12 +126,12 @@ describe('MCP config & cross-platform home path expansion', () => {
     expect(expandHomePath('~other/profile', '/Users/zlb', path.posix)).toBe('~other/profile')
   })
 
-  it('resolves defaults (8000 snapshot / 16000 clamp / 3000 navigate / cloudmail URL / profile) and overrides', () => {
+  it('resolves defaults (4500 snapshot / 16000 clamp / 3000 navigate / cloudmail URL / profile) and overrides', () => {
     const defaults = resolveMcpConfig({}, { homeDir: 'C:\\Users\\zlb', pathImpl: path.win32 })
     expect(defaults.maxOutputChars).toBe(DEFAULT_MAX_OUTPUT_CHARS)
     expect(defaults.maxOutputChars).toBe(DEFAULT_MAX_OUTPUT_CHARS_CLAMP)
     expect(defaults.snapshotMaxChars).toBe(DEFAULT_SNAPSHOT_MAX_CHARS)
-    expect(defaults.snapshotMaxChars).toBe(8_000)
+    expect(defaults.snapshotMaxChars).toBe(4_500)
     expect(defaults.navigateMaxChars).toBe(DEFAULT_NAVIGATE_MAX_CHARS)
     expect(defaults.cloudMailBaseUrl).toBe(DEFAULT_CLOUDMAIL_BASE_URL)
     expect(defaults.browserProfileDir).toBe('C:\\Users\\zlb\\.dsh\\backlink-browser-profile')
@@ -620,7 +620,7 @@ describe('MCP browser tool handler', () => {
     }
   }
 
-  it('caps navigate at 3000 chars, snapshot default at 8000 chars, and respects explicit maxChars up to 16000 clamp', async () => {
+  it('caps navigate at 3000 chars, snapshot compact default at 4500 chars, and respects full=true or maxChars up to 16000 clamp', async () => {
     const longText = 'X'.repeat(20_000)
     const { manager, commands } = createMockManager(async (cmd) => ({
       kind: 'page',
@@ -641,29 +641,35 @@ describe('MCP browser tool handler', () => {
     expect(navText.length).toBeLessThan(3_200)
 
     const snap = await handle({ action: 'snapshot', format: 'aria' })
-    expect(commands[1]).toMatchObject({ kind: 'snapshot', maxChars: 8_000 })
+    expect(commands[1]).toMatchObject({ kind: 'snapshot', maxChars: 4_500, compact: true })
     const snapText = snap.content[0]?.type === 'text' ? snap.content[0].text : ''
     expect(snapText).toContain('… (truncated)')
-    expect(snapText.length).toBeLessThan(8_200)
+    expect(snapText.length).toBeLessThan(4_700)
+
+    const snapFull = await handle({ action: 'snapshot', format: 'aria', full: true })
+    expect(commands[2]).toMatchObject({ kind: 'snapshot', maxChars: 16_000, compact: false })
+    const snapFullText = snapFull.content[0]?.type === 'text' ? snapFull.content[0].text : ''
+    expect(snapFullText.length).toBeGreaterThan(15_900)
+    expect(snapFullText.length).toBeLessThan(16_200)
 
     const snap16k = await handle({ action: 'snapshot', format: 'aria', maxChars: 16_000 })
-    expect(commands[2]).toMatchObject({ kind: 'snapshot', maxChars: 16_000 })
+    expect(commands[3]).toMatchObject({ kind: 'snapshot', maxChars: 16_000, compact: true })
     const snap16kText = snap16k.content[0]?.type === 'text' ? snap16k.content[0].text : ''
     expect(snap16kText.length).toBeGreaterThan(15_900)
     expect(snap16kText.length).toBeLessThan(16_200)
 
     const snapClamped = await handle({ action: 'snapshot', format: 'aria', maxChars: 30_000 })
-    expect(commands[3]).toMatchObject({ kind: 'snapshot', maxChars: 16_000 })
+    expect(commands[4]).toMatchObject({ kind: 'snapshot', maxChars: 16_000, compact: true })
     expect((snapClamped.content[0]?.type === 'text' ? snapClamped.content[0].text : '').length).toBeLessThan(16_200)
 
     const tightHandle = createBrowserToolHandler({
       sessionManager: manager,
-      config: resolveMcpConfig({ BACKLINKS_MAX_OUTPUT_CHARS: '6000' }),
+      config: resolveMcpConfig({ BACKLINKS_MAX_OUTPUT_CHARS: '3000' }),
     })
     await tightHandle({ action: 'snapshot', format: 'aria' })
     await tightHandle({ action: 'snapshot', format: 'aria', maxChars: 16_000 })
-    expect(commands[4]).toMatchObject({ kind: 'snapshot', maxChars: 6_000 })
-    expect(commands[5]).toMatchObject({ kind: 'snapshot', maxChars: 6_000 })
+    expect(commands[5]).toMatchObject({ kind: 'snapshot', maxChars: 3_000, compact: true })
+    expect(commands[6]).toMatchObject({ kind: 'snapshot', maxChars: 3_000, compact: true })
   })
 
   it('forwards nth on single actions and fields[].nth / submitNth on batch_fill', async () => {
@@ -1421,18 +1427,25 @@ describe('batch_preflight HTTP probes, blocking tag filtering & autoSkip', () =>
       autoSkipTagged: true,
     })
     expect(res.isError).toBeUndefined()
+    // v2 default holds waf_403 out of HTTP probes into heldForManual to prevent infinite re-queuing.
     expect(fetchedUrls).toEqual([
-      'https://waf.example.org/submit',
       'https://clean.example.org/submit',
     ])
     expect(skippedIds).toEqual([1, 2, 3, 4, 5])
     const data = parseToolPayload(res as never).data as {
       runnableItemIds: number[]
-      cautionItems: Array<{ id: number; tags: string[] }>
+      heldForManual: Array<{ id: number; matchedTags: string[]; reason: string }>
+      skippedByTag: { hardItemIds: number[]; softItemIds: number[] }
       taggedBlocked: Array<{ id: number; matchedTags: string[] }>
     }
-    expect(data.runnableItemIds).toEqual([6, 7])
-    expect(data.cautionItems).toEqual([{ id: 6, sourceId: 2006, host: 'waf.example.org', tags: ['waf_403'] }])
+    expect(data.runnableItemIds).toEqual([7])
+    expect(data.heldForManual).toEqual([
+      { id: 6, sourceId: 2006, host: 'waf.example.org', matchedTags: ['waf_403'], reason: 'already_tagged_waf_403' },
+    ])
+    expect(data.skippedByTag).toEqual({
+      hardItemIds: [1, 2, 3, 4, 5],
+      softItemIds: [6],
+    })
     expect(data.taggedBlocked).toEqual([
       { id: 1, sourceId: 2001, host: 'paid.example.org', matchedTags: ['paid_only'] },
       { id: 2, sourceId: 2002, host: 'legacy-paid.example.org', matchedTags: ['paid_only'] },
@@ -1440,6 +1453,24 @@ describe('batch_preflight HTTP probes, blocking tag filtering & autoSkip', () =>
       { id: 4, sourceId: 2004, host: 'closed.example.org', matchedTags: ['comments_closed'] },
       { id: 5, sourceId: 2005, host: 'dead.example.org', matchedTags: ['dead_site'] },
     ])
+
+    // skipSoftTagged: false lets soft-tagged items probe into cautionItems.
+    fetchedUrls.length = 0
+    const probeSoftRes = await handle({
+      action: 'batch_preflight',
+      batchId: 100,
+      skipSoftTagged: false,
+    })
+    expect(fetchedUrls).toEqual([
+      'https://waf.example.org/submit',
+      'https://clean.example.org/submit',
+    ])
+    const probeSoftData = parseToolPayload(probeSoftRes as never).data as {
+      runnableItemIds: number[]
+      cautionItems: Array<{ id: number; tags: string[] }>
+    }
+    expect(probeSoftData.runnableItemIds).toEqual([6, 7])
+    expect(probeSoftData.cautionItems).toEqual([{ id: 6, sourceId: 2006, host: 'waf.example.org', tags: ['waf_403'] }])
 
     // Explicit skipTags allows skipping waf_403 too.
     fetchedUrls.length = 0

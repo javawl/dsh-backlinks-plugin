@@ -109,7 +109,7 @@ node scripts/install-antigravity.mjs --target auto --dry-run
 | `CLOUDMAIL_TOKEN` | 懒加载（仅接码时需要） | 无 | 未配置时仍可正常执行 Supermanager 批次与 `badge_verify`，仅在 `mailbox_create`/`mail_wait` 时提示补充 |
 | `DSH_BACKLINK_BROWSER_PROFILE` | 否 | `~/.dsh/backlink-browser-profile` | 支持 `~` 跨平台展开（Windows/macOS），直接复用现有 Chrome 登录态 |
 | `BACKLINKS_MAX_OUTPUT_CHARS` | 否 | `16000` | 显式传入 `maxChars` 时的服务端硬上限（clamp）；未传 `maxChars` 时受下方快照/导航默认值限制 |
-| `BACKLINKS_SNAPSHOT_MAX_CHARS` | 否 | `8000` | `browser snapshot` 默认输出字符上限（避免触发 `agy` >10 KB 落盘） |
+| `BACKLINKS_SNAPSHOT_MAX_CHARS` | 否 | `4500` | `browser snapshot` 紧凑模式默认输出字符上限（自动裁剪页头/导航/页脚/SVG 并保留表单/评论；传 `full: true` 可展开至 `maxOutputChars`） |
 | `BACKLINKS_NAVIGATE_MAX_CHARS` | 否 | `3000` | `browser navigate` 默认文本摘要字符上限 |
 | `BACKLINKS_BROWSER_TIMEOUT_MS` | 否 | `10000` | 浏览器导航与操作默认超时（毫秒，单次 `navigate` 可通过 `timeoutMs` 覆盖，推荐 8000–10000） |
 | `BACKLINKS_MAIL_WAIT_TIMEOUT_MS` | 否 | `30000` | `backlinks mail_wait` 默认等待验证邮件上限（毫秒，超时直接标 `manual_required`） |
@@ -145,17 +145,18 @@ node scripts/install-antigravity.mjs --target auto --dry-run
 
 ## 七、内置降 Token 与防冲突优化清单
 
-1. **零 LLM 前置 HTTP 预检 (`batch_preflight`)**：开跑前并发轻量 HTTP 探测（默认 5s 超时、6 并发），结合服务端 `sourceTags`/`blockingTags` 直接过滤死链（404/410/持续 5xx/DNS/TLS/`Vercel Deployment Paused`/`suspendedpage.cgi`/`Account Suspended`/`Domain for Sale`）与已带硬阻断标签源，区分 `waf_403` 与 `dead_site`；传 `autoSkip: true, autoSkipTagged: true` 优先调用 `POST /api/agent/batches/{batchId}/preflight-skip` 租约安全地一键跳过并打 `dead_site` 标签（遇旧版 404 自动降级）。
-2. **全局标准阻断标签集合**：统一使用 `paid_only`、`no_form`、`dead_site`、`has_captcha`、`waf_403`、`submitmatic_verify_fail`、`comments_closed`（兼容服务端中英文别名映射）实现跨站点 0-token 过滤与复盘。
-3. **同模板熔断与徽标自动回滚 (`badge_deactivate`)**：同批次同模板特征（如 `@submitmatic` Verify Badge 失败、`SecureImg + reCAPTCHA`）连续失败 2 次自动触发熔断告警；若 Verify Badge 失败放弃提交，通过 `badge_deactivate`（`PATCH/DELETE /api/agent/badges/{badgeId}`，支持直接传 `badgeId` 且自动触发刷新回调）立即停用/删除残留徽标。
-4. **超时与慢等阈值收紧**：`browser navigate` 默认降至 `10,000ms`（支持单次 `timeoutMs` 覆盖），`mail_wait` 默认收紧至 `30,000ms`，OAuth 挂起 >15–20s 快速熔断。
-5. **`batch_list` 默认精简与分页**：默认 `onlyPending: true, compact: true, limit: 20, offset: 0`，过滤掉已完结批次并返回 `{ total, matched, offset, limit, hasMore, batches }`（典型体积约 2–5 KB，避免触发 `agy` >10 KB 落盘）。
-6. **`batch_get` 默认精简、分页与安全不变量**：`compact` 默认为 `true`，支持可选 `pendingOnly: true` 与 `limit`/`offset` 分页；无论是否过滤或分页，始终基于全批次条目计算并返回 `publishedSourceIds` 与汇总计数，绝不因分页丢失已发布 `sourceId` 校验。
-7. **降低浏览器文本回传**：`snapshot` 默认截断上限降至 `8,000` 字符（避开 `agy` ~10 KB 落盘），复杂页面确需更大快照时可显式传入 `maxChars`（最高至服务端硬上限 `16,000`）；`navigate` 默认只回传 `3,000` 字符页面摘要。
-8. **`nth` / `submitNth` 与 strict mode 候选诊断**：`click` / `fill` / `select` / `upload` / `waitFor` 与 `batch_fill`（`fields[].nth`、`submitNth`）支持 0-based `nth`；触发 Playwright `strict mode violation` 时自动采集前 5 个匹配元素的 tag/role/text/aria-label/name/visible 与推荐 `role:`/`nth` 提示。
-9. **整表合并提交 `batch_fill`**：支持一次传入 `fields`（`fill` / `select` / `click` / `check`）与可选 `submitTarget` / `submitNth`，单轮完成表单填写（若任意字段失败则跳过 `submitTarget`）。
-10. **进程内等待登录 `wait_for_login`**：彻底替代多轮 LLM 空转轮询，自动 `bringToFront` 并在 Node.js 内轮询 URL 或元素状态。
-11. **分片认领与单会话上限**：单会话控制在 **10–12 条（2 片 × 5–6 条，硬上限 15 条）**，减少重复读文件与长上下文膨胀。
+1. **零 LLM 前置 HTTP 预检 (`batch_preflight`)**：开跑前并发轻量 HTTP 探测（默认 5s 超时、6 并发），读取前 64KB HTML 提取 `runnableItems[].siteHint`（`wordpress_comment` / `wix_blog` / `comments_closed_hint` / `directory_or_form` / `other`），结合服务端 `sourceTags`/`blockingTags` 直接过滤死链与已带硬阻断标签源，区分 `waf_403` 与 `dead_site`；默认隔离已带 `waf_403` 条目到 `heldForManual`（支持 `skipSoftTagged` 与 `autoFailWaf: true` 一键标 `failed(manual_required)` 防队列死循环）；传 `autoSkip: true, autoSkipTagged: true` 优先调用 `POST /api/agent/batches/{batchId}/preflight-skip` 租约安全地一键跳过并打 `dead_site` 标签（遇旧版 404 自动降级）。
+2. **WordPress / Wix 博客评论 1-Call 快路径 (`comment_publish`)**：Playwright 侧直接完成导航、滚底懒加载等待、关评/CAPTCHA/Wix 登录墙拦截、WordPress/Wix 访客评论填表提交与重载公开页核验（严守幂等边界，未确认仅返回 `uncertain_after_submit`；非标准站点返回 `needs_llm_fallback` + `formSummary` 直接无缝接管）。
+3. **全局标准阻断标签与现网兼容**：统一使用 `paid_only`、`no_form`、`dead_site`、`has_captcha`、`waf_403`、`submitmatic_verify_fail`、`comments_closed`（发送给 Supermanager 时自动映射为现网稳定的 `评论关闭`，并在 5xx 时自动中文别名回退与非致命降级）。
+4. **同模板熔断与徽标自动回滚 (`badge_deactivate`)**：同批次同模板特征（如 `@submitmatic` Verify Badge 失败、`SecureImg + reCAPTCHA`）连续失败 2 次自动触发熔断告警；若 Verify Badge 失败放弃提交，通过 `badge_deactivate`（`PATCH/DELETE /api/agent/badges/{badgeId}`，支持直接传 `badgeId` 且自动触发刷新回调）立即停用/删除残留徽标。
+5. **超时与慢等阈值收紧**：`browser navigate` / `comment_publish` 默认 `10,000ms`（支持单次 `timeoutMs` 覆盖），`mail_wait` 默认收紧至 `30,000ms`，OAuth 挂起 >15–20s 快速熔断。
+6. **`batch_list` 默认精简与分页**：默认 `onlyPending: true, compact: true, limit: 20, offset: 0`，过滤掉已完结批次并返回 `{ total, matched, offset, limit, hasMore, batches }`（典型体积约 2–5 KB，避免触发 `agy` >10 KB 落盘）。
+7. **`batch_get` 默认精简、分页与安全不变量**：`compact` 默认为 `true`，支持可选 `pendingOnly: true` 与 `limit`/`offset` 分页；无论是否过滤或分页，始终基于全批次条目计算并返回 `publishedSourceIds` 与汇总计数，绝不因分页丢失已发布 `sourceId` 校验。
+8. **极简 DOM 快照压缩与速查卡**：`snapshot` 默认开启紧凑模式且上限降至 `4,500` 字符（附带 `compactSummary`），避开 `agy` 截断落盘与反复 `read_file`，复杂页面可传 `full: true` 或 `maxChars`（最高至 `16,000`）；`navigate` 默认只回传 `3,000` 字符页面摘要；`AGENTS.md` 与 `SKILL.md` 顶部提供一页式高效执行速查卡。
+9. **`nth` / `submitNth` 与 strict mode 候选诊断**：`click` / `fill` / `select` / `upload` / `waitFor` 与 `batch_fill`（`fields[].nth`、`submitNth`）支持 0-based `nth`；触发 Playwright `strict mode violation` 时自动采集前 5 个匹配元素的 tag/role/text/aria-label/name/visible 与推荐 `role:`/`nth` 提示。
+10. **整表合并提交 `batch_fill`**：支持一次传入 `fields`（`fill` / `select` / `click` / `check`）与可选 `submitTarget` / `submitNth`，单轮完成表单填写（若任意字段失败则跳过 `submitTarget`）。
+11. **进程内等待登录 `wait_for_login`**：彻底替代多轮 LLM 空转轮询，自动 `bringToFront` 并在 Node.js 内轮询 URL 或元素状态。
+12. **分片认领与单会话上限**：单会话控制在 **10–12 条（2 片 × 5–6 条，硬上限 15 条）**，减少重复读文件与长上下文膨胀。
 
 ---
 

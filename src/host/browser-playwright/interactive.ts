@@ -90,6 +90,7 @@ export const VISIBLE_CONTROLS_SCRIPT = String.raw`(() => {
       x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2),
       inViewport: rect.left >= 0 && rect.top >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight,
       hasImage: !!image, hasSvg: tag === 'svg' || !!el.querySelector('svg'),
+      inBoilerplate: !!el.closest('header,footer,nav,aside,[role="banner"],[role="navigation"],[role="contentinfo"]'),
     });
   }
   return { controls, passwordFields, emailFields, forms, emailLinks, truncated };
@@ -119,6 +120,7 @@ interface Control {
   inViewport: boolean
   hasImage: boolean
   hasSvg: boolean
+  inBoilerplate?: boolean
 }
 
 interface PageControls {
@@ -162,6 +164,7 @@ export function parseControlReport(report: unknown): PageControls {
       background: readString(row.background), formAction: readString(row.formAction),
       selector: readString(row.selector), x: readNumber(row.x), y: readNumber(row.y),
       inViewport: readBoolean(row.inViewport), hasImage: readBoolean(row.hasImage), hasSvg: readBoolean(row.hasSvg),
+      ...(row.inBoilerplate === true ? { inBoilerplate: true } : {}),
     })
   }
   return {
@@ -228,13 +231,50 @@ export function readSignIn(control: Control): { provider: string; strength: 'aut
   }
 }
 
-export function renderPageControls(title: string, report: PageControls): string {
+const INTERACTIVE_ACTION_PATTERN =
+  /sign\s*in|log\s*in|sign\s*up|register|submit|add\s*(?:site|tool|listing|url)|comment|reply|post|login|oauth|google|github|登录|注册|提交|评论|入驻|申请/iu
+
+function compactAttrValue(key: string, value: string): string {
+  if ((key === 'src' || key === 'bg') && value.startsWith('data:')) {
+    return 'data:...'
+  }
+  if ((key === 'href' || key === 'src' || key === 'bg') && value.length > 90 && !AUTH_URL_PATTERN.test(value)) {
+    return `${value.slice(0, 87)}...`
+  }
+  if (key === 'cls' && value.length > 40) {
+    return `${value.slice(0, 37)}...`
+  }
+  return value
+}
+
+export function renderPageControls(
+  title: string,
+  report: PageControls,
+  options?: { readonly compact?: boolean },
+): string {
+  const isCompact = options?.compact === true
   const counts = new Map<string, number>()
-  const lines = report.controls.map((control, index) => {
+  const lines: string[] = []
+  let prunedBoilerplateLinks = 0
+
+  for (let index = 0; index < report.controls.length; index++) {
+    const control = report.controls[index]!
     const signIn = readSignIn(control)
     if (signIn) counts.set(signIn.provider, (counts.get(signIn.provider) ?? 0) + 1)
     const type = control.tag === 'iframe' ? 'iframe' : control.tag === 'a' || control.role === 'link' ? 'link' : control.tag
     const label = control.text || control.value || control.imageAlt || control.alt || control.ariaLabel || control.title
+
+    if (
+      isCompact
+      && control.inBoilerplate === true
+      && signIn === undefined
+      && type === 'link'
+      && !INTERACTIVE_ACTION_PATTERN.test(`${label} ${control.href}`)
+    ) {
+      prunedBoilerplateLinks++
+      continue
+    }
+
     const fields = [
       `#${index + 1} ${type}`,
       label ? JSON.stringify(label) : control.hasImage || control.hasSvg || control.background ? '(icon only)' : '',
@@ -242,16 +282,43 @@ export function renderPageControls(title: string, report: PageControls): string 
       control.selector ? `css=${quote(control.selector)}` : '',
       `xy=${control.x},${control.y}${control.inViewport ? '' : ' (scroll first)'}`,
     ]
-    for (const [key, value] of Object.entries({
-      alt: control.imageAlt || control.alt, aria: control.ariaLabel, title: control.title,
-      href: control.href, src: control.src || control.imageSrc, id: control.id, cls: control.classes,
-      bg: control.background, form: control.formAction,
-    })) {
-      if (value) fields.push(`${key}=${quote(value)}`)
+    const rawAlt = control.imageAlt || control.alt
+    const attrs: Record<string, string> = isCompact
+      ? {
+          alt: rawAlt && rawAlt !== label ? rawAlt : '',
+          aria: control.ariaLabel && control.ariaLabel !== label ? control.ariaLabel : '',
+          title: control.title && control.title !== label ? control.title : '',
+          href: control.href,
+          src: control.src || control.imageSrc,
+          id: control.id,
+          cls: control.classes,
+          bg: control.background,
+          form: control.formAction,
+        }
+      : {
+          alt: rawAlt,
+          aria: control.ariaLabel,
+          title: control.title,
+          href: control.href,
+          src: control.src || control.imageSrc,
+          id: control.id,
+          cls: control.classes,
+          bg: control.background,
+          form: control.formAction,
+        }
+    for (const [key, rawValue] of Object.entries(attrs)) {
+      if (!rawValue) continue
+      const value = isCompact ? compactAttrValue(key, rawValue) : rawValue
+      fields.push(`${key}=${quote(value)}`)
     }
     if (control.data) fields.push(/^data-[\w-]+=[^\s"]+$/i.test(control.data) ? control.data : `data=${quote(control.data)}`)
-    return fields.filter(Boolean).join(' ')
-  })
+    lines.push(fields.filter(Boolean).join(' '))
+  }
+
+  if (isCompact && prunedBoilerplateLinks > 0) {
+    lines.push(`... (${prunedBoilerplateLinks} boilerplate nav/footer link(s) pruned; pass full=true to inspect all)`)
+  }
+
   const fieldCount = (count: number) => count ? `yes ×${count}` : 'no'
   const stats = [
     `${report.forms} ${report.forms === 1 ? 'form' : 'forms'}`,

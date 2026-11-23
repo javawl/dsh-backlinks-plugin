@@ -21,6 +21,11 @@ import type {
   BacklinkTagResult,
   BacklinkWebsiteAnchor,
 } from '../backlinks/types.ts'
+import {
+  isSupermanager5xxError,
+  mapTagsForSupermanagerWire,
+  mapTagsToSafeChineseFallback,
+} from '../backlinks/standards.ts'
 import { BacklinksError } from '../backlinks/types.ts'
 
 export const SUPERMANAGER_BATCH_SOURCE_ID = 'supermanager'
@@ -396,11 +401,14 @@ export class SupermanagerBatchSource implements BacklinkBatchSourceProvider {
     const body = await this.requestJson(`/api/agent/batches/${batchId}/preflight-skip`, {
       method: 'POST',
       payload: {
-        items: items.map(entry => ({
-          itemId: entry.itemId,
-          skipReason: entry.skipReason.slice(0, 2000),
-          ...(entry.tags !== undefined && entry.tags.length > 0 ? { tags: [...entry.tags].slice(0, 10) } : {}),
-        })),
+        items: items.map(entry => {
+          const wireTags = entry.tags !== undefined ? mapTagsForSupermanagerWire(entry.tags).slice(0, 10) : []
+          return {
+            itemId: entry.itemId,
+            skipReason: entry.skipReason.slice(0, 2000),
+            ...(wireTags.length > 0 ? { tags: wireTags } : {}),
+          }
+        }),
       },
     }, signal)
     const record = asRecord(body)
@@ -430,22 +438,71 @@ export class SupermanagerBatchSource implements BacklinkBatchSourceProvider {
   }
 
   async tagSource(sourceId: number, names: readonly string[], signal?: AbortSignal): Promise<BacklinkTagResult> {
-    const body = await this.requestJson(`/api/agent/sources/${sourceId}/tags`, {
-      method: 'POST',
-      payload: { tags: [...names] },
-    }, signal)
-    const record = asRecord(body)
-    const attached = Array.isArray(record.attached)
-      ? record.attached.map((entry: unknown) => {
-        const row = asRecord(entry)
-        return {
-          id: toNumber(row.id),
-          name: str(row.name),
-          created: row.created === true,
+    const wireTags = mapTagsForSupermanagerWire(names)
+    const sendTagRequest = async (tagsToSend: readonly string[]): Promise<BacklinkTagResult> => {
+      const body = await this.requestJson(`/api/agent/sources/${sourceId}/tags`, {
+        method: 'POST',
+        payload: { tags: [...tagsToSend] },
+      }, signal)
+      const record = asRecord(body)
+      const attached = Array.isArray(record.attached)
+        ? record.attached.map((entry: unknown) => {
+          const row = asRecord(entry)
+          return {
+            id: toNumber(row.id),
+            name: str(row.name),
+            created: row.created === true,
+          }
+        })
+        : []
+      return {
+        sourceId: record.sourceId !== undefined && record.sourceId !== null ? toNumber(record.sourceId) : sourceId,
+        attached,
+      }
+    }
+
+    try {
+      return await sendTagRequest(wireTags)
+    } catch (error) {
+      if (signal?.aborted || !isSupermanager5xxError(error)) {
+        throw error
+      }
+
+      let lastError: unknown = error
+      let lastAttemptedTags: readonly string[] = wireTags
+      const fallbackTags = mapTagsToSafeChineseFallback(wireTags)
+      const hasDifferentFallback = fallbackTags.length !== wireTags.length
+        || fallbackTags.some((tag, idx) => tag !== wireTags[idx])
+
+      if (hasDifferentFallback) {
+        try {
+          const retryOutcome = await sendTagRequest(fallbackTags)
+          return {
+            ...retryOutcome,
+            fallbackUsed: true,
+            sentTags: [...fallbackTags],
+            warning: 'Supermanager source_tags returned 5xx; succeeded with safe Chinese tag fallback.',
+          }
+        } catch (retryError) {
+          if (signal?.aborted || !isSupermanager5xxError(retryError)) {
+            throw retryError
+          }
+          lastError = retryError
+          lastAttemptedTags = fallbackTags
         }
-      })
-      : []
-    return { sourceId: toNumber(record.sourceId), attached }
+      }
+
+      const errorMessage = lastError instanceof Error ? lastError.message : String(lastError)
+      const warning = `supermanager source_tags returned 5xx after compatibility fallback; skipped non-fatally (${errorMessage.slice(0, 180)})`
+      process.stderr.write(`[backlinks-publisher] ${warning}\n`)
+      return {
+        sourceId,
+        attached: [],
+        degraded: true,
+        warning,
+        sentTags: [...lastAttemptedTags],
+      }
+    }
   }
 
   private resultPayload(result: BacklinkItemResult): Record<string, unknown> {

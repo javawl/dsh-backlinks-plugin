@@ -41,6 +41,7 @@ export const BROWSER_ACTIONS = [
   'closeBrowser',
   'batch_fill',
   'wait_for_login',
+  'comment_publish',
 ] as const
 
 export type BrowserAction = typeof BROWSER_ACTIONS[number]
@@ -58,7 +59,7 @@ export interface BatchFillField {
 export const BROWSER_TOOL_DEFINITION: Tool = {
   name: 'browser',
   description:
-    'Drive one shared persistent real-Chrome session across tabs: navigate (returns compact summary), snapshot (text/aria/interactive), click/fill/select/press/upload/screenshot/waitFor, batch_fill (multi-field form fill in one call), wait_for_login (in-process polling for manual login), bringToFront, closePage, and closeBrowser.',
+    'Drive one shared persistent real-Chrome session across tabs: comment_publish (deterministic 1-call WordPress/Wix comment probe, fill, submit & reload verification), navigate (compact summary), snapshot (compact by default at 4500 chars; full=true to expand), click/fill/select/press/upload/screenshot/waitFor, batch_fill, wait_for_login, bringToFront, closePage, and closeBrowser.',
   inputSchema: {
     type: 'object',
     additionalProperties: false,
@@ -75,7 +76,7 @@ export const BROWSER_TOOL_DEFINITION: Tool = {
       },
       url: {
         type: 'string',
-        description: 'Absolute http(s) URL for navigate; target URL pattern for waitFor.',
+        description: 'Absolute http(s) URL for navigate / comment_publish; target URL pattern for waitFor.',
       },
       selector: {
         type: 'string',
@@ -89,6 +90,10 @@ export const BROWSER_TOOL_DEFINITION: Tool = {
         type: 'string',
         enum: ['text', 'aria', 'interactive'],
         description: 'Snapshot format: text, aria, or interactive (reveals icon-only sign-in buttons, iframes, and sign-in candidates).',
+      },
+      full: {
+        type: 'boolean',
+        description: 'For snapshot: when true, disable boilerplate pruning and expand default limit to server maxOutputChars (16000). Default false uses compact mode (4500 chars).',
       },
       value: { type: 'string', description: 'Text value for fill or option value for select.' },
       key: { type: 'string', description: 'Keyboard key for press (e.g. Enter, Tab, End).' },
@@ -104,11 +109,39 @@ export const BROWSER_TOOL_DEFINITION: Tool = {
       },
       maxChars: {
         type: 'integer',
-        description: 'Optional output character cap (navigate defaults to 3000, snapshot defaults to 8000; explicit maxChars clamped to server maxOutputChars, default 16000).',
+        description: 'Optional output character cap (navigate defaults to 3000, snapshot defaults to 4500 in compact mode; pass full=true or explicit maxChars up to server maxOutputChars, default 16000).',
       },
       timeoutMs: {
         type: 'integer',
-        description: 'Timeout in ms for navigate (default 10000; overridable per call, recommend 8000-10000), waitFor (default 10000), or wait_for_login (default 300000).',
+        description: 'Timeout in ms for navigate (default 10000; overridable per call, recommend 8000-10000), comment_publish (default 10000), waitFor (default 10000), or wait_for_login (default 300000).',
+      },
+      commentText: {
+        type: 'string',
+        description: 'For comment_publish: comment content (plain text or with anchor/link; required unless probeOnly=true).',
+      },
+      authorName: {
+        type: 'string',
+        description: 'For comment_publish: commenter display name.',
+      },
+      authorEmail: {
+        type: 'string',
+        description: 'For comment_publish: commenter email address.',
+      },
+      websiteUrl: {
+        type: 'string',
+        description: 'For comment_publish: target promoted URL (filled into Website field or embedded as anchor link).',
+      },
+      anchorText: {
+        type: 'string',
+        description: 'For comment_publish: optional anchor text used when embedding link into comment body.',
+      },
+      verifyReload: {
+        type: 'boolean',
+        description: 'For comment_publish: reload the clean public URL after submit to verify live link vs moderation (default true).',
+      },
+      probeOnly: {
+        type: 'boolean',
+        description: 'For comment_publish: detect site type / closed comments / captcha / guest editor without submitting (default false).',
       },
       fields: {
         type: 'array',
@@ -301,8 +334,8 @@ function readSelector(value: unknown, field = 'selector'): string | undefined {
   return raw
 }
 
-function readUrl(value: unknown): string | undefined {
-  const raw = readNonEmpty(value, 'url')
+function readUrl(value: unknown, field = 'url'): string | undefined {
+  const raw = readNonEmpty(value, field)
   if (raw === undefined) return undefined
   try {
     const url = new URL(raw)
@@ -311,7 +344,7 @@ function readUrl(value: unknown): string | undefined {
     }
     return url.toString()
   } catch {
-    throw new Error('browser url must be an absolute http(s) URL.')
+    throw new Error(`browser ${field} must be an absolute http(s) URL.`)
   }
 }
 
@@ -388,7 +421,8 @@ function parseBatchFillFields(rawFields: unknown): readonly BatchFillField[] {
 export function formatMcpBrowserOutput(result: BrowserResult, maxChars: number): string {
   switch (result.kind) {
     case 'page': {
-      const header = `[page ${result.page}] ${result.title}\n${result.url}`
+      const compactLine = result.compactSummary ? `\n[compact] ${result.compactSummary}` : ''
+      const header = `[page ${result.page}] ${result.title}\n${result.url}${compactLine}`
       const truncated = result.truncated || result.text.length > maxChars
       const body = result.text.slice(0, maxChars) + (truncated ? '\n… (truncated)' : '')
       return `${header}\n\n${body}`
@@ -399,6 +433,25 @@ export function formatMcpBrowserOutput(result: BrowserResult, maxChars: number):
       return `screenshot captured (${result.pngBase64.length} base64 characters)`
     case 'probe':
       return `[page ${result.page}] ${result.title}\n${result.url}`
+    case 'comment_publish': {
+      const targetDisplay = result.publicUrl ?? result.finalUrl
+      const payload = {
+        page: result.page,
+        outcome: result.outcome,
+        siteType: result.siteType,
+        title: result.title,
+        finalUrl: result.finalUrl,
+        ...(result.publicUrl === undefined ? {} : { publicUrl: result.publicUrl }),
+        ...(result.evidence === undefined ? {} : { evidence: result.evidence }),
+        ...(result.skipReason === undefined ? {} : { skipReason: result.skipReason }),
+        ...(result.templateSignature === undefined ? {} : { templateSignature: result.templateSignature }),
+        ...(result.suggestedTags === undefined ? {} : { suggestedTags: result.suggestedTags }),
+        submitTriggered: result.submitTriggered,
+        ...(result.probeOnly === undefined ? {} : { probeOnly: result.probeOnly }),
+        ...(result.formSummary === undefined ? {} : { formSummary: result.formSummary }),
+      }
+      return `[page ${result.page}] comment_publish: ${result.outcome} (${result.siteType}) -> ${targetDisplay}\n${JSON.stringify(payload)}`
+    }
     default:
       return assertNever(result, 'unhandled browser result kind')
   }
@@ -710,15 +763,56 @@ export function createBrowserToolHandler(deps: BrowserToolDependencies) {
           break
         }
         case 'snapshot': {
+          if (args.full !== undefined && typeof args.full !== 'boolean') {
+            throw new Error('browser full must be a boolean.')
+          }
+          const full = args.full === true
           const format = readSnapshotFormat(args.format)
           effectiveMaxChars = requestedMaxChars !== undefined
             ? Math.min(requestedMaxChars, config.maxOutputChars)
-            : Math.min(config.snapshotMaxChars, config.maxOutputChars)
+            : full
+              ? config.maxOutputChars
+              : Math.min(config.snapshotMaxChars, config.maxOutputChars)
           command = addressed({
             kind: 'snapshot',
             ...(selector === undefined ? {} : { selector }),
             ...(format === undefined ? {} : { format }),
             maxChars: effectiveMaxChars,
+            compact: !full,
+          })
+          break
+        }
+        case 'comment_publish': {
+          const targetUrl = readUrl(args.url, 'url')
+          if (targetUrl === undefined) {
+            throw new Error('browser comment_publish requires an http(s) url.')
+          }
+          if (args.verifyReload !== undefined && typeof args.verifyReload !== 'boolean') {
+            throw new Error('browser verifyReload must be a boolean.')
+          }
+          if (args.probeOnly !== undefined && typeof args.probeOnly !== 'boolean') {
+            throw new Error('browser probeOnly must be a boolean.')
+          }
+          const probeOnly = args.probeOnly === true
+          const commentText = readNonEmpty(args.commentText, 'commentText')
+          if (!probeOnly && commentText === undefined) {
+            throw new Error('browser comment_publish requires commentText unless probeOnly=true.')
+          }
+          const authorName = readNonEmpty(args.authorName, 'authorName')
+          const authorEmail = readNonEmpty(args.authorEmail, 'authorEmail')
+          const websiteUrl = readUrl(args.websiteUrl, 'websiteUrl')
+          const anchorText = readNonEmpty(args.anchorText, 'anchorText')
+          command = addressed({
+            kind: 'comment_publish',
+            url: targetUrl,
+            commentText: commentText ?? '',
+            ...(authorName === undefined ? {} : { authorName }),
+            ...(authorEmail === undefined ? {} : { authorEmail }),
+            ...(websiteUrl === undefined ? {} : { websiteUrl }),
+            ...(anchorText === undefined ? {} : { anchorText }),
+            timeoutMs: timeoutMs ?? config.browserTimeoutMs,
+            ...(args.verifyReload === undefined ? {} : { verifyReload: args.verifyReload }),
+            ...(args.probeOnly === undefined ? {} : { probeOnly: args.probeOnly }),
           })
           break
         }

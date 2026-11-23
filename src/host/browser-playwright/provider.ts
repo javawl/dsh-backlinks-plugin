@@ -12,6 +12,13 @@ import type {
   BrowserSession,
 } from '../browser/types.ts'
 import { BrowserError } from '../browser/types.ts'
+import { executeCommentPublish } from './comment-publish.ts'
+import {
+  COMPACT_TEXT_SCRIPT,
+  compactAriaSnapshot,
+  compactPlainText,
+  formatCompactTextEvaluation,
+} from './compact-snapshot.ts'
 import { parseControlReport, renderPageControls, VISIBLE_CONTROLS_SCRIPT } from './interactive.ts'
 
 export const PLAYWRIGHT_BROWSER_PROVIDER_ID = 'playwright'
@@ -388,16 +395,79 @@ export class PlaywrightSession implements BrowserSession {
         case 'snapshot': {
           const { page, ref } = await this.requirePage(command.page)
           const maxChars = command.maxChars ?? this.defaultMaxChars
+          const isCompact = command.compact === true
           if (command.format === 'aria') {
             const tree = await page.locator(command.selector ?? 'body').ariaSnapshot()
+            const title = await page.title()
+            if (isCompact) {
+              const compacted = compactAriaSnapshot(tree, maxChars)
+              return {
+                kind: 'page',
+                page: ref,
+                url: page.url(),
+                title,
+                text: compacted.text,
+                truncated: compacted.truncated,
+                compactSummary: compacted.compactSummary,
+              }
+            }
             const { text, truncated } = truncate(tree, maxChars)
-            return { kind: 'page', page: ref, url: page.url(), title: await page.title(), text, truncated }
+            return { kind: 'page', page: ref, url: page.url(), title, text, truncated }
           }
           if (command.format === 'interactive') {
             const report = parseControlReport(await page.evaluate<unknown>(VISIBLE_CONTROLS_SCRIPT))
             const title = await page.title()
-            const { text, truncated } = truncate(renderPageControls(title, report), maxChars)
-            return { kind: 'page', page: ref, url: page.url(), title, text, truncated: truncated || report.truncated }
+            const rawRendered = renderPageControls(title, report)
+            const rendered = isCompact
+              ? renderPageControls(title, report, { compact: true })
+              : rawRendered
+            const { text, truncated } = truncate(rendered, maxChars)
+            const compactSummary = isCompact
+              ? `controls=${report.controls.length} forms=${report.forms} (raw=${rawRendered.length}c -> ${rendered.length}c)`
+              : undefined
+            return {
+              kind: 'page',
+              page: ref,
+              url: page.url(),
+              title,
+              text,
+              truncated: truncated || report.truncated,
+              ...(compactSummary === undefined ? {} : { compactSummary }),
+            }
+          }
+          if (isCompact) {
+            if (command.selector === undefined && typeof page.evaluate === 'function') {
+              try {
+                const evalPayload = await page.evaluate<unknown>(COMPACT_TEXT_SCRIPT)
+                const compacted = formatCompactTextEvaluation(evalPayload, maxChars)
+                return {
+                  kind: 'page',
+                  page: ref,
+                  url: page.url(),
+                  title: await page.title(),
+                  text: compacted.text,
+                  truncated: compacted.truncated,
+                  compactSummary: compacted.compactSummary,
+                }
+              } catch {
+                // Fall back to innerText compression when page.evaluate fails or returns unexpected output.
+              }
+            }
+            const [url, title, rawText] = await Promise.all([
+              Promise.resolve(page.url()),
+              page.title(),
+              page.innerText(command.selector ?? 'body'),
+            ])
+            const compacted = compactPlainText(rawText, maxChars)
+            return {
+              kind: 'page',
+              page: ref,
+              url,
+              title,
+              text: compacted.text,
+              truncated: compacted.truncated,
+              compactSummary: compacted.compactSummary,
+            }
           }
           return await this.pageResult(page, ref, maxChars, command.selector)
         }
@@ -474,6 +544,13 @@ export class PlaywrightSession implements BrowserSession {
             title,
             ...(selectorVisible === undefined ? {} : { selectorVisible }),
           }
+        }
+        case 'comment_publish': {
+          const { page, ref } = await this.resolveForNavigate(command.page)
+          return await executeCommentPublish(page, ref, command, {
+            defaultTimeoutMs: this.defaultTimeoutMs,
+            ...(signal === undefined ? {} : { signal }),
+          })
         }
         case 'bringToFront': {
           const { page } = await this.requirePage(command.page)

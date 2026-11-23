@@ -2,7 +2,7 @@
  * Vocabulary for the browser automation capability seam (`ctx.browser`).
  */
 import { CodedError } from '../../shared/errors.ts';
-export type BrowserCommand = BrowserNavigateCommand | BrowserSnapshotCommand | BrowserBringToFrontCommand | BrowserClickCommand | BrowserFillCommand | BrowserSelectCommand | BrowserCheckCommand | BrowserPressCommand | BrowserUploadCommand | BrowserScreenshotCommand | BrowserWaitForCommand | BrowserProbeCommand | BrowserClosePageCommand;
+export type BrowserCommand = BrowserNavigateCommand | BrowserSnapshotCommand | BrowserBringToFrontCommand | BrowserClickCommand | BrowserFillCommand | BrowserSelectCommand | BrowserCheckCommand | BrowserPressCommand | BrowserUploadCommand | BrowserScreenshotCommand | BrowserWaitForCommand | BrowserProbeCommand | BrowserCommentPublishCommand | BrowserClosePageCommand;
 export interface BrowserPageAddress {
     readonly page?: string;
 }
@@ -20,6 +20,7 @@ export interface BrowserSnapshotCommand extends BrowserPageAddress {
     /** Interactive exposes icon-only controls, sign-in evidence, and click targets. */
     readonly format?: 'text' | 'aria' | 'interactive';
     readonly maxChars?: number;
+    readonly compact?: boolean;
 }
 export interface BrowserBringToFrontCommand extends BrowserPageAddress {
     readonly kind: 'bringToFront';
@@ -70,10 +71,33 @@ export interface BrowserProbeCommand extends BrowserPageAddress {
     readonly kind: 'probe';
     readonly selector?: string;
 }
+export type CommentPublishSiteType = 'wordpress' | 'wix' | 'other';
+export type CommentPublishOutcome = 'live' | 'submitted' | 'uncertain_after_submit' | 'comments_closed' | 'blocked_captcha' | 'no_form' | 'needs_llm_fallback' | 'form_ready';
+export interface CommentPublishFormSummary {
+    readonly forms: number;
+    readonly textareas: number;
+    readonly inputs: readonly string[];
+    readonly buttons: readonly string[];
+    readonly iframes: number;
+    readonly hasLoginWall: boolean;
+    readonly snippet?: string;
+}
+export interface BrowserCommentPublishCommand extends BrowserPageAddress {
+    readonly kind: 'comment_publish';
+    readonly url: string;
+    readonly commentText: string;
+    readonly authorName?: string;
+    readonly authorEmail?: string;
+    readonly websiteUrl?: string;
+    readonly anchorText?: string;
+    readonly timeoutMs?: number;
+    readonly verifyReload?: boolean;
+    readonly probeOnly?: boolean;
+}
 export interface BrowserClosePageCommand extends BrowserPageAddress {
     readonly kind: 'closePage';
 }
-export type BrowserResult = BrowserPageResult | BrowserAckedResult | BrowserScreenshotResult | BrowserProbeResult;
+export type BrowserResult = BrowserPageResult | BrowserAckedResult | BrowserScreenshotResult | BrowserProbeResult | BrowserCommentPublishResult;
 export interface BrowserPageResult {
     readonly kind: 'page';
     readonly page: string;
@@ -81,6 +105,7 @@ export interface BrowserPageResult {
     readonly title: string;
     readonly text: string;
     readonly truncated: boolean;
+    readonly compactSummary?: string;
 }
 export interface BrowserAckedResult {
     readonly kind: 'acked';
@@ -95,6 +120,22 @@ export interface BrowserProbeResult {
     readonly url: string;
     readonly title: string;
     readonly selectorVisible?: boolean;
+}
+export interface BrowserCommentPublishResult {
+    readonly kind: 'comment_publish';
+    readonly page: string;
+    readonly outcome: CommentPublishOutcome;
+    readonly siteType: CommentPublishSiteType;
+    readonly title: string;
+    readonly finalUrl: string;
+    readonly publicUrl?: string;
+    readonly evidence?: string;
+    readonly skipReason?: string;
+    readonly templateSignature?: string;
+    readonly suggestedTags?: readonly string[];
+    readonly submitTriggered: boolean;
+    readonly probeOnly?: boolean;
+    readonly formSummary?: CommentPublishFormSummary;
 }
 export interface BrowserSession {
     act(command: BrowserCommand, signal?: AbortSignal): Promise<BrowserResult>;
