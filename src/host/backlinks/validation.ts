@@ -210,6 +210,7 @@ export interface CompactBacklinkBatchItem {
   readonly sourceNotes?: string
   readonly category?: string
   readonly tags?: readonly string[]
+  readonly blockingTags?: readonly string[]
   readonly paymentType?: string
   readonly linkType?: string
   readonly status: string
@@ -240,6 +241,7 @@ function compactItem(item: BacklinkBatchItem): CompactBacklinkBatchItem {
     ...(sourceNotes !== undefined ? { sourceNotes } : {}),
     ...(item.category !== null && item.category.length > 0 ? { category: item.category } : {}),
     ...(item.tags.length > 0 ? { tags: item.tags } : {}),
+    ...(item.blockingTags !== undefined && item.blockingTags.length > 0 ? { blockingTags: item.blockingTags } : {}),
     ...(item.paymentType.length > 0 ? { paymentType: item.paymentType } : {}),
     ...(item.linkType.length > 0 ? { linkType: item.linkType } : {}),
     status: item.status,

@@ -1454,7 +1454,7 @@ describe('batch_preflight HTTP probes, blocking tag filtering & autoSkip', () =>
     ])
   })
 
-  it('parses flexible tags / sourceTags shapes cleanly in SupermanagerBatchSource.getBatch', async () => {
+  it('parses flexible tags, sourceTags, and blockingTags cleanly in SupermanagerBatchSource.getBatch and batch_get compact mode', async () => {
     const originalFetch = globalThis.fetch
     globalThis.fetch = vi.fn(async () => new Response(JSON.stringify({
       batch: {
@@ -1470,9 +1470,9 @@ describe('batch_preflight HTTP probes, blocking tag filtering & autoSkip', () =>
       website: { id: 7, name: 'Demo', siteUrl: 'https://demo.example.com', siteHost: 'demo.example.com' },
       anchors: [],
       items: [
-        { id: 1, sourceId: 1, sourceName: 'A', sourceUrl: 'https://a.test', sourceHost: 'a.test', tags: ['paid_only', ' paid_only '] },
-        { id: 2, sourceId: 2, sourceName: 'B', sourceUrl: 'https://b.test', sourceHost: 'b.test', tags: [{ name: 'no_form' }, { name: '' }] },
-        { id: 3, sourceId: 3, sourceName: 'C', sourceUrl: 'https://c.test', sourceHost: 'c.test', sourceTags: ['comments_closed'] },
+        { id: 1, sourceId: 1, sourceName: 'A', sourceUrl: 'https://a.test', sourceHost: 'a.test', tags: ['paid_only', ' paid_only '], blockingTags: ['paid_only'] },
+        { id: 2, sourceId: 2, sourceName: 'B', sourceUrl: 'https://b.test', sourceHost: 'b.test', tags: [{ name: 'no_form' }, { name: '' }], sourceTags: ['无提交入口'], blockingTags: ['no_form'] },
+        { id: 3, sourceId: 3, sourceName: 'C', sourceUrl: 'https://c.test', sourceHost: 'c.test', sourceTags: ['comments_closed', '有盾'], blockingTags: ['comments_closed', 'waf_403'] },
         { id: 4, sourceId: 4, sourceName: 'D', sourceUrl: 'https://d.test', sourceHost: 'd.test' },
       ],
     }), { status: 200 })) as unknown as typeof fetch
@@ -1486,10 +1486,207 @@ describe('batch_preflight HTTP probes, blocking tag filtering & autoSkip', () =>
       const detail = await sm.getBatch(1)
       expect(detail.items.map(i => i.tags)).toEqual([
         ['paid_only'],
-        ['no_form'],
-        ['comments_closed'],
+        ['no_form', '无提交入口'],
+        ['comments_closed', '有盾'],
         [],
       ])
+      expect(detail.items.map(i => i.sourceTags)).toEqual([
+        undefined,
+        ['无提交入口'],
+        ['comments_closed', '有盾'],
+        undefined,
+      ])
+      expect(detail.items.map(i => i.blockingTags)).toEqual([
+        ['paid_only'],
+        ['no_form'],
+        ['comments_closed', 'waf_403'],
+        undefined,
+      ])
+
+      const handle = createBacklinksToolHandler({ config: smConfig, batchSource: sm })
+      const compactRes = await handle({ action: 'batch_get', batchId: 1 })
+      const compactData = parseToolPayload(compactRes as never).data as {
+        items: Array<{ id: number; blockingTags?: string[] }>
+      }
+      expect(compactData.items[2]?.blockingTags).toEqual(['comments_closed', 'waf_403'])
+      expect(compactData.items[3]?.blockingTags).toBeUndefined()
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('uses Supermanager preflight-skip API atomically, respects 409 conflict, and downgrades on 404', async () => {
+    const detail: BacklinkBatchDetail = {
+      ...makeSampleDetail(),
+      batch: { ...makeSampleDetail().batch, id: 101, name: 'Preflight Skip API Batch' },
+      items: [
+        makePreflightItem(1, 3001, 'dead404.example.org'),
+        makePreflightItem(2, 3002, 'alias-paid.example.org', { sourceTags: ['仅付费'] }),
+        makePreflightItem(3, 3003, 'server-blocked.example.org', { blockingTags: ['no_form'] }),
+        makePreflightItem(4, 3004, 'alias-verify.example.org', { tags: ['徽标校验失败'] }),
+      ],
+    }
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('dead404.example.org')) return new Response('not found', { status: 404 })
+      return new Response('<html>ok</html>', { status: 200, headers: { 'content-type': 'text/html' } })
+    }) as unknown as typeof fetch
+
+    const preflightSkipCalls: Array<{ batchId: number; items: unknown[] }> = []
+    const legacyClaims: number[][] = []
+    const legacySkips: number[] = []
+    const legacyTags: number[] = []
+
+    const smProvider: BacklinkBatchSourceProvider = {
+      id: 'mock',
+      available: () => true,
+      listBatches: async () => [detail.batch],
+      getBatch: async () => detail,
+      claim: async (_batchId, itemIds) => {
+        legacyClaims.push([...(itemIds ?? [])])
+        return { leaseId: 500, leaseExpiresAt: '2026-11-23T01:00:00Z', items: detail.items.filter(i => itemIds?.includes(i.id)) }
+      },
+      heartbeat: async (leaseId) => ({ leaseId, leaseExpiresAt: '2026-11-23T02:00:00Z' }),
+      release: async () => {},
+      reportItemResult: async (itemId) => {
+        legacySkips.push(itemId)
+        return { itemStatus: 'skipped', publishRecordId: null }
+      },
+      addBadge: async () => { throw new Error('unused') },
+      preflightSkip: async (batchId, items) => {
+        preflightSkipCalls.push({ batchId, items: [...items] })
+        return {
+          ok: true,
+          batchId,
+          skippedCount: 2,
+          unchangedCount: 1,
+          results: [
+            { itemId: 1, sourceId: 3001, itemStatus: 'skipped', publishRecordId: 91, changed: true, attachedTags: ['dead_site'] },
+            { itemId: 2, sourceId: 3002, itemStatus: 'skipped', publishRecordId: 92, changed: true, attachedTags: [] },
+            { itemId: 3, sourceId: 3003, itemStatus: 'skipped', publishRecordId: 93, changed: false, attachedTags: [] },
+          ],
+        }
+      },
+      tagSource: async (sourceId, names) => {
+        legacyTags.push(sourceId)
+        return { sourceId, attached: names.map((name, idx) => ({ id: idx + 1, name, created: true })) }
+      },
+    }
+
+    const handle = createBacklinksToolHandler({
+      config: smConfig,
+      batchSource: smProvider,
+      fetchImpl: fetchMock,
+      sleepImpl: async () => {},
+    })
+    const apiRes = await handle({
+      action: 'batch_preflight',
+      batchId: 101,
+      autoSkip: true,
+      autoSkipTagged: true,
+    })
+    expect(apiRes.isError).toBeUndefined()
+    expect(legacyClaims).toHaveLength(0)
+    expect(legacySkips).toHaveLength(0)
+    expect(legacyTags).toHaveLength(0)
+    expect(preflightSkipCalls).toHaveLength(1)
+    expect(preflightSkipCalls[0]?.items).toEqual([
+      { itemId: 1, skipReason: '预检不可用(http_404, HTTP 404)', tags: ['dead_site'] },
+      { itemId: 2, skipReason: '预检命中已有硬阻断标签: paid_only' },
+      { itemId: 3, skipReason: '预检命中已有硬阻断标签: no_form' },
+    ])
+    const apiData = parseToolPayload(apiRes as never).data as {
+      runnableItemIds: number[]
+      cautionItems: Array<{ id: number; tags: string[] }>
+      autoSkipResult: { mode: string; skippedItemIds: number[]; unchangedCount?: number; taggedSourceIds?: number[] }
+    }
+    expect(apiData.runnableItemIds).toEqual([4])
+    expect(apiData.cautionItems).toEqual([{ id: 4, sourceId: 3004, host: 'alias-verify.example.org', tags: ['submitmatic_verify_fail'] }])
+    expect(apiData.autoSkipResult).toEqual({
+      mode: 'preflight_skip_api',
+      skippedItemIds: [1, 2],
+      unchangedCount: 1,
+      taggedSourceIds: [3001],
+    })
+
+    // 409 LEASE_CONFLICT must NOT downgrade or stomp active lease.
+    const conflictHandle = createBacklinksToolHandler({
+      config: smConfig,
+      fetchImpl: fetchMock,
+      sleepImpl: async () => {},
+      batchSource: {
+        ...smProvider,
+        preflightSkip: async () => {
+          throw new BacklinksError('conflict: active lease held by another token', 'BACKLINKS_CONFLICT')
+        },
+      },
+    })
+    const conflictRes = await conflictHandle({ action: 'batch_preflight', batchId: 101, autoSkip: true })
+    expect(conflictRes.isError).toBeUndefined()
+    expect(legacyClaims).toHaveLength(0)
+    const conflictData = parseToolPayload(conflictRes as never).data as {
+      autoSkipResult: { mode: string; skippedItemIds: number[]; errors?: Array<{ itemId: number; error: string }> }
+    }
+    expect(conflictData.autoSkipResult.mode).toBe('preflight_skip_api')
+    expect(conflictData.autoSkipResult.skippedItemIds).toEqual([])
+    expect(conflictData.autoSkipResult.errors?.[0]?.error).toContain('active lease')
+
+    // 404 on older Supermanager downgrades cleanly to legacy item_result + tagSource.
+    const downgradeHandle = createBacklinksToolHandler({
+      config: smConfig,
+      fetchImpl: fetchMock,
+      sleepImpl: async () => {},
+      batchSource: {
+        ...smProvider,
+        preflightSkip: async () => {
+          throw new BacklinksError('not found', 'BACKLINKS_NOT_FOUND')
+        },
+      },
+    })
+    const downRes = await downgradeHandle({ action: 'batch_preflight', batchId: 101, autoSkip: true })
+    expect(downRes.isError).toBeUndefined()
+    expect(legacySkips).toEqual([1])
+    expect(legacyTags).toEqual([3001])
+    const downData = parseToolPayload(downRes as never).data as {
+      autoSkipResult: { mode: string; skippedItemIds: number[]; downgradeNotice?: string }
+    }
+    expect(downData.autoSkipResult.mode).toBe('legacy_fallback')
+    expect(downData.autoSkipResult.skippedItemIds).toEqual([1])
+    expect(downData.autoSkipResult.downgradeNotice).toContain('404/405')
+  })
+
+  it('sends POST /api/agent/batches/:id/preflight-skip via SupermanagerBatchSource', async () => {
+    const originalFetch = globalThis.fetch
+    let captured: { url: string; method?: string; body?: string } | undefined
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      captured = {
+        url: String(input),
+        method: init?.method,
+        ...(typeof init?.body === 'string' ? { body: init.body } : {}),
+      }
+      return new Response(JSON.stringify({
+        ok: true,
+        batchId: 55,
+        skippedCount: 1,
+        unchangedCount: 0,
+        results: [{ itemId: 10, sourceId: 90, itemStatus: 'skipped', publishRecordId: 501, changed: true, attachedTags: ['dead_site'] }],
+      }), { status: 200 })
+    }) as unknown as typeof fetch
+
+    try {
+      const sm = new SupermanagerBatchSource(() => ({
+        baseUrl: 'https://sm.example.com',
+        token: 'smag_tok',
+        requestTimeoutMs: 5_000,
+      }))
+      const out = await sm.preflightSkip(55, [{ itemId: 10, skipReason: 'HTTP 404', tags: ['dead_site'] }])
+      expect(captured).toEqual({
+        url: 'https://sm.example.com/api/agent/batches/55/preflight-skip',
+        method: 'POST',
+        body: '{"items":[{"itemId":10,"skipReason":"HTTP 404","tags":["dead_site"]}]}',
+      })
+      expect(out).toMatchObject({ ok: true, batchId: 55, skippedCount: 1, unchangedCount: 0 })
     } finally {
       globalThis.fetch = originalFetch
     }
@@ -1502,9 +1699,9 @@ describe('Reciprocal badge rollback (badge_deactivate) & active badge guard', ()
     SUPERMANAGER_TOKEN: 'smag_secret',
   })
 
-  it('supports PATCH isActive=false, DELETE remove=true (with 204), match fallback, and clear 404/405 errors in SupermanagerBatchSource', async () => {
+  it('supports PATCH/DELETE /api/agent/badges/:badgeId, match fallback, and clear 404/405 errors in SupermanagerBatchSource', async () => {
     const requests: Array<{ method: string; url: string; body?: string }> = []
-    let mode: 'ok' | '204' | '404' = 'ok'
+    let mode: 'ok' | '204' | 'idempotentDelete' | '404' = 'ok'
     const originalFetch = globalThis.fetch
     globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       requests.push({
@@ -1514,7 +1711,27 @@ describe('Reciprocal badge rollback (badge_deactivate) & active badge guard', ()
       })
       if (mode === '404') return new Response('not found', { status: 404 })
       if (mode === '204') return new Response(null, { status: 204 })
-      return new Response(JSON.stringify({ backlinkId: 88, callbackTriggered: true }), { status: 200 })
+      if (mode === 'idempotentDelete') {
+        return new Response(JSON.stringify({
+          ok: true,
+          backlinkId: 88,
+          websiteId: 7,
+          isActive: false,
+          deleted: true,
+          alreadyDeleted: true,
+          changed: false,
+          callbackTriggered: false,
+        }), { status: 200 })
+      }
+      return new Response(JSON.stringify({
+        ok: true,
+        backlinkId: 88,
+        websiteId: 7,
+        isActive: false,
+        deleted: false,
+        changed: true,
+        callbackTriggered: true,
+      }), { status: 200 })
     }) as unknown as typeof fetch
 
     try {
@@ -1527,20 +1744,37 @@ describe('Reciprocal badge rollback (badge_deactivate) & active badge guard', ()
       const patched = await sm.deactivateBadge(7, { badgeId: 88 })
       expect(patched).toEqual({
         backlinkId: 88,
+        websiteId: 7,
         isActive: false,
         deleted: false,
+        changed: true,
         callbackTriggered: true,
         strategy: 'patch_by_id',
       })
+
+      const patchedWithoutWebsite = await sm.deactivateBadge(undefined, { badgeId: 88 })
+      expect(patchedWithoutWebsite.backlinkId).toBe(88)
 
       mode = '204'
       const deleted = await sm.deactivateBadge(7, { badgeId: 88, remove: true })
       expect(deleted).toEqual({
         backlinkId: 88,
+        websiteId: 7,
         isActive: false,
         deleted: true,
         callbackTriggered: false,
         strategy: 'delete_by_id',
+      })
+
+      mode = 'idempotentDelete'
+      const deletedAgain = await sm.deactivateBadge(undefined, { badgeId: 88, remove: true })
+      expect(deletedAgain).toMatchObject({
+        backlinkId: 88,
+        websiteId: 7,
+        isActive: false,
+        deleted: true,
+        alreadyDeleted: true,
+        changed: false,
       })
 
       mode = 'ok'
@@ -1552,8 +1786,10 @@ describe('Reciprocal badge rollback (badge_deactivate) & active badge guard', ()
       expect(matched.isActive).toBe(false)
 
       expect(requests).toEqual([
-        { method: 'PATCH', url: 'https://sm.example.com/api/agent/websites/7/footer-backlinks/88', body: '{"isActive":false}' },
-        { method: 'DELETE', url: 'https://sm.example.com/api/agent/websites/7/footer-backlinks/88' },
+        { method: 'PATCH', url: 'https://sm.example.com/api/agent/badges/88?websiteId=7', body: '{"isActive":false,"websiteId":7}' },
+        { method: 'PATCH', url: 'https://sm.example.com/api/agent/badges/88', body: '{"isActive":false}' },
+        { method: 'DELETE', url: 'https://sm.example.com/api/agent/badges/88?websiteId=7' },
+        { method: 'DELETE', url: 'https://sm.example.com/api/agent/badges/88' },
         {
           method: 'PATCH',
           url: 'https://sm.example.com/api/agent/websites/7/footer-backlinks',
@@ -1563,7 +1799,7 @@ describe('Reciprocal badge rollback (badge_deactivate) & active badge guard', ()
 
       mode = '404'
       await expect(sm.deactivateBadge(7, { badgeId: 88 })).rejects.toThrow(
-        /Supermanager backend may not yet expose PATCH \/api\/agent\/websites\/7\/footer-backlinks\/88/,
+        /Supermanager backend may not yet expose PATCH \/api\/agent\/badges\/88\?websiteId=7/,
       )
     } finally {
       globalThis.fetch = originalFetch
@@ -1653,6 +1889,13 @@ describe('Reciprocal badge rollback (badge_deactivate) & active badge guard', ()
 
     const invalidDeactivate = await handle({ action: 'badge_deactivate', websiteId: 7 })
     expect(invalidDeactivate.isError).toBe(true)
+
+    const idOnlyRes = await handle({ action: 'badge_deactivate', badgeId: 55 })
+    expect(idOnlyRes.isError).toBeUndefined()
+    expect(deactivateMock).toHaveBeenLastCalledWith(undefined, { badgeId: 55 }, undefined)
+
+    const missingSiteForName = await handle({ action: 'badge_deactivate', name: 'DirOne' })
+    expect(missingSiteForName.isError).toBe(true)
   })
 })
 

@@ -8,6 +8,7 @@ import type {
   BacklinkBatchDetail,
   BacklinkBatchItem,
   BacklinkBatchSourceProvider,
+  BacklinkPreflightSkipItem,
 } from '../host/backlinks/types.ts'
 import {
   DEFAULT_PREFLIGHT_CONCURRENCY,
@@ -188,8 +189,11 @@ export interface BatchPreflightResult {
     readonly retryableItems?: readonly PreflightRetryableItem[]
     readonly alreadyPublishedItemIds?: readonly number[]
     readonly autoSkipResult?: {
+      readonly mode: 'preflight_skip_api' | 'legacy_fallback'
       readonly skippedItemIds: readonly number[]
+      readonly unchangedCount?: number
       readonly taggedSourceIds?: readonly number[]
+      readonly downgradeNotice?: string
       readonly errors?: readonly PreflightAutoSkipError[]
     }
   }
@@ -507,6 +511,8 @@ interface AutoSkipEntry {
   readonly kind: 'dead' | 'tagged'
 }
 
+const PREFLIGHT_SKIP_CHUNK_SIZE = 100
+
 function isLeaseRequiredError(error: unknown): boolean {
   if (!(error instanceof BacklinksError)) return false
   return (
@@ -516,17 +522,27 @@ function isLeaseRequiredError(error: unknown): boolean {
   )
 }
 
-async function applyAutoSkips(
-  batchSource: BacklinkBatchSourceProvider,
-  batchId: number,
-  entries: readonly AutoSkipEntry[],
-  signal?: AbortSignal,
-): Promise<{
+function isUnsupportedEndpointError(error: unknown): boolean {
+  if (!(error instanceof BacklinksError)) return false
+  return (
+    error.code === 'BACKLINKS_NOT_FOUND'
+    || (error.code === 'BACKLINKS_API_ERROR' && error.message.includes('HTTP 405'))
+  )
+}
+
+interface LegacyAutoSkipOutcome {
   readonly skippedDeadItemIds: readonly number[]
   readonly skippedTaggedItemIds: readonly number[]
   readonly taggedSourceIds: readonly number[]
   readonly errors: readonly PreflightAutoSkipError[]
-}> {
+}
+
+async function applyLegacyAutoSkips(
+  batchSource: BacklinkBatchSourceProvider,
+  batchId: number,
+  entries: readonly AutoSkipEntry[],
+  signal?: AbortSignal,
+): Promise<LegacyAutoSkipOutcome> {
   if (entries.length === 0) {
     return { skippedDeadItemIds: [], skippedTaggedItemIds: [], taggedSourceIds: [], errors: [] }
   }
@@ -619,6 +635,122 @@ async function applyAutoSkips(
   return { skippedDeadItemIds, skippedTaggedItemIds, taggedSourceIds, errors }
 }
 
+async function applyAutoSkips(
+  batchSource: BacklinkBatchSourceProvider,
+  batchId: number,
+  entries: readonly AutoSkipEntry[],
+  signal?: AbortSignal,
+): Promise<{
+  readonly mode: 'preflight_skip_api' | 'legacy_fallback'
+  readonly skippedDeadItemIds: readonly number[]
+  readonly skippedTaggedItemIds: readonly number[]
+  readonly unchangedCount: number
+  readonly taggedSourceIds: readonly number[]
+  readonly downgradeNotice?: string
+  readonly errors: readonly PreflightAutoSkipError[]
+}> {
+  if (entries.length === 0) {
+    return {
+      mode: batchSource.preflightSkip ? 'preflight_skip_api' : 'legacy_fallback',
+      skippedDeadItemIds: [],
+      skippedTaggedItemIds: [],
+      unchangedCount: 0,
+      taggedSourceIds: [],
+      errors: [],
+    }
+  }
+
+  if (typeof batchSource.preflightSkip === 'function') {
+    const skippedDeadItemIds: number[] = []
+    const skippedTaggedItemIds: number[] = []
+    const taggedSourceIds = new Set<number>()
+    const errors: PreflightAutoSkipError[] = []
+    let unchangedCount = 0
+
+    for (let offset = 0; offset < entries.length; offset += PREFLIGHT_SKIP_CHUNK_SIZE) {
+      const chunk = entries.slice(offset, offset + PREFLIGHT_SKIP_CHUNK_SIZE)
+      const payload: BacklinkPreflightSkipItem[] = chunk.map(entry => ({
+        itemId: entry.itemId,
+        skipReason: entry.skipReason,
+        ...(entry.kind === 'dead' ? { tags: ['dead_site'] } : {}),
+      }))
+      try {
+        const res = await batchSource.preflightSkip(batchId, payload, signal)
+        unchangedCount += res.unchangedCount
+        const entryById = new Map(chunk.map(entry => [entry.itemId, entry]))
+        if (res.results.length > 0) {
+          for (const itemRes of res.results) {
+            const matched = entryById.get(itemRes.itemId)
+            if (itemRes.itemStatus === 'skipped' && itemRes.changed) {
+              if (matched?.kind === 'dead') skippedDeadItemIds.push(itemRes.itemId)
+              else skippedTaggedItemIds.push(itemRes.itemId)
+            }
+            if (itemRes.attachedTags.length > 0) {
+              taggedSourceIds.add(itemRes.sourceId)
+            }
+          }
+        } else {
+          for (const entry of chunk) {
+            if (entry.kind === 'dead') {
+              skippedDeadItemIds.push(entry.itemId)
+              taggedSourceIds.add(entry.sourceId)
+            } else {
+              skippedTaggedItemIds.push(entry.itemId)
+            }
+          }
+        }
+      } catch (error) {
+        if (signal?.aborted) throw error
+        if (isUnsupportedEndpointError(error)) {
+          const fallback = await applyLegacyAutoSkips(batchSource, batchId, entries.slice(offset), signal)
+          for (const id of fallback.skippedDeadItemIds) skippedDeadItemIds.push(id)
+          for (const id of fallback.skippedTaggedItemIds) skippedTaggedItemIds.push(id)
+          for (const sid of fallback.taggedSourceIds) taggedSourceIds.add(sid)
+          for (const err of fallback.errors) errors.push(err)
+          return {
+            mode: 'legacy_fallback',
+            skippedDeadItemIds,
+            skippedTaggedItemIds,
+            unchangedCount,
+            taggedSourceIds: [...taggedSourceIds],
+            downgradeNotice: 'Supermanager returned 404/405 for /preflight-skip; downgraded to legacy item_result/ephemeral lease flow.',
+            errors,
+          }
+        }
+        const message = error instanceof Error ? error.message : String(error)
+        for (const entry of chunk) {
+          errors.push({ itemId: entry.itemId, error: message })
+        }
+        if (error instanceof BacklinksError && error.code === 'BACKLINKS_CONFLICT') {
+          for (const entry of entries.slice(offset + PREFLIGHT_SKIP_CHUNK_SIZE)) {
+            errors.push({ itemId: entry.itemId, error: message })
+          }
+          break
+        }
+      }
+    }
+
+    return {
+      mode: 'preflight_skip_api',
+      skippedDeadItemIds,
+      skippedTaggedItemIds,
+      unchangedCount,
+      taggedSourceIds: [...taggedSourceIds],
+      errors,
+    }
+  }
+
+  const legacy = await applyLegacyAutoSkips(batchSource, batchId, entries, signal)
+  return {
+    mode: 'legacy_fallback',
+    skippedDeadItemIds: legacy.skippedDeadItemIds,
+    skippedTaggedItemIds: legacy.skippedTaggedItemIds,
+    unchangedCount: 0,
+    taggedSourceIds: legacy.taggedSourceIds,
+    errors: legacy.errors,
+  }
+}
+
 function formatDeadSkipReason(dead: PreflightDeadItem): string {
   const details = [dead.reason, ...(dead.httpStatus === undefined ? [] : [`HTTP ${dead.httpStatus}`])]
   if (dead.detail !== undefined && dead.detail.length > 0 && dead.reason === 'parked_or_suspended') {
@@ -657,7 +789,12 @@ export async function runBatchPreflight(
       alreadyPublishedItemIds.push(item.id)
       continue
     }
-    const tagMatch = matchBlockingTags(item.tags, options.skipTags)
+    const combinedTags = [
+      ...item.tags,
+      ...(item.sourceTags ?? []),
+      ...(item.blockingTags ?? []),
+    ]
+    const tagMatch = matchBlockingTags(combinedTags, options.skipTags)
     if (tagMatch.matchedSkipTags.length > 0) {
       taggedBlocked.push({
         id: item.id,
@@ -813,8 +950,11 @@ export async function runBatchPreflight(
       ...(autoSkip || autoSkipTagged
         ? {
             autoSkipResult: {
+              mode: skipEffect.mode,
               skippedItemIds: combinedSkippedIds,
+              ...(skipEffect.unchangedCount > 0 ? { unchangedCount: skipEffect.unchangedCount } : {}),
               ...(skipEffect.taggedSourceIds.length > 0 ? { taggedSourceIds: skipEffect.taggedSourceIds } : {}),
+              ...(skipEffect.downgradeNotice === undefined ? {} : { downgradeNotice: skipEffect.downgradeNotice }),
               ...(skipEffect.errors.length > 0 ? { errors: skipEffect.errors } : {}),
             },
           }

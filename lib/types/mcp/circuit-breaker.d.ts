@@ -60,7 +60,7 @@ export declare class PublishSessionGuard {
     getClaimAlerts(batchId: number, claimedItems: readonly BacklinkBatchItem[]): readonly CircuitBreakerAlert[];
     recordBadgeAdded(badge: ActiveBadgeRecord): void;
     recordBadgeDeactivated(criteria: {
-        readonly websiteId: number;
+        readonly websiteId?: number;
         readonly badgeId?: number;
         readonly name?: string;
         readonly html?: string;

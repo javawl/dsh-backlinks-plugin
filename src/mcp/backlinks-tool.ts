@@ -117,12 +117,10 @@ export const BACKLINKS_TOOL_DEFINITION: Tool = {
       },
       leaseId: { type: 'integer', description: 'Lease ID for lease_heartbeat / lease_release.' },
       itemId: { type: 'integer', description: 'Plan item ID for item_result.' },
-      websiteId: { type: 'integer', description: 'Website ID for badge_add / badge_deactivate.' },
+      websiteId: { type: 'integer', description: 'Website ID for badge_add (required) and badge_deactivate (optional when badgeId is provided; required for name/html match).' },
       badgeId: { type: 'integer', description: 'Badge ID (returned as backlinkId by badge_add) for badge_deactivate.' },
-      remove: {
-        type: 'boolean',
-        description: 'For badge_deactivate: when true, hard-delete via DELETE instead of PATCH isActive=false (default false).',
-      },
+      sortOrder: { type: 'integer', description: 'Optional badge sortOrder when updating via badge_deactivate.' },
+      remove: { type: 'boolean', description: 'For badge_deactivate: when true, hard-delete via DELETE instead of PATCH isActive=false (default false).' },
       sourceId: { type: 'integer', description: 'Target source ID for source_tags.' },
       status: {
         type: 'string',
@@ -671,14 +669,18 @@ export function createBacklinksToolHandler(deps: BacklinksToolDependencies) {
         }
         case 'badge_deactivate': {
           ensureBatchSourceReady()
-          const websiteId = readPositiveInt(args.websiteId, 'websiteId')
+          const websiteId = readOptionalPositiveInt(args.websiteId, 'websiteId')
           const badgeId = readOptionalPositiveInt(args.badgeId, 'badgeId')
           const nameRaw = readOptionalString(args.name, 'name')
           const htmlRaw = readOptionalString(args.html, 'html')
           const name = nameRaw !== undefined && nameRaw.trim().length > 0 ? nameRaw.trim() : undefined
           const html = htmlRaw !== undefined && htmlRaw.trim().length > 0 ? htmlRaw.trim() : undefined
+          const sortOrder = readOptionalNonNegativeInt(args.sortOrder, 'sortOrder')
           if (badgeId === undefined && name === undefined && html === undefined) {
             throw new Error('backlinks badge_deactivate requires badgeId, name, or html.')
+          }
+          if (badgeId === undefined && websiteId === undefined) {
+            throw new Error('backlinks badge_deactivate requires websiteId when badgeId is omitted.')
           }
           if (args.remove !== undefined && typeof args.remove !== 'boolean') {
             throw new Error('backlinks remove must be a boolean.')
@@ -698,14 +700,16 @@ export function createBacklinksToolHandler(deps: BacklinksToolDependencies) {
               ...(badgeId === undefined ? {} : { badgeId }),
               ...(name === undefined ? {} : { name }),
               ...(html === undefined ? {} : { html }),
+              ...(sortOrder === undefined ? {} : { sortOrder }),
               ...(remove ? { remove: true } : {}),
             },
             signal,
           )
 
           const effectiveBadgeId = badgeId ?? outcome.backlinkId ?? undefined
+          const effectiveWebsiteId = websiteId ?? outcome.websiteId
           sessionGuard.recordBadgeDeactivated({
-            websiteId,
+            ...(effectiveWebsiteId === undefined ? {} : { websiteId: effectiveWebsiteId }),
             ...(effectiveBadgeId === undefined ? {} : { badgeId: effectiveBadgeId }),
             ...(name === undefined ? {} : { name }),
             ...(html === undefined ? {} : { html }),
@@ -736,7 +740,11 @@ export function createBacklinksToolHandler(deps: BacklinksToolDependencies) {
             }
           }
 
-          summary = `badge ${outcome.backlinkId ?? name ?? 'matched'} ${outcome.deleted ? 'deleted' : 'deactivated'} (isActive=false)`
+          const stateLabel = outcome.deleted
+            ? (outcome.alreadyDeleted ? 'already deleted' : 'deleted')
+            : 'deactivated (isActive=false)'
+          summary = `badge ${outcome.backlinkId ?? name ?? 'matched'} ${stateLabel}`
+            + (outcome.callbackTriggered ? '; site refresh callback fired' : '')
           data = {
             ...outcome,
             ...(refresh === undefined ? {} : { refresh }),

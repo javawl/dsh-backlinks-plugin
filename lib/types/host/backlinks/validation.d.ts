@@ -41,6 +41,7 @@ export interface CompactBacklinkBatchItem {
     readonly sourceNotes?: string;
     readonly category?: string;
     readonly tags?: readonly string[];
+    readonly blockingTags?: readonly string[];
     readonly paymentType?: string;
     readonly linkType?: string;
     readonly status: string;

@@ -15,6 +15,9 @@ import type {
   BacklinkItemOutcome,
   BacklinkItemResult,
   BacklinkLeaseClaim,
+  BacklinkPreflightSkipItem,
+  BacklinkPreflightSkipItemResult,
+  BacklinkPreflightSkipResult,
   BacklinkTagResult,
   BacklinkWebsiteAnchor,
 } from '../backlinks/types.ts'
@@ -77,12 +80,8 @@ function toBatchSummary(value: unknown): BacklinkBatchSummary {
   }
 }
 
-function toStringTags(row: Record<string, unknown>): readonly string[] {
-  const raw = Array.isArray(row.tags)
-    ? row.tags
-    : Array.isArray(row.sourceTags)
-      ? row.sourceTags
-      : []
+function extractTagNames(raw: unknown): readonly string[] {
+  if (!Array.isArray(raw)) return []
   const seen = new Set<string>()
   const out: string[] = []
   for (const entry of raw) {
@@ -101,8 +100,25 @@ function toStringTags(row: Record<string, unknown>): readonly string[] {
   return out
 }
 
+function mergeTagLists(...lists: readonly (readonly string[])[]): readonly string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const list of lists) {
+    for (const tag of list) {
+      if (!seen.has(tag)) {
+        seen.add(tag)
+        out.push(tag)
+      }
+    }
+  }
+  return out
+}
+
 function toItem(value: unknown): BacklinkBatchItem {
   const row = asRecord(value)
+  const rawTags = extractTagNames(row.tags)
+  const rawSourceTags = extractTagNames(row.sourceTags)
+  const rawBlockingTags = extractTagNames(row.blockingTags)
   return {
     id: toNumber(row.id),
     sourceId: toNumber(row.sourceId),
@@ -112,7 +128,9 @@ function toItem(value: unknown): BacklinkBatchItem {
     submitUrl: toNullableString(row.submitUrl),
     sourceNotes: toNullableString(row.sourceNotes),
     category: toNullableString(row.category),
-    tags: toStringTags(row),
+    tags: mergeTagLists(rawTags, rawSourceTags),
+    ...(Array.isArray(row.sourceTags) ? { sourceTags: rawSourceTags } : {}),
+    ...(Array.isArray(row.blockingTags) ? { blockingTags: rawBlockingTags } : {}),
     paymentType: str(row.paymentType),
     linkType: str(row.linkType),
     status: str(row.status),
@@ -249,7 +267,7 @@ export class SupermanagerBatchSource implements BacklinkBatchSourceProvider {
   }
 
   async deactivateBadge(
-    websiteId: number,
+    websiteId: number | undefined,
     input: BacklinkBadgeDeactivateInput,
     signal?: AbortSignal,
   ): Promise<BacklinkBadgeDeactivateResult> {
@@ -262,9 +280,16 @@ export class SupermanagerBatchSource implements BacklinkBatchSourceProvider {
         'BACKLINKS_INVALID_REQUEST',
       )
     }
+    if (!hasBadgeId && websiteId === undefined) {
+      throw new BacklinksError(
+        'badge deactivation by name or html requires websiteId',
+        'BACKLINKS_INVALID_REQUEST',
+      )
+    }
 
+    const query = websiteId !== undefined ? `?websiteId=${websiteId}` : ''
     const endpoint = hasBadgeId
-      ? `/api/agent/websites/${websiteId}/footer-backlinks/${input.badgeId}`
+      ? `/api/agent/badges/${input.badgeId}${query}`
       : `/api/agent/websites/${websiteId}/footer-backlinks`
 
     try {
@@ -272,25 +297,44 @@ export class SupermanagerBatchSource implements BacklinkBatchSourceProvider {
         if (input.remove === true) {
           const body = await this.requestJson(endpoint, { method: 'DELETE' }, signal)
           const record = asRecord(body)
+          const resolvedWebsiteId = record.websiteId !== undefined && record.websiteId !== null
+            ? toNumber(record.websiteId)
+            : websiteId
           return {
-            backlinkId: input.badgeId as number,
+            backlinkId: record.backlinkId !== undefined && record.backlinkId !== null
+              ? toNumber(record.backlinkId)
+              : (input.badgeId as number),
+            ...(resolvedWebsiteId === undefined ? {} : { websiteId: resolvedWebsiteId }),
             isActive: false,
-            deleted: true,
+            deleted: record.deleted === undefined ? true : record.deleted === true,
+            ...(record.alreadyDeleted === undefined ? {} : { alreadyDeleted: record.alreadyDeleted === true }),
+            ...(record.changed === undefined ? {} : { changed: record.changed === true }),
             callbackTriggered: record.callbackTriggered === true,
             strategy: 'delete_by_id',
           }
         }
         const body = await this.requestJson(endpoint, {
           method: 'PATCH',
-          payload: { isActive: false },
+          payload: {
+            isActive: false,
+            ...(websiteId === undefined ? {} : { websiteId }),
+            ...(cleanName === undefined ? {} : { name: cleanName }),
+            ...(cleanHtml === undefined ? {} : { html: cleanHtml }),
+            ...(input.sortOrder === undefined ? {} : { sortOrder: input.sortOrder }),
+          },
         }, signal)
         const record = asRecord(body)
+        const resolvedWebsiteId = record.websiteId !== undefined && record.websiteId !== null
+          ? toNumber(record.websiteId)
+          : websiteId
         return {
           backlinkId: record.backlinkId !== undefined && record.backlinkId !== null
             ? toNumber(record.backlinkId)
             : (input.badgeId as number),
+          ...(resolvedWebsiteId === undefined ? {} : { websiteId: resolvedWebsiteId }),
           isActive: false,
-          deleted: false,
+          deleted: record.deleted === true,
+          ...(record.changed === undefined ? {} : { changed: record.changed === true }),
           callbackTriggered: record.callbackTriggered === true,
           strategy: 'patch_by_id',
         }
@@ -306,12 +350,18 @@ export class SupermanagerBatchSource implements BacklinkBatchSourceProvider {
         },
       }, signal)
       const record = asRecord(body)
+      const resolvedWebsiteId = record.websiteId !== undefined && record.websiteId !== null
+        ? toNumber(record.websiteId)
+        : websiteId
       return {
         backlinkId: record.backlinkId !== undefined && record.backlinkId !== null
           ? toNumber(record.backlinkId)
           : null,
+        ...(resolvedWebsiteId === undefined ? {} : { websiteId: resolvedWebsiteId }),
         isActive: false,
         deleted: record.deleted === true || input.remove === true,
+        ...(record.alreadyDeleted === undefined ? {} : { alreadyDeleted: record.alreadyDeleted === true }),
+        ...(record.changed === undefined ? {} : { changed: record.changed === true }),
         callbackTriggered: record.callbackTriggered === true,
         strategy: 'patch_by_match',
       }
@@ -329,6 +379,53 @@ export class SupermanagerBatchSource implements BacklinkBatchSourceProvider {
         )
       }
       throw error
+    }
+  }
+
+  async preflightSkip(
+    batchId: number,
+    items: readonly BacklinkPreflightSkipItem[],
+    signal?: AbortSignal,
+  ): Promise<BacklinkPreflightSkipResult> {
+    if (items.length === 0 || items.length > 100) {
+      throw new BacklinksError(
+        'preflight-skip requires between 1 and 100 items',
+        'BACKLINKS_INVALID_REQUEST',
+      )
+    }
+    const body = await this.requestJson(`/api/agent/batches/${batchId}/preflight-skip`, {
+      method: 'POST',
+      payload: {
+        items: items.map(entry => ({
+          itemId: entry.itemId,
+          skipReason: entry.skipReason.slice(0, 2000),
+          ...(entry.tags !== undefined && entry.tags.length > 0 ? { tags: [...entry.tags].slice(0, 10) } : {}),
+        })),
+      },
+    }, signal)
+    const record = asRecord(body)
+    const results: BacklinkPreflightSkipItemResult[] = Array.isArray(record.results)
+      ? record.results.map((entry: unknown) => {
+        const row = asRecord(entry)
+        return {
+          itemId: toNumber(row.itemId),
+          sourceId: toNumber(row.sourceId),
+          itemStatus: str(row.itemStatus),
+          publishRecordId: row.publishRecordId === undefined || row.publishRecordId === null
+            ? null
+            : toNumber(row.publishRecordId),
+          changed: row.changed === true,
+          attachedTags: Array.isArray(row.attachedTags) ? row.attachedTags.map(String) : [],
+        }
+      })
+      : []
+
+    return {
+      ok: record.ok !== false,
+      batchId: record.batchId !== undefined ? toNumber(record.batchId) : batchId,
+      skippedCount: record.skippedCount !== undefined ? toNumber(record.skippedCount) : 0,
+      unchangedCount: record.unchangedCount !== undefined ? toNumber(record.unchangedCount) : 0,
+      results,
     }
   }
 

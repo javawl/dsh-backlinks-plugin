@@ -3,7 +3,7 @@
  */
 import { Context, Service } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
-import type { BacklinkBadgeDeactivateInput, BacklinkBadgeDeactivateResult, BacklinkBadgeInput, BacklinkBadgeResult, BacklinkBatchDetail, BacklinkBatchSourceProvider, BacklinkBatchSummary, BacklinkHeartbeat, BacklinkItemOutcome, BacklinkItemResult, BacklinkLeaseClaim, BacklinkTagResult, MailboxAddress, MailboxProvider, MailPollOptions, VerificationMail } from './types.ts';
+import type { BacklinkBadgeDeactivateInput, BacklinkBadgeDeactivateResult, BacklinkBadgeInput, BacklinkBadgeResult, BacklinkBatchDetail, BacklinkBatchSourceProvider, BacklinkBatchSummary, BacklinkHeartbeat, BacklinkItemOutcome, BacklinkItemResult, BacklinkLeaseClaim, BacklinkPreflightSkipItem, BacklinkPreflightSkipResult, BacklinkTagResult, MailboxAddress, MailboxProvider, MailPollOptions, VerificationMail } from './types.ts';
 export { BacklinksError } from './types.ts';
 export type * from './types.ts';
 declare module '@deepseek-ai/cordis' {
@@ -32,7 +32,8 @@ export declare class BacklinksRuntime extends Service {
     release(leaseId: number, signal?: AbortSignal): Promise<void>;
     reportItemResult(itemId: number, result: BacklinkItemResult, signal?: AbortSignal): Promise<BacklinkItemOutcome>;
     addBadge(websiteId: number, badge: BacklinkBadgeInput, signal?: AbortSignal): Promise<BacklinkBadgeResult>;
-    deactivateBadge(websiteId: number, input: BacklinkBadgeDeactivateInput, signal?: AbortSignal): Promise<BacklinkBadgeDeactivateResult>;
+    deactivateBadge(websiteId: number | undefined, input: BacklinkBadgeDeactivateInput, signal?: AbortSignal): Promise<BacklinkBadgeDeactivateResult>;
+    preflightSkip(batchId: number, items: readonly BacklinkPreflightSkipItem[], signal?: AbortSignal): Promise<BacklinkPreflightSkipResult>;
     tagSource(sourceId: number, names: readonly string[], signal?: AbortSignal): Promise<BacklinkTagResult>;
     createMailbox(options: {
         readonly localPart: string;

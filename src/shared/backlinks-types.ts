@@ -40,6 +40,8 @@ export interface BacklinkBatchItem {
   readonly sourceNotes: string | null
   readonly category: string | null
   readonly tags: readonly string[]
+  readonly sourceTags?: readonly string[]
+  readonly blockingTags?: readonly string[]
   readonly paymentType: string
   readonly linkType: string
   readonly status: string
@@ -122,16 +124,46 @@ export interface BacklinkBadgeDeactivateInput {
   readonly badgeId?: number
   readonly name?: string
   readonly html?: string
+  readonly sortOrder?: number
   readonly remove?: boolean
 }
 
 /** Reciprocal badge deactivation or removal effect. */
 export interface BacklinkBadgeDeactivateResult {
   readonly backlinkId: number | null
+  readonly websiteId?: number
   readonly isActive: false
   readonly deleted: boolean
+  readonly alreadyDeleted?: boolean
+  readonly changed?: boolean
   readonly callbackTriggered: boolean
   readonly strategy: 'patch_by_id' | 'delete_by_id' | 'patch_by_match'
+}
+
+/** Input item for lease-safe batch preflight-skip writeback. */
+export interface BacklinkPreflightSkipItem {
+  readonly itemId: number
+  readonly skipReason: string
+  readonly tags?: readonly string[]
+}
+
+/** Per-item outcome from Supermanager `/api/agent/batches/:id/preflight-skip`. */
+export interface BacklinkPreflightSkipItemResult {
+  readonly itemId: number
+  readonly sourceId: number
+  readonly itemStatus: string
+  readonly publishRecordId: number | null
+  readonly changed: boolean
+  readonly attachedTags: readonly string[]
+}
+
+/** Batch preflight-skip outcome. */
+export interface BacklinkPreflightSkipResult {
+  readonly ok: boolean
+  readonly batchId: number
+  readonly skippedCount: number
+  readonly unchangedCount: number
+  readonly results: readonly BacklinkPreflightSkipItemResult[]
 }
 
 /** One attached source tag resolution outcome. */

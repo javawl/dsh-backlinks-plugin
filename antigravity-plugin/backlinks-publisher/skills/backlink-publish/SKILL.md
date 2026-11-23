@@ -15,7 +15,7 @@ description: 本工作区所有"发外链/发布外链/发布批次/跑批次/�
 > 注意：经典版 Antigravity Desktop App 仅加载 `skills/` 与 `mcp_config.json`，不一定自动注入插件 `rules/AGENTS.md`。执行本技能时**必须严格遵守以下内置工具规范**：
 
 1. **`backlinks` 零 LLM 预检、全局标签过滤与防并发**：
-   - **开跑必选第一步 `batch_preflight`**：在任何 `batch_claim` 之前，必须先调 `backlinks action="batch_preflight"`（传 `batchId`、`autoSkip: true`、`autoSkipTagged: true`、默认 `timeoutMs: 5000`、`concurrency: 6`）。工具不启动 Chrome、不耗 LLM，并发完成 HTTP 轻量预检与已有标签过滤：自动识别 `404`/`410`/持续 `5xx`/DNS/TLS/停服占位页（`Vercel Deployment Paused`、`suspendedpage.cgi`、`Account Suspended`、`Domain for Sale`）并回写 `skipped` + 打 `dead_site`；CloudFront/WAF 403 单独归类为 `waf_403`（绝不误删为死链）；对已带硬阻断标签的来源零请求直接跳过。
+   - **开跑必选第一步 `batch_preflight`**：在任何 `batch_claim` 之前，必须先调 `backlinks action="batch_preflight"`（传 `batchId`、`autoSkip: true`、`autoSkipTagged: true`、默认 `timeoutMs: 5000`、`concurrency: 6`）。工具不启动 Chrome、不耗 LLM，读取服务端透出的 `sourceTags`/`blockingTags` 并并发完成 HTTP 轻量预检：自动识别 `404`/`410`/持续 `5xx`/DNS/TLS/停服占位页（`Vercel Deployment Paused`、`suspendedpage.cgi`、`Account Suspended`、`Domain for Sale`），优先通过租约安全的 `POST /api/agent/batches/{batchId}/preflight-skip` 原子跳过并打 `dead_site`（遇 409 冲突保护不抢租约，遇旧版 Supermanager 404 自动降级为短租约回写）；CloudFront/WAF 403 单独归类为 `waf_403`（绝不误删为死链）；已带硬阻断标签的来源零请求直接跳过。
    - **标准阻断标签常量集合**（遇到对应阻断时必须在 `item_result` 同步调用 `source_tags` 打标）：
      - 硬阻断标签（预检 `autoSkipTagged: true` 直接跳过）：`paid_only`（强制收费）、`no_form`（无提交入口）、`dead_site`（死链/停服/占位）、`comments_closed`（关评）。
      - 软阻断/警示标签：`has_captcha`（reCAPTCHA/SecureImg/Turnstile/数学题验证码）、`waf_403`（CloudFront/WAF 403 拦截）、`submitmatic_verify_fail`（`@submitmatic` 模板 Verify Badge 校验失败）。
@@ -24,7 +24,7 @@ description: 本工作区所有"发外链/发布外链/发布批次/跑批次/�
    - `batch_get` 默认 `compact: true`，单批次仅拉取一次用于获取 `website` 6 字段资料包与 `anchors`（大批量传 `pendingOnly: true` + `limit`/`offset`，服务端始终基于全批次返回 `publishedSourceIds`）；禁止在单会话内反复重调 `batch_get` 或重复 `read_file` 已读文档。
    - **单会话条目预算（10–12 条）**：单次 `agy` 对话推荐只处理 **10–12 条（2 片 × 5–6 条，硬上限 15 条）**。完成当前片后务必 `lease_release`，精简输出已完成与剩余条数并提示新开 `agy` 会话续跑，防止上下文膨胀与冗余回执。
    - **分片认领**：按 `batch_preflight.runnableItemIds` 每次认领 **5–6 条**（同域名 `sourceHost` 必须同片串行），每完成 1–2 条调 `lease_heartbeat`，片尾务必 `lease_release`。
-   - **互换徽标校验与回滚**：需要触发站点刷新并验证首页是否出现目标链接时，直接调用 `backlinks action="badge_verify"`（禁止 `bash`/`powershell` 跑 `curl`/`grep`）。**铁律：挂载互换徽标并 `badge_verify` 后，如果对方 `Verify Badge` 校验失败且放弃提交，必须立即调用 `backlinks action="badge_deactivate"`（传 `websiteId`、`badgeId`、可选 `refreshUrl`）停用/删除该徽标，绝不在推广站首页残留无效徽标。**
+   - **互换徽标校验与回滚**：需要触发站点刷新并验证首页是否出现目标链接时，直接调用 `backlinks action="badge_verify"`（禁止 `bash`/`powershell` 跑 `curl`/`grep`）。**铁律：挂载互换徽标并 `badge_verify` 后，如果对方 `Verify Badge` 校验失败且放弃提交，必须立即调用 `backlinks action="badge_deactivate"`（支持直接传 `badgeId`，可选 `websiteId` / `remove` / `refreshUrl`，幂等停用并触发站点刷新回调）停用/删除该徽标，绝不在推广站首页残留无效徽标。**
    - **懒加载鉴权**：`CLOUDMAIL_TOKEN` 仅在调用 `mailbox_create` / `mail_wait` 时检查；未配置接码令牌时其余 Supermanager 批次动作照常可用。
 2. **`browser` 降 Token 与快速失败阈值**：
    - **导航与慢等收紧**：`browser navigate` 默认超时已下调为 **10,000ms**（推荐显式传 `timeoutMs: 8000`–`10000` 快速失败，不再死等慢站）；`backlinks mail_wait` 默认上限已收紧至 **30,000ms**（30 秒未收到验证邮件直接回写 `failed + manual_required`，不卡死整片）；登录/OAuth 挂起超过 **15–20s** 直接判定阻塞并回写 `failed + manual_required`，禁止死循环重复点击。

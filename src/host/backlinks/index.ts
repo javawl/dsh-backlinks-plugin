@@ -16,6 +16,8 @@ import type {
   BacklinkItemOutcome,
   BacklinkItemResult,
   BacklinkLeaseClaim,
+  BacklinkPreflightSkipItem,
+  BacklinkPreflightSkipResult,
   BacklinkTagResult,
   MailboxAddress,
   MailboxProvider,
@@ -107,7 +109,7 @@ export class BacklinksRuntime extends Service {
   }
 
   async deactivateBadge(
-    websiteId: number,
+    websiteId: number | undefined,
     input: BacklinkBadgeDeactivateInput,
     signal?: AbortSignal,
   ): Promise<BacklinkBadgeDeactivateResult> {
@@ -116,6 +118,18 @@ export class BacklinksRuntime extends Service {
       throw new BacklinksError('batch source provider does not support badge deactivation', 'BACKLINKS_API_ERROR')
     }
     return provider.deactivateBadge(websiteId, input, signal)
+  }
+
+  async preflightSkip(
+    batchId: number,
+    items: readonly BacklinkPreflightSkipItem[],
+    signal?: AbortSignal,
+  ): Promise<BacklinkPreflightSkipResult> {
+    const provider = this.resolveBatchSource()
+    if (!provider.preflightSkip) {
+      throw new BacklinksError('batch source provider does not support preflight-skip', 'BACKLINKS_API_ERROR')
+    }
+    return provider.preflightSkip(batchId, items, signal)
   }
 
   async tagSource(sourceId: number, names: readonly string[], signal?: AbortSignal): Promise<BacklinkTagResult> {

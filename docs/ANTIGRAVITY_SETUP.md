@@ -145,9 +145,9 @@ node scripts/install-antigravity.mjs --target auto --dry-run
 
 ## 七、内置降 Token 与防冲突优化清单
 
-1. **零 LLM 前置 HTTP 预检 (`batch_preflight`)**：开跑前并发轻量 HTTP 探测（默认 5s 超时、6 并发），直接过滤死链（404/410/持续 5xx/DNS/TLS/`Vercel Deployment Paused`/`suspendedpage.cgi`/`Account Suspended`/`Domain for Sale`）与已带硬阻断标签源，区分 `waf_403` 与 `dead_site`；传 `autoSkip: true, autoSkipTagged: true` 可一键回写跳过并打 `dead_site` 标签。
-2. **全局标准阻断标签集合**：统一使用 `paid_only`、`no_form`、`dead_site`、`has_captcha`、`waf_403`、`submitmatic_verify_fail`、`comments_closed` 实现跨站点 0-token 过滤与复盘。
-3. **同模板熔断与徽标自动回滚 (`badge_deactivate`)**：同批次同模板特征（如 `@submitmatic` Verify Badge 失败、`SecureImg + reCAPTCHA`）连续失败 2 次自动触发熔断告警；若 Verify Badge 失败放弃提交，通过 `badge_deactivate` 立即停用/删除残留徽标。
+1. **零 LLM 前置 HTTP 预检 (`batch_preflight`)**：开跑前并发轻量 HTTP 探测（默认 5s 超时、6 并发），结合服务端 `sourceTags`/`blockingTags` 直接过滤死链（404/410/持续 5xx/DNS/TLS/`Vercel Deployment Paused`/`suspendedpage.cgi`/`Account Suspended`/`Domain for Sale`）与已带硬阻断标签源，区分 `waf_403` 与 `dead_site`；传 `autoSkip: true, autoSkipTagged: true` 优先调用 `POST /api/agent/batches/{batchId}/preflight-skip` 租约安全地一键跳过并打 `dead_site` 标签（遇旧版 404 自动降级）。
+2. **全局标准阻断标签集合**：统一使用 `paid_only`、`no_form`、`dead_site`、`has_captcha`、`waf_403`、`submitmatic_verify_fail`、`comments_closed`（兼容服务端中英文别名映射）实现跨站点 0-token 过滤与复盘。
+3. **同模板熔断与徽标自动回滚 (`badge_deactivate`)**：同批次同模板特征（如 `@submitmatic` Verify Badge 失败、`SecureImg + reCAPTCHA`）连续失败 2 次自动触发熔断告警；若 Verify Badge 失败放弃提交，通过 `badge_deactivate`（`PATCH/DELETE /api/agent/badges/{badgeId}`，支持直接传 `badgeId` 且自动触发刷新回调）立即停用/删除残留徽标。
 4. **超时与慢等阈值收紧**：`browser navigate` 默认降至 `10,000ms`（支持单次 `timeoutMs` 覆盖），`mail_wait` 默认收紧至 `30,000ms`，OAuth 挂起 >15–20s 快速熔断。
 5. **`batch_list` 默认精简与分页**：默认 `onlyPending: true, compact: true, limit: 20, offset: 0`，过滤掉已完结批次并返回 `{ total, matched, offset, limit, hasMore, batches }`（典型体积约 2–5 KB，避免触发 `agy` >10 KB 落盘）。
 6. **`batch_get` 默认精简、分页与安全不变量**：`compact` 默认为 `true`，支持可选 `pendingOnly: true` 与 `limit`/`offset` 分页；无论是否过滤或分页，始终基于全批次条目计算并返回 `publishedSourceIds` 与汇总计数，绝不因分页丢失已发布 `sourceId` 校验。

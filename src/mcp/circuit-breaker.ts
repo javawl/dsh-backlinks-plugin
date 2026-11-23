@@ -66,6 +66,8 @@ function itemSearchText(item: BacklinkBatchItem): string {
     item.sourceNotes ?? '',
     item.category ?? '',
     ...item.tags,
+    ...(item.sourceTags ?? []),
+    ...(item.blockingTags ?? []),
   ].join('\n')
 }
 
@@ -397,19 +399,27 @@ export class PublishSessionGuard {
   }
 
   recordBadgeDeactivated(criteria: {
-    readonly websiteId: number
+    readonly websiteId?: number
     readonly badgeId?: number
     readonly name?: string
     readonly html?: string
   }): void {
     if (criteria.badgeId !== undefined) {
-      this.activeBadges.delete(`${criteria.websiteId}:${criteria.badgeId}`)
+      if (criteria.websiteId !== undefined) {
+        this.activeBadges.delete(`${criteria.websiteId}:${criteria.badgeId}`)
+        return
+      }
+      for (const [key, badge] of this.activeBadges.entries()) {
+        if (badge.badgeId === criteria.badgeId) {
+          this.activeBadges.delete(key)
+        }
+      }
       return
     }
     const cleanName = criteria.name?.trim().toLowerCase()
     const cleanHtml = criteria.html?.trim().toLowerCase()
     for (const [key, badge] of this.activeBadges.entries()) {
-      if (badge.websiteId !== criteria.websiteId) continue
+      if (criteria.websiteId !== undefined && badge.websiteId !== criteria.websiteId) continue
       const matchName = cleanName !== undefined && cleanName.length > 0 && badge.name.trim().toLowerCase() === cleanName
       const matchHtml = cleanHtml !== undefined && cleanHtml.length > 0 && badge.html.trim().toLowerCase() === cleanHtml
       if (matchName || matchHtml) {

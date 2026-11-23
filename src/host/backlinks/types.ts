@@ -14,6 +14,8 @@ import type {
   BacklinkItemOutcome,
   BacklinkItemResult,
   BacklinkLeaseClaim,
+  BacklinkPreflightSkipItem,
+  BacklinkPreflightSkipResult,
   BacklinkTagResult,
   MailboxAddress,
   MailPollOptions,
@@ -33,10 +35,15 @@ export interface BacklinkBatchSourceProvider {
   reportItemResult(itemId: number, result: BacklinkItemResult, signal?: AbortSignal): Promise<BacklinkItemOutcome>
   addBadge(websiteId: number, badge: BacklinkBadgeInput, signal?: AbortSignal): Promise<BacklinkBadgeResult>
   deactivateBadge?(
-    websiteId: number,
+    websiteId: number | undefined,
     input: BacklinkBadgeDeactivateInput,
     signal?: AbortSignal,
   ): Promise<BacklinkBadgeDeactivateResult>
+  preflightSkip?(
+    batchId: number,
+    items: readonly BacklinkPreflightSkipItem[],
+    signal?: AbortSignal,
+  ): Promise<BacklinkPreflightSkipResult>
   tagSource(sourceId: number, names: readonly string[], signal?: AbortSignal): Promise<BacklinkTagResult>
 }
 

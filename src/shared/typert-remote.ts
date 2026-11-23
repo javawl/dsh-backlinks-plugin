@@ -97,6 +97,8 @@ const getBatchDetailSchema = () =>
             sourceNotes: z.union([z.literal(null), z.string()]).readonly(),
             category: z.union([z.literal(null), z.string()]).readonly(),
             tags: z.array(z.string()).readonly(),
+            sourceTags: z.array(z.string()).readonly().optional(),
+            blockingTags: z.array(z.string()).readonly().optional(),
             paymentType: z.string().readonly(),
             linkType: z.string().readonly(),
             status: z.string().readonly(),

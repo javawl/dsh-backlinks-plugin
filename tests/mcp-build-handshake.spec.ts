@@ -124,6 +124,7 @@ describe('built MCP server artifact & stdio handshake', () => {
     expect(backlinksTool.inputSchema.properties.skipTags).toBeDefined()
     expect(backlinksTool.inputSchema.properties.concurrency).toBeDefined()
     expect(backlinksTool.inputSchema.properties.badgeId).toBeDefined()
+    expect(backlinksTool.inputSchema.properties.sortOrder).toBeDefined()
     expect(backlinksTool.inputSchema.properties.remove).toBeDefined()
     expect(backlinksTool.inputSchema.properties.templateSignature).toBeDefined()
     expect(backlinksTool.inputSchema.properties.waitTimeoutMs?.description).toContain('30000')

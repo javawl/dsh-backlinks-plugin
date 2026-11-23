@@ -89,8 +89,11 @@ export interface BatchPreflightResult {
         readonly retryableItems?: readonly PreflightRetryableItem[];
         readonly alreadyPublishedItemIds?: readonly number[];
         readonly autoSkipResult?: {
+            readonly mode: 'preflight_skip_api' | 'legacy_fallback';
             readonly skippedItemIds: readonly number[];
+            readonly unchangedCount?: number;
             readonly taggedSourceIds?: readonly number[];
+            readonly downgradeNotice?: string;
             readonly errors?: readonly PreflightAutoSkipError[];
         };
     };
