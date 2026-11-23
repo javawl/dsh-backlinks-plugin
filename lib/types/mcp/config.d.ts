@@ -8,8 +8,9 @@ export declare const DEFAULT_MAX_OUTPUT_CHARS_CLAMP = 16000;
 export declare const DEFAULT_MAX_OUTPUT_CHARS = 16000;
 export declare const DEFAULT_SNAPSHOT_MAX_CHARS = 8000;
 export declare const DEFAULT_NAVIGATE_MAX_CHARS = 3000;
-export declare const DEFAULT_BROWSER_TIMEOUT_MS = 15000;
+export declare const DEFAULT_BROWSER_TIMEOUT_MS = 10000;
 export declare const DEFAULT_REQUEST_TIMEOUT_MS = 15000;
+export declare const DEFAULT_MAIL_WAIT_TIMEOUT_MS = 30000;
 export interface McpConfig {
     readonly supermanagerBaseUrl: string;
     readonly supermanagerToken: string;
@@ -17,6 +18,7 @@ export interface McpConfig {
     readonly cloudMailBaseUrl: string;
     readonly cloudMailToken: string;
     readonly cloudMailTimeoutMs: number;
+    readonly mailWaitTimeoutMs: number;
     readonly browserProfileDir: string;
     readonly maxOutputChars: number;
     readonly snapshotMaxChars: number;

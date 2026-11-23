@@ -112,11 +112,21 @@ describe('built MCP server artifact & stdio handshake', () => {
 
     const backlinksTool = tools[0]!
     expect(backlinksTool.inputSchema.properties.action?.enum).toContain('badge_verify')
+    expect(backlinksTool.inputSchema.properties.action?.enum).toContain('batch_preflight')
+    expect(backlinksTool.inputSchema.properties.action?.enum).toContain('badge_deactivate')
     expect(backlinksTool.inputSchema.properties.compact).toBeDefined()
     expect(backlinksTool.inputSchema.properties.onlyPending).toBeDefined()
     expect(backlinksTool.inputSchema.properties.pendingOnly).toBeDefined()
     expect(backlinksTool.inputSchema.properties.limit).toBeDefined()
     expect(backlinksTool.inputSchema.properties.offset).toBeDefined()
+    expect(backlinksTool.inputSchema.properties.autoSkip).toBeDefined()
+    expect(backlinksTool.inputSchema.properties.autoSkipTagged).toBeDefined()
+    expect(backlinksTool.inputSchema.properties.skipTags).toBeDefined()
+    expect(backlinksTool.inputSchema.properties.concurrency).toBeDefined()
+    expect(backlinksTool.inputSchema.properties.badgeId).toBeDefined()
+    expect(backlinksTool.inputSchema.properties.remove).toBeDefined()
+    expect(backlinksTool.inputSchema.properties.templateSignature).toBeDefined()
+    expect(backlinksTool.inputSchema.properties.waitTimeoutMs?.description).toContain('30000')
 
     const browserTool = tools[1]!
     expect(browserTool.inputSchema.properties.action?.enum).toContain('batch_fill')
@@ -127,6 +137,7 @@ describe('built MCP server artifact & stdio handshake', () => {
     expect(browserTool.inputSchema.properties.maxChars?.description).toContain('3000')
     expect(browserTool.inputSchema.properties.maxChars?.description).toContain('8000')
     expect(browserTool.inputSchema.properties.maxChars?.description).toContain('16000')
+    expect(browserTool.inputSchema.properties.timeoutMs?.description).toContain('10000')
 
     const exitCode = await new Promise<number | null>((resolveExit, rejectExit) => {
       const timer = setTimeout(() => {

@@ -23,8 +23,9 @@
    - 无唯一 `css=` 时用 `xy:<x>,<y>`；标记 `(scroll first)` 就先滚动再取快照。若 Google 控件是 iframe，按需用 `frame(<iframe css>)>>` 定位框内按钮。
    - 未登录 → 有邮箱注册时走下一步；仅有 Google 登录时才回写 `failed + manual_required`，failureReason 写明"谷歌会话未初始化或已过期，请说『初始化谷歌会话』"，并 `bringToFront` 保留标签页。
    - Google 弹"确认是你本人"/二次验证/设备验证 → `bringToFront` 召回窗口，回写 `manual_required` 等人工处理；用户处理一次后该授权通常不再出现。
-2. 有邮箱注册 → 走 `mailbox_create` / `mail_wait` 流程（`backlink-publish` 单条目循环第 5 步）。
-3. 只有 CAPTCHA → `bringToFront` 召回窗口，回写 `manual_required` 并保留停靠页。
+   - **OAuth 挂起快速熔断（15–20s 阈值）**：OAuth 跳转、回调或账号点击在 **15–20 秒**内无进展，直接判定登录阻塞并回写 `failed + manual_required`，严禁死循环重复点击。
+2. 有邮箱注册 → 走 `mailbox_create` / `mail_wait` 流程（`backlink-publish` 单条目循环第 5 步，注意 `mail_wait` 默认上限为 **30 秒 / 30000ms**，超时即标 `failed + manual_required`）。
+3. 只有 CAPTCHA → `bringToFront` 召回窗口，回写 `failed + manual_required` 并同步调用 `source_tags` 打 `has_captcha`，保留停靠页。
 
 ## 初始化 / 检查（触发词：初始化谷歌会话、登录谷歌、检查谷歌会话）
 

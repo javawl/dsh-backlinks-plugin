@@ -18,7 +18,9 @@ import type {
 import { createBacklinksToolHandler } from '../src/mcp/backlinks-tool.ts'
 import { BrowserSessionManager, createBrowserToolHandler } from '../src/mcp/browser-tool.ts'
 import {
+  DEFAULT_BROWSER_TIMEOUT_MS,
   DEFAULT_CLOUDMAIL_BASE_URL,
+  DEFAULT_MAIL_WAIT_TIMEOUT_MS,
   DEFAULT_MAX_OUTPUT_CHARS,
   DEFAULT_MAX_OUTPUT_CHARS_CLAMP,
   DEFAULT_NAVIGATE_MAX_CHARS,
@@ -27,6 +29,7 @@ import {
   redactSecrets,
   resolveMcpConfig,
 } from '../src/mcp/config.ts'
+import { STANDARD_BLOCKING_TAGS } from '../src/host/backlinks/standards.ts'
 
 function parseToolPayload(result: { content: Array<{ type: string; text?: string }> }): {
   summary: string
@@ -1003,5 +1006,845 @@ describe('PlaywrightSession nth selection and strict mode diagnostics', () => {
     )
     expect(timedOut?.message).toContain('strict mode violation: resolved to 1 elements')
     expect(timedOut?.message).toContain('Hint: pass nth: <i>')
+  })
+})
+
+describe('Tightened timeouts & defaults (browser 10s, mail_wait 30s)', () => {
+  it('defaults browserTimeoutMs to 10000 and mailWaitTimeoutMs to 30000 with env overrides', () => {
+    const defaults = resolveMcpConfig({})
+    expect(DEFAULT_BROWSER_TIMEOUT_MS).toBe(10_000)
+    expect(DEFAULT_MAIL_WAIT_TIMEOUT_MS).toBe(30_000)
+    expect(defaults.browserTimeoutMs).toBe(10_000)
+    expect(defaults.mailWaitTimeoutMs).toBe(30_000)
+
+    const custom = resolveMcpConfig({
+      BACKLINKS_BROWSER_TIMEOUT_MS: '8000',
+      BACKLINKS_MAIL_WAIT_TIMEOUT_MS: '25000',
+    })
+    expect(custom.browserTimeoutMs).toBe(8_000)
+    expect(custom.mailWaitTimeoutMs).toBe(25_000)
+  })
+
+  it('forwards per-call navigate timeoutMs through browser tool and PlaywrightSession', async () => {
+    const commands: BrowserCommand[] = []
+    const handle = createBrowserToolHandler({
+      config: resolveMcpConfig({}),
+      sessionManager: new BrowserSessionManager({
+        id: 'mock',
+        available: () => true,
+        open: async () => ({
+          act: async (cmd) => {
+            commands.push(cmd)
+            return {
+              kind: 'page',
+              page: cmd.page ?? 'p1',
+              url: 'https://example.org',
+              title: 'Example',
+              text: 'ok',
+              truncated: false,
+            }
+          },
+          close: async () => {},
+        }),
+      }),
+    })
+
+    await handle({ action: 'navigate', url: 'https://example.org', timeoutMs: 8_000 })
+    expect(commands[0]).toMatchObject({ kind: 'navigate', url: 'https://example.org/', timeoutMs: 8_000 })
+
+    const gotoCalls: Array<{ url: string; timeout?: number }> = []
+    const mockPage = {
+      isClosed: () => false,
+      on: () => mockPage,
+      goto: vi.fn(async (url: string, opts?: { timeout?: number }) => {
+        gotoCalls.push({ url, timeout: opts?.timeout })
+      }),
+      url: () => 'https://example.org/',
+      title: async () => 'Example',
+      innerText: async () => 'Hello',
+    }
+    const mockContext = {
+      on: () => mockContext,
+      pages: () => [mockPage],
+      close: async () => {},
+    }
+    const session = new PlaywrightSession(mockContext as never, 10_000, 8_000)
+    await session.act({ kind: 'navigate', url: 'https://example.org/' })
+    await session.act({ kind: 'navigate', url: 'https://slow.example.org/', timeoutMs: 8_000 })
+    expect(gotoCalls).toEqual([
+      { url: 'https://example.org/', timeout: 10_000 },
+      { url: 'https://slow.example.org/', timeout: 8_000 },
+    ])
+  })
+
+  it('uses 30000ms default timeout and 3000ms poll interval in mail_wait', async () => {
+    const pollCalls: Array<{ timeoutMs: number; intervalMs: number }> = []
+    const mailbox: MailboxProvider = {
+      id: 'mock-mail',
+      available: () => true,
+      createMailbox: async () => ({ email: 'test@screwdom.org' }),
+      pollMail: async (_addr, opts) => {
+        pollCalls.push({ timeoutMs: opts.timeoutMs, intervalMs: opts.intervalMs })
+        return null
+      },
+    }
+    const handle = createBacklinksToolHandler({
+      config: resolveMcpConfig({
+        SUPERMANAGER_BASE_URL: 'https://sm.example.com',
+        SUPERMANAGER_TOKEN: 'smag_test',
+        CLOUDMAIL_TOKEN: 'cm_test',
+      }),
+      mailbox,
+    })
+
+    const defaultWait = await handle({ action: 'mail_wait', mailEmail: 'test@screwdom.org' })
+    expect(defaultWait.isError).toBeUndefined()
+    await handle({ action: 'mail_wait', mailEmail: 'test@screwdom.org', waitTimeoutMs: 45_000 })
+    expect(pollCalls).toEqual([
+      { timeoutMs: 30_000, intervalMs: 3_000 },
+      { timeoutMs: 45_000, intervalMs: 3_000 },
+    ])
+  })
+})
+
+describe('batch_preflight HTTP probes, blocking tag filtering & autoSkip', () => {
+  const smConfig = resolveMcpConfig({
+    SUPERMANAGER_BASE_URL: 'https://sm.example.com',
+    SUPERMANAGER_TOKEN: 'smag_secret',
+  })
+
+  function makePreflightItem(
+    id: number,
+    sourceId: number,
+    host: string,
+    overrides: Partial<BacklinkBatchDetail['items'][number]> = {},
+  ): BacklinkBatchDetail['items'][number] {
+    return {
+      id,
+      sourceId,
+      sourceName: `Site ${id}`,
+      sourceUrl: `https://${host}`,
+      sourceHost: host,
+      submitUrl: `https://${host}/submit`,
+      sourceNotes: null,
+      category: '导航站',
+      tags: [],
+      paymentType: 'free',
+      linkType: 'dofollow',
+      status: 'pending',
+      failureMode: null,
+      failureReason: null,
+      publishedUrl: null,
+      publishStatus: null,
+      plannedAt: '2026-11-23T00:00:00Z',
+      ...overrides,
+    }
+  }
+
+  it('classifies HTTP 404/410/5xx/DNS/TLS/paused/WAF-403/timeout, respects concurrency, and autoSkips only dead sites', async () => {
+    const detail: BacklinkBatchDetail = {
+      ...makeSampleDetail(),
+      batch: { ...makeSampleDetail().batch, id: 99, name: 'Preflight Batch' },
+      items: [
+        makePreflightItem(1, 1001, 'alive.example.org', { tags: ['has_captcha'] }),
+        makePreflightItem(2, 1002, 'notfound.example.org'),
+        makePreflightItem(3, 1003, 'gone.example.org'),
+        makePreflightItem(4, 1004, 'err503.example.org'),
+        makePreflightItem(5, 1005, 'flaky503.example.org'),
+        makePreflightItem(6, 1006, 'dnsdead.example.org'),
+        makePreflightItem(7, 1007, 'tlsdead.example.org'),
+        makePreflightItem(8, 1008, 'refused.example.org'),
+        makePreflightItem(9, 1009, 'vercel-paused.example.org'),
+        makePreflightItem(10, 1010, 'cpanel-suspended.example.org'),
+        makePreflightItem(11, 1011, 'forsale.example.org'),
+        makePreflightItem(12, 1012, 'cloudfront403.example.org'),
+        makePreflightItem(13, 1013, 'slowtimeout.example.org'),
+        makePreflightItem(14, 1014, 'ratelimit429.example.org'),
+        makePreflightItem(15, 1015, 'published.example.org', { status: 'executed', publishStatus: 'live', publishedUrl: 'https://published.example.org/p' }),
+        makePreflightItem(16, 1015, 'dupsource.example.org'),
+      ],
+    }
+
+    let inFlight = 0
+    let maxInFlight = 0
+    let flakyAttempts = 0
+    const probedUrls: string[] = []
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      probedUrls.push(url)
+      inFlight++
+      maxInFlight = Math.max(maxInFlight, inFlight)
+      try {
+        await new Promise(resolve => setTimeout(resolve, 5))
+        if (url.includes('notfound.example.org')) return new Response('not found', { status: 404 })
+        if (url.includes('gone.example.org')) return new Response('gone', { status: 410 })
+        if (url.includes('err503.example.org')) return new Response('down', { status: 503 })
+        if (url.includes('flaky503.example.org')) {
+          flakyAttempts++
+          return flakyAttempts === 1
+            ? new Response('warm up', { status: 503 })
+            : new Response('<html><title>Submit</title></html>', { status: 200, headers: { 'content-type': 'text/html' } })
+        }
+        if (url.includes('dnsdead.example.org')) {
+          throw new TypeError('fetch failed', {
+            cause: Object.assign(new Error('getaddrinfo ENOTFOUND dnsdead.example.org'), { code: 'ENOTFOUND' }),
+          })
+        }
+        if (url.includes('tlsdead.example.org')) {
+          throw new TypeError('fetch failed', {
+            cause: new Error('ERR_SSL_VERSION_OR_CIPHER_MISMATCH'),
+          })
+        }
+        if (url.includes('refused.example.org')) {
+          throw new TypeError('fetch failed', {
+            cause: Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }),
+          })
+        }
+        if (url.includes('vercel-paused.example.org')) {
+          return new Response('<html><body>Vercel Deployment Paused</body></html>', {
+            status: 402,
+            headers: { 'content-type': 'text/html', 'x-vercel-error': 'DEPLOYMENT_PAUSED' },
+          })
+        }
+        if (url.includes('cpanel-suspended.example.org')) {
+          const resp = new Response('<html><h1>Account Suspended</h1></html>', {
+            status: 200,
+            headers: { 'content-type': 'text/html' },
+          })
+          Object.defineProperty(resp, 'url', { value: 'https://cpanel-suspended.example.org/cgi-sys/suspendedpage.cgi' })
+          return resp
+        }
+        if (url.includes('forsale.example.org')) {
+          return new Response('<html><title>Domain for Sale</title><body>Buy this domain</body></html>', {
+            status: 200,
+            headers: { 'content-type': 'text/html' },
+          })
+        }
+        if (url.includes('cloudfront403.example.org')) {
+          return new Response('<html>Generated by cloudfront (CloudFront) Request blocked.</html>', {
+            status: 403,
+            headers: { 'content-type': 'text/html', 'x-amz-cf-id': 'abc123' },
+          })
+        }
+        if (url.includes('slowtimeout.example.org')) {
+          return await new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => {
+              reject(new DOMException('The operation was aborted', 'AbortError'))
+            }, { once: true })
+          })
+        }
+        if (url.includes('ratelimit429.example.org')) {
+          return new Response('too many requests', { status: 429 })
+        }
+        return new Response('<html><body>Submit your site</body></html>', {
+          status: 200,
+          headers: { 'content-type': 'text/html' },
+        })
+      } finally {
+        inFlight--
+      }
+    }) as unknown as typeof fetch
+
+    const reportedSkips: Array<{ itemId: number; skipReason: string }> = []
+    const taggedSources: Array<{ sourceId: number; names: readonly string[] }> = []
+    const claimedCalls: number[][] = []
+    const releasedLeases: number[] = []
+    let requireLeaseOnDirectSkip = false
+
+    const batchSource: BacklinkBatchSourceProvider = {
+      id: 'mock',
+      available: () => true,
+      listBatches: async () => [detail.batch],
+      getBatch: async () => detail,
+      claim: async (_batchId, itemIds) => {
+        const ids = [...(itemIds ?? [])]
+        claimedCalls.push(ids)
+        return {
+          leaseId: 777,
+          leaseExpiresAt: '2026-11-23T01:00:00Z',
+          items: detail.items.filter(item => ids.includes(item.id)),
+        }
+      },
+      heartbeat: async (leaseId) => ({ leaseId, leaseExpiresAt: '2026-11-23T02:00:00Z' }),
+      release: async (leaseId) => { releasedLeases.push(leaseId) },
+      reportItemResult: async (itemId, res) => {
+        if (requireLeaseOnDirectSkip && claimedCalls.length === 0) {
+          throw new BacklinksError('item must be claimed under an active lease', 'BACKLINKS_CONFLICT')
+        }
+        if (res.status === 'skipped') {
+          reportedSkips.push({ itemId, skipReason: res.skipReason })
+        }
+        return { itemStatus: 'skipped', publishRecordId: null }
+      },
+      addBadge: async () => ({ backlinkId: 1, callbackTriggered: false }),
+      tagSource: async (sourceId, names) => {
+        taggedSources.push({ sourceId, names })
+        return { sourceId, attached: names.map((name, idx) => ({ id: idx + 1, name, created: true })) }
+      },
+    }
+
+    const handle = createBacklinksToolHandler({
+      config: smConfig,
+      batchSource,
+      fetchImpl: fetchMock,
+      sleepImpl: async () => {},
+    })
+
+    // 1. Default autoSkip=false does not mutate Supermanager.
+    const dryRes = await handle({
+      action: 'batch_preflight',
+      batchId: 99,
+      concurrency: 3,
+      timeoutMs: 1_000,
+    })
+    expect(dryRes.isError).toBeUndefined()
+    expect(maxInFlight).toBeLessThanOrEqual(3)
+    expect(reportedSkips).toHaveLength(0)
+    expect(taggedSources).toHaveLength(0)
+    expect(probedUrls.some(u => u.includes('dupsource'))).toBe(false)
+
+    const dryData = parseToolPayload(dryRes as never).data as {
+      counts: Record<string, number>
+      runnableItemIds: number[]
+      cautionItems: Array<{ id: number; tags: string[] }>
+      deadItems: Array<{ id: number; reason: string }>
+      wafBlocked: Array<{ id: number; provider: string }>
+      retryableItems: Array<{ id: number; reason: string }>
+      alreadyPublishedItemIds: number[]
+    }
+    expect(dryData.counts).toMatchObject({
+      runnable: 2,
+      dead: 9,
+      wafBlocked: 1,
+      retryable: 2,
+      alreadyPublished: 1,
+      autoSkipped: 0,
+    })
+    expect(dryData.runnableItemIds).toEqual([1, 5])
+    expect(dryData.cautionItems).toEqual([{ id: 1, sourceId: 1001, host: 'alive.example.org', tags: ['has_captcha'] }])
+    expect(dryData.deadItems.map(d => [d.id, d.reason])).toEqual([
+      [2, 'http_404'],
+      [3, 'http_410'],
+      [4, 'http_5xx_persistent'],
+      [6, 'dns_error'],
+      [7, 'tls_error'],
+      [8, 'connection_error'],
+      [9, 'parked_or_suspended'],
+      [10, 'parked_or_suspended'],
+      [11, 'parked_or_suspended'],
+    ])
+    expect(dryData.wafBlocked).toEqual([
+      { id: 12, sourceId: 1012, host: 'cloudfront403.example.org', url: 'https://cloudfront403.example.org/submit', httpStatus: 403, provider: 'cloudfront' },
+    ])
+    expect(dryData.retryableItems.map(r => [r.id, r.reason])).toEqual([
+      [13, 'timeout'],
+      [14, 'http_429'],
+    ])
+    expect(dryData.alreadyPublishedItemIds).toEqual([16])
+
+    // 2. autoSkip=true with lease-required fallback skips & tags dead_site ONLY for dead items (never WAF 403 or retryable).
+    flakyAttempts = 0
+    requireLeaseOnDirectSkip = true
+    const autoRes = await handle({
+      action: 'batch_preflight',
+      batchId: 99,
+      autoSkip: true,
+      timeoutMs: 1_000,
+    })
+    expect(autoRes.isError).toBeUndefined()
+    expect(claimedCalls).toEqual([[2, 3, 4, 6, 7, 8, 9, 10, 11]])
+    expect(releasedLeases).toEqual([777])
+    expect(reportedSkips.map(s => s.itemId)).toEqual([2, 3, 4, 6, 7, 8, 9, 10, 11])
+    expect(taggedSources.map(t => t.sourceId)).toEqual([1002, 1003, 1004, 1006, 1007, 1008, 1009, 1010, 1011])
+    expect(taggedSources.every(t => t.names.includes('dead_site'))).toBe(true)
+  })
+
+  it('filters standard blocking tags zero-HTTP (including legacy aliases) and supports autoSkipTagged', async () => {
+    expect(STANDARD_BLOCKING_TAGS).toEqual([
+      'paid_only',
+      'no_form',
+      'dead_site',
+      'has_captcha',
+      'waf_403',
+      'submitmatic_verify_fail',
+      'comments_closed',
+    ])
+
+    const detail: BacklinkBatchDetail = {
+      ...makeSampleDetail(),
+      batch: { ...makeSampleDetail().batch, id: 100, name: 'Tag Filter Batch' },
+      items: [
+        makePreflightItem(1, 2001, 'paid.example.org', { tags: ['paid_only'] }),
+        makePreflightItem(2, 2002, 'legacy-paid.example.org', { tags: ['付费'] }),
+        makePreflightItem(3, 2003, 'noform.example.org', { tags: ['no_form'] }),
+        makePreflightItem(4, 2004, 'closed.example.org', { tags: ['comments_closed'] }),
+        makePreflightItem(5, 2005, 'dead.example.org', { tags: ['dead_site'] }),
+        makePreflightItem(6, 2006, 'waf.example.org', { tags: ['waf_403'] }),
+        makePreflightItem(7, 2007, 'clean.example.org', { tags: ['免徽章'] }),
+      ],
+    }
+
+    const fetchedUrls: string[] = []
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      fetchedUrls.push(String(input))
+      return new Response('<html>ok</html>', { status: 200, headers: { 'content-type': 'text/html' } })
+    }) as unknown as typeof fetch
+
+    const skippedIds: number[] = []
+    const batchSource: BacklinkBatchSourceProvider = {
+      id: 'mock',
+      available: () => true,
+      listBatches: async () => [detail.batch],
+      getBatch: async () => detail,
+      claim: async () => { throw new Error('unused') },
+      heartbeat: async () => { throw new Error('unused') },
+      release: async () => {},
+      reportItemResult: async (itemId) => {
+        skippedIds.push(itemId)
+        return { itemStatus: 'skipped', publishRecordId: null }
+      },
+      addBadge: async () => { throw new Error('unused') },
+      tagSource: async () => { throw new Error('unused') },
+    }
+
+    const handle = createBacklinksToolHandler({
+      config: smConfig,
+      batchSource,
+      fetchImpl: fetchMock,
+      sleepImpl: async () => {},
+    })
+
+    const res = await handle({
+      action: 'batch_preflight',
+      batchId: 100,
+      autoSkipTagged: true,
+    })
+    expect(res.isError).toBeUndefined()
+    expect(fetchedUrls).toEqual([
+      'https://waf.example.org/submit',
+      'https://clean.example.org/submit',
+    ])
+    expect(skippedIds).toEqual([1, 2, 3, 4, 5])
+    const data = parseToolPayload(res as never).data as {
+      runnableItemIds: number[]
+      cautionItems: Array<{ id: number; tags: string[] }>
+      taggedBlocked: Array<{ id: number; matchedTags: string[] }>
+    }
+    expect(data.runnableItemIds).toEqual([6, 7])
+    expect(data.cautionItems).toEqual([{ id: 6, sourceId: 2006, host: 'waf.example.org', tags: ['waf_403'] }])
+    expect(data.taggedBlocked).toEqual([
+      { id: 1, sourceId: 2001, host: 'paid.example.org', matchedTags: ['paid_only'] },
+      { id: 2, sourceId: 2002, host: 'legacy-paid.example.org', matchedTags: ['paid_only'] },
+      { id: 3, sourceId: 2003, host: 'noform.example.org', matchedTags: ['no_form'] },
+      { id: 4, sourceId: 2004, host: 'closed.example.org', matchedTags: ['comments_closed'] },
+      { id: 5, sourceId: 2005, host: 'dead.example.org', matchedTags: ['dead_site'] },
+    ])
+
+    // Explicit skipTags allows skipping waf_403 too.
+    fetchedUrls.length = 0
+    const customRes = await handle({
+      action: 'batch_preflight',
+      batchId: 100,
+      skipTags: ['waf_403'],
+    })
+    expect(fetchedUrls.some(u => u.includes('waf.example.org'))).toBe(false)
+    expect((parseToolPayload(customRes as never).data as { runnableItemIds: number[] }).runnableItemIds).toEqual([
+      1, 2, 3, 4, 5, 7,
+    ])
+  })
+
+  it('parses flexible tags / sourceTags shapes cleanly in SupermanagerBatchSource.getBatch', async () => {
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify({
+      batch: {
+        id: 1,
+        name: 'B1',
+        websiteId: 7,
+        websiteName: 'Demo',
+        websiteHost: 'demo.example.com',
+        plannedAt: '2026-11-23T00:00:00Z',
+        counts: { pending: 4, executed: 0, skipped: 0, failed: 0, total: 4 },
+        executing: false,
+      },
+      website: { id: 7, name: 'Demo', siteUrl: 'https://demo.example.com', siteHost: 'demo.example.com' },
+      anchors: [],
+      items: [
+        { id: 1, sourceId: 1, sourceName: 'A', sourceUrl: 'https://a.test', sourceHost: 'a.test', tags: ['paid_only', ' paid_only '] },
+        { id: 2, sourceId: 2, sourceName: 'B', sourceUrl: 'https://b.test', sourceHost: 'b.test', tags: [{ name: 'no_form' }, { name: '' }] },
+        { id: 3, sourceId: 3, sourceName: 'C', sourceUrl: 'https://c.test', sourceHost: 'c.test', sourceTags: ['comments_closed'] },
+        { id: 4, sourceId: 4, sourceName: 'D', sourceUrl: 'https://d.test', sourceHost: 'd.test' },
+      ],
+    }), { status: 200 })) as unknown as typeof fetch
+
+    try {
+      const sm = new SupermanagerBatchSource(() => ({
+        baseUrl: 'https://sm.example.com',
+        token: 'smag_tok',
+        requestTimeoutMs: 5_000,
+      }))
+      const detail = await sm.getBatch(1)
+      expect(detail.items.map(i => i.tags)).toEqual([
+        ['paid_only'],
+        ['no_form'],
+        ['comments_closed'],
+        [],
+      ])
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+})
+
+describe('Reciprocal badge rollback (badge_deactivate) & active badge guard', () => {
+  const smConfig = resolveMcpConfig({
+    SUPERMANAGER_BASE_URL: 'https://sm.example.com',
+    SUPERMANAGER_TOKEN: 'smag_secret',
+  })
+
+  it('supports PATCH isActive=false, DELETE remove=true (with 204), match fallback, and clear 404/405 errors in SupermanagerBatchSource', async () => {
+    const requests: Array<{ method: string; url: string; body?: string }> = []
+    let mode: 'ok' | '204' | '404' = 'ok'
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      requests.push({
+        method: init?.method ?? 'GET',
+        url: String(input),
+        ...(typeof init?.body === 'string' ? { body: init.body } : {}),
+      })
+      if (mode === '404') return new Response('not found', { status: 404 })
+      if (mode === '204') return new Response(null, { status: 204 })
+      return new Response(JSON.stringify({ backlinkId: 88, callbackTriggered: true }), { status: 200 })
+    }) as unknown as typeof fetch
+
+    try {
+      const sm = new SupermanagerBatchSource(() => ({
+        baseUrl: 'https://sm.example.com',
+        token: 'smag_tok',
+        requestTimeoutMs: 5_000,
+      }))
+
+      const patched = await sm.deactivateBadge(7, { badgeId: 88 })
+      expect(patched).toEqual({
+        backlinkId: 88,
+        isActive: false,
+        deleted: false,
+        callbackTriggered: true,
+        strategy: 'patch_by_id',
+      })
+
+      mode = '204'
+      const deleted = await sm.deactivateBadge(7, { badgeId: 88, remove: true })
+      expect(deleted).toEqual({
+        backlinkId: 88,
+        isActive: false,
+        deleted: true,
+        callbackTriggered: false,
+        strategy: 'delete_by_id',
+      })
+
+      mode = 'ok'
+      const matched = await sm.deactivateBadge(7, {
+        name: 'DirOne',
+        html: '<a href="https://dirone.example.org">DirOne</a>',
+      })
+      expect(matched.strategy).toBe('patch_by_match')
+      expect(matched.isActive).toBe(false)
+
+      expect(requests).toEqual([
+        { method: 'PATCH', url: 'https://sm.example.com/api/agent/websites/7/footer-backlinks/88', body: '{"isActive":false}' },
+        { method: 'DELETE', url: 'https://sm.example.com/api/agent/websites/7/footer-backlinks/88' },
+        {
+          method: 'PATCH',
+          url: 'https://sm.example.com/api/agent/websites/7/footer-backlinks',
+          body: '{"name":"DirOne","html":"<a href=\\"https://dirone.example.org\\">DirOne</a>","isActive":false}',
+        },
+      ])
+
+      mode = '404'
+      await expect(sm.deactivateBadge(7, { badgeId: 88 })).rejects.toThrow(
+        /Supermanager backend may not yet expose PATCH \/api\/agent\/websites\/7\/footer-backlinks\/88/,
+      )
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('warns via badgeRollbackReminder when failing an item with an active badge, and clears after badge_deactivate', async () => {
+    const detail = makeSampleDetail()
+    const deactivateMock = vi.fn(async () => ({
+      backlinkId: 55,
+      isActive: false as const,
+      deleted: false,
+      callbackTriggered: true,
+      strategy: 'patch_by_id' as const,
+    }))
+
+    const batchSource: BacklinkBatchSourceProvider = {
+      id: 'mock',
+      available: () => true,
+      listBatches: async () => [detail.batch],
+      getBatch: async () => detail,
+      claim: async () => ({ leaseId: 1, leaseExpiresAt: '2026-11-23T01:00:00Z', items: [detail.items[0]!] }),
+      heartbeat: async (leaseId) => ({ leaseId, leaseExpiresAt: '2026-11-23T02:00:00Z' }),
+      release: async () => {},
+      reportItemResult: async () => ({ itemStatus: 'failed', publishRecordId: null }),
+      addBadge: async () => ({ backlinkId: 55, callbackTriggered: true }),
+      deactivateBadge: deactivateMock,
+      tagSource: async (sourceId, names) => ({
+        sourceId,
+        attached: names.map((name, idx) => ({ id: idx + 1, name, created: true })),
+      }),
+    }
+
+    const refreshedUrls: string[] = []
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      refreshedUrls.push(String(input))
+      return new Response('ok', { status: 200 })
+    }) as unknown as typeof fetch
+
+    const handle = createBacklinksToolHandler({
+      config: smConfig,
+      batchSource,
+      fetchImpl: fetchMock,
+    })
+
+    await handle({ action: 'batch_get', batchId: 42 })
+    await handle({
+      action: 'badge_add',
+      websiteId: 7,
+      name: 'DirOne',
+      html: '<a href="https://dirone.example.org">DirOne</a>',
+    })
+
+    const failBeforeDeactivate = await handle({
+      action: 'item_result',
+      itemId: 101,
+      status: 'failed',
+      failureMode: 'manual_required',
+      failureReason: 'Verify Badge failed on DirOne',
+    })
+    const failData1 = parseToolPayload(failBeforeDeactivate as never).data as {
+      badgeRollbackReminder?: { badgeId: number; websiteId: number }
+    }
+    expect(failData1.badgeRollbackReminder).toMatchObject({ badgeId: 55, websiteId: 7 })
+
+    const deactivateRes = await handle({
+      action: 'badge_deactivate',
+      websiteId: 7,
+      badgeId: 55,
+      refreshUrl: 'https://demo.example.com/footer/refresh',
+    })
+    expect(deactivateRes.isError).toBeUndefined()
+    expect(deactivateMock).toHaveBeenCalledWith(7, { badgeId: 55 }, undefined)
+    expect(refreshedUrls).toEqual(['https://demo.example.com/footer/refresh'])
+
+    const failAfterDeactivate = await handle({
+      action: 'item_result',
+      itemId: 101,
+      status: 'failed',
+      failureMode: 'manual_required',
+      failureReason: 'Verify Badge failed on DirOne',
+    })
+    const failData2 = parseToolPayload(failAfterDeactivate as never).data as {
+      badgeRollbackReminder?: unknown
+    }
+    expect(failData2.badgeRollbackReminder).toBeUndefined()
+
+    const invalidDeactivate = await handle({ action: 'badge_deactivate', websiteId: 7 })
+    expect(invalidDeactivate.isError).toBe(true)
+  })
+})
+
+describe('Same-template 2-strike circuit breaker', () => {
+  const smConfig = resolveMcpConfig({
+    SUPERMANAGER_BASE_URL: 'https://sm.example.com',
+    SUPERMANAGER_TOKEN: 'smag_secret',
+  })
+
+  function makeTemplateBatchDetail(): BacklinkBatchDetail {
+    const base = makeSampleDetail()
+    return {
+      ...base,
+      batch: { ...base.batch, id: 88, name: 'Template Batch' },
+      items: [
+        {
+          ...base.items[0]!,
+          id: 301,
+          sourceId: 701,
+          sourceName: 'SubDir 1',
+          sourceHost: 'sub1.example.org',
+          sourceUrl: 'https://sub1.example.org',
+          submitUrl: 'https://sub1.example.org/submit',
+          sourceNotes: '@submitmatic template directory',
+          category: '导航站',
+          status: 'pending',
+        },
+        {
+          ...base.items[0]!,
+          id: 302,
+          sourceId: 702,
+          sourceName: 'SubDir 2',
+          sourceHost: 'sub2.example.org',
+          sourceUrl: 'https://sub2.example.org',
+          submitUrl: 'https://sub2.example.org/submit',
+          sourceNotes: '@submitmatic template directory',
+          category: '导航站',
+          status: 'pending',
+        },
+        {
+          ...base.items[0]!,
+          id: 303,
+          sourceId: 703,
+          sourceName: 'SubDir 3',
+          sourceHost: 'sub3.example.org',
+          sourceUrl: 'https://sub3.example.org',
+          submitUrl: 'https://sub3.example.org/submit',
+          sourceNotes: '@submitmatic template directory',
+          category: '导航站',
+          status: 'pending',
+        },
+        {
+          ...base.items[0]!,
+          id: 401,
+          sourceId: 801,
+          sourceName: 'Blog 1',
+          sourceHost: 'blog1.example.org',
+          sourceUrl: 'https://blog1.example.org/post',
+          submitUrl: null,
+          sourceNotes: 'WordPress blog',
+          category: '博客',
+          status: 'pending',
+        },
+        {
+          ...base.items[0]!,
+          id: 402,
+          sourceId: 802,
+          sourceName: 'Blog 2',
+          sourceHost: 'blog2.example.org',
+          sourceUrl: 'https://blog2.example.org/post',
+          submitUrl: null,
+          sourceNotes: 'WordPress blog',
+          category: '博客',
+          status: 'pending',
+        },
+      ],
+    }
+  }
+
+  function makeSource(detail: BacklinkBatchDetail): BacklinkBatchSourceProvider {
+    return {
+      id: 'mock',
+      available: () => true,
+      listBatches: async () => [detail.batch],
+      getBatch: async () => detail,
+      claim: async (_batchId, itemIds) => ({
+        leaseId: 12,
+        leaseExpiresAt: '2026-11-23T01:00:00Z',
+        items: detail.items.filter(item => itemIds === undefined || itemIds.includes(item.id)),
+      }),
+      heartbeat: async (leaseId) => ({ leaseId, leaseExpiresAt: '2026-11-23T02:00:00Z' }),
+      release: async () => {},
+      reportItemResult: async () => ({ itemStatus: 'failed', publishRecordId: null }),
+      addBadge: async () => ({ backlinkId: 1, callbackTriggered: false }),
+      tagSource: async (sourceId, names) => ({
+        sourceId,
+        attached: names.map((name, idx) => ({ id: idx + 1, name, created: true })),
+      }),
+    }
+  }
+
+  it('trips on 2 consecutive @submitmatic Verify Badge failures and warns on subsequent batch_claim', async () => {
+    const detail = makeTemplateBatchDetail()
+    const handle = createBacklinksToolHandler({ config: smConfig, batchSource: makeSource(detail) })
+
+    await handle({ action: 'batch_get', batchId: 88 })
+
+    const first = await handle({
+      action: 'item_result',
+      itemId: 301,
+      status: 'failed',
+      failureMode: 'manual_required',
+      failureReason: 'Verify Badge failed on @submitmatic directory',
+    })
+    expect((parseToolPayload(first as never).data as { circuitBreaker?: unknown }).circuitBreaker).toBeUndefined()
+
+    const second = await handle({
+      action: 'item_result',
+      itemId: 302,
+      status: 'failed',
+      failureMode: 'manual_required',
+      failureReason: 'Verify Badge failed on @submitmatic directory',
+    })
+    const secondPayload = parseToolPayload(second as never)
+    expect(secondPayload.summary).toContain('CIRCUIT BREAKER TRIPPED')
+    expect((secondPayload.data as { circuitBreaker: unknown }).circuitBreaker).toMatchObject({
+      tripped: true,
+      fingerprint: 'submitmatic:verify_badge_fail',
+      consecutiveFailures: 2,
+      threshold: 2,
+      failedItemIds: [301, 302],
+      suggestedTag: 'submitmatic_verify_fail',
+      affectedPendingItemIds: [303],
+    })
+
+    const claimNext = await handle({ action: 'batch_claim', batchId: 88, itemIds: [303] })
+    const claimPayload = parseToolPayload(claimNext as never)
+    expect(claimPayload.summary).toContain('CIRCUIT BREAKER TRIPPED')
+    expect((claimPayload.data as { circuitBreakerAlerts: unknown[] }).circuitBreakerAlerts).toHaveLength(1)
+  })
+
+  it('trips on 2 consecutive blog SecureImg + reCAPTCHA failures and resets streak on live/submitted success', async () => {
+    const detail = makeTemplateBatchDetail()
+    const handle = createBacklinksToolHandler({ config: smConfig, batchSource: makeSource(detail) })
+
+    await handle({ action: 'batch_get', batchId: 88 })
+
+    // 1 @submitmatic failure -> 1 @submitmatic submitted -> 1 @submitmatic failure => does NOT trip!
+    await handle({
+      action: 'item_result',
+      itemId: 301,
+      status: 'failed',
+      failureMode: 'manual_required',
+      failureReason: 'Verify Badge failed',
+    })
+    await handle({
+      action: 'item_result',
+      itemId: 302,
+      status: 'submitted',
+      anchorText: 'DemoSite',
+      targetUrl: 'https://demo.example.com',
+    })
+    const afterReset = await handle({
+      action: 'item_result',
+      itemId: 303,
+      status: 'failed',
+      failureMode: 'manual_required',
+      failureReason: 'Verify Badge failed',
+    })
+    expect((parseToolPayload(afterReset as never).data as { circuitBreaker?: unknown }).circuitBreaker).toBeUndefined()
+
+    // 2 consecutive blog SecureImg + reCAPTCHA failures => trips with has_captcha!
+    await handle({
+      action: 'item_result',
+      itemId: 401,
+      status: 'failed',
+      failureMode: 'manual_required',
+      failureReason: 'Blocked by SecureImg + reCAPTCHA',
+    })
+    const blogTrip = await handle({
+      action: 'item_result',
+      itemId: 402,
+      status: 'failed',
+      failureMode: 'manual_required',
+      failureReason: 'Blocked by SecureImg + reCAPTCHA',
+    })
+    expect((parseToolPayload(blogTrip as never).data as { circuitBreaker: unknown }).circuitBreaker).toMatchObject({
+      tripped: true,
+      fingerprint: 'blog:secureimg_captcha',
+      consecutiveFailures: 2,
+      failedItemIds: [401, 402],
+      suggestedTag: 'has_captcha',
+    })
   })
 })

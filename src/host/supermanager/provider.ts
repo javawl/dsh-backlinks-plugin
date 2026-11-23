@@ -3,6 +3,8 @@
  */
 
 import type {
+  BacklinkBadgeDeactivateInput,
+  BacklinkBadgeDeactivateResult,
   BacklinkBadgeInput,
   BacklinkBadgeResult,
   BacklinkBatchDetail,
@@ -75,6 +77,30 @@ function toBatchSummary(value: unknown): BacklinkBatchSummary {
   }
 }
 
+function toStringTags(row: Record<string, unknown>): readonly string[] {
+  const raw = Array.isArray(row.tags)
+    ? row.tags
+    : Array.isArray(row.sourceTags)
+      ? row.sourceTags
+      : []
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const entry of raw) {
+    let text = ''
+    if (typeof entry === 'string') {
+      text = entry.trim()
+    } else if (typeof entry === 'object' && entry !== null) {
+      const name = (entry as { name?: unknown }).name
+      if (typeof name === 'string') text = name.trim()
+    }
+    if (text.length > 0 && !seen.has(text)) {
+      seen.add(text)
+      out.push(text)
+    }
+  }
+  return out
+}
+
 function toItem(value: unknown): BacklinkBatchItem {
   const row = asRecord(value)
   return {
@@ -86,7 +112,7 @@ function toItem(value: unknown): BacklinkBatchItem {
     submitUrl: toNullableString(row.submitUrl),
     sourceNotes: toNullableString(row.sourceNotes),
     category: toNullableString(row.category),
-    tags: Array.isArray(row.tags) ? row.tags.map(String) : [],
+    tags: toStringTags(row),
     paymentType: str(row.paymentType),
     linkType: str(row.linkType),
     status: str(row.status),
@@ -222,6 +248,90 @@ export class SupermanagerBatchSource implements BacklinkBatchSourceProvider {
     }
   }
 
+  async deactivateBadge(
+    websiteId: number,
+    input: BacklinkBadgeDeactivateInput,
+    signal?: AbortSignal,
+  ): Promise<BacklinkBadgeDeactivateResult> {
+    const hasBadgeId = input.badgeId !== undefined
+    const cleanName = typeof input.name === 'string' && input.name.trim().length > 0 ? input.name.trim() : undefined
+    const cleanHtml = typeof input.html === 'string' && input.html.trim().length > 0 ? input.html.trim() : undefined
+    if (!hasBadgeId && cleanName === undefined && cleanHtml === undefined) {
+      throw new BacklinksError(
+        'badge deactivation requires badgeId, name, or html',
+        'BACKLINKS_INVALID_REQUEST',
+      )
+    }
+
+    const endpoint = hasBadgeId
+      ? `/api/agent/websites/${websiteId}/footer-backlinks/${input.badgeId}`
+      : `/api/agent/websites/${websiteId}/footer-backlinks`
+
+    try {
+      if (hasBadgeId) {
+        if (input.remove === true) {
+          const body = await this.requestJson(endpoint, { method: 'DELETE' }, signal)
+          const record = asRecord(body)
+          return {
+            backlinkId: input.badgeId as number,
+            isActive: false,
+            deleted: true,
+            callbackTriggered: record.callbackTriggered === true,
+            strategy: 'delete_by_id',
+          }
+        }
+        const body = await this.requestJson(endpoint, {
+          method: 'PATCH',
+          payload: { isActive: false },
+        }, signal)
+        const record = asRecord(body)
+        return {
+          backlinkId: record.backlinkId !== undefined && record.backlinkId !== null
+            ? toNumber(record.backlinkId)
+            : (input.badgeId as number),
+          isActive: false,
+          deleted: false,
+          callbackTriggered: record.callbackTriggered === true,
+          strategy: 'patch_by_id',
+        }
+      }
+
+      const body = await this.requestJson(endpoint, {
+        method: 'PATCH',
+        payload: {
+          ...(cleanName === undefined ? {} : { name: cleanName }),
+          ...(cleanHtml === undefined ? {} : { html: cleanHtml }),
+          isActive: false,
+          ...(input.remove === true ? { remove: true } : {}),
+        },
+      }, signal)
+      const record = asRecord(body)
+      return {
+        backlinkId: record.backlinkId !== undefined && record.backlinkId !== null
+          ? toNumber(record.backlinkId)
+          : null,
+        isActive: false,
+        deleted: record.deleted === true || input.remove === true,
+        callbackTriggered: record.callbackTriggered === true,
+        strategy: 'patch_by_match',
+      }
+    } catch (error) {
+      if (
+        error instanceof BacklinksError
+        && (error.code === 'BACKLINKS_NOT_FOUND'
+          || (error.code === 'BACKLINKS_API_ERROR' && error.message.includes('HTTP 405')))
+      ) {
+        throw new BacklinksError(
+          `${error.message} (Supermanager backend may not yet expose ${input.remove === true && hasBadgeId ? 'DELETE' : 'PATCH'} ${endpoint})`,
+          error.code,
+          error.retryAfterSeconds,
+          { cause: error },
+        )
+      }
+      throw error
+    }
+  }
+
   async tagSource(sourceId: number, names: readonly string[], signal?: AbortSignal): Promise<BacklinkTagResult> {
     const body = await this.requestJson(`/api/agent/sources/${sourceId}/tags`, {
       method: 'POST',
@@ -271,7 +381,11 @@ export class SupermanagerBatchSource implements BacklinkBatchSourceProvider {
     }
   }
 
-  private async requestJson(path: string, init: { method: 'GET' | 'POST'; payload?: Record<string, unknown> }, signal?: AbortSignal): Promise<unknown> {
+  private async requestJson(
+    path: string,
+    init: { method: 'GET' | 'POST' | 'PATCH' | 'DELETE'; payload?: Record<string, unknown> },
+    signal?: AbortSignal,
+  ): Promise<unknown> {
     if (signal?.aborted) throw new BacklinksError('request aborted', 'BACKLINKS_ABORTED')
     const { baseUrl, token, requestTimeoutMs } = this.resolveConfig()
     const cleanBase = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl
@@ -305,6 +419,7 @@ export class SupermanagerBatchSource implements BacklinkBatchSourceProvider {
       }
       const bodyText = await response.text()
       if (!response.ok) throw httpError(path, response, bodyText)
+      if (response.status === 204 || bodyText.trim().length === 0) return {}
       return JSON.parse(bodyText) as unknown
     } finally {
       clearTimeout(timer)

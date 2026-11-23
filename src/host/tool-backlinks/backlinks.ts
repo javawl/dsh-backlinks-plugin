@@ -8,6 +8,10 @@ import type { GenericCallView, GenericResultView, ToolResult } from '@deepseek-a
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import { assertNever, type JsonValue } from '../../shared/backlinks-types.ts'
 import type { BacklinkBadgeInput, BacklinkItemResult } from '../backlinks/index.ts'
+import {
+  DEFAULT_MAIL_WAIT_POLL_INTERVAL_MS,
+  DEFAULT_MAIL_WAIT_TIMEOUT_MS,
+} from '../backlinks/standards.ts'
 import { parseItemResult as parseValidatedItemResult } from '../backlinks/validation.ts'
 
 const ACTIONS = [
@@ -151,7 +155,10 @@ export function applyBacklinksTool(ctx: Context, timeoutMs: number): void {
       mailEmail: { type: 'string', description: 'Mailbox address for mail_wait.' },
       subjectContains: { type: 'string', description: 'Subject filter for mail_wait.' },
       fromContains: { type: 'string', description: 'Sender filter for mail_wait.' },
-      waitTimeoutMs: { type: 'number', description: 'Total wait bound for mail_wait in milliseconds.' },
+      waitTimeoutMs: {
+        type: 'number',
+        description: `Total wait bound for mail_wait in milliseconds (default ${DEFAULT_MAIL_WAIT_TIMEOUT_MS}).`,
+      },
     },
     output: {
       schema: {
@@ -255,7 +262,9 @@ export function applyBacklinksTool(ctx: Context, timeoutMs: number): void {
         }
         case 'mail_wait': {
           const email = readNonEmpty(args, 'mailEmail')
-          const waitTimeoutMs = args.waitTimeoutMs === undefined ? 120_000 : Number(args.waitTimeoutMs)
+          const waitTimeoutMs = args.waitTimeoutMs === undefined
+            ? DEFAULT_MAIL_WAIT_TIMEOUT_MS
+            : Number(args.waitTimeoutMs)
           if (!Number.isSafeInteger(waitTimeoutMs) || waitTimeoutMs <= 0) {
             throw new Error('backlinks waitTimeoutMs must be a positive integer.')
           }
@@ -267,7 +276,7 @@ export function applyBacklinksTool(ctx: Context, timeoutMs: number): void {
               ...(subjectContains === undefined ? {} : { subjectContains }),
               ...(fromContains === undefined ? {} : { fromContains }),
               timeoutMs: waitTimeoutMs,
-              intervalMs: 5_000,
+              intervalMs: DEFAULT_MAIL_WAIT_POLL_INTERVAL_MS,
             },
             exec.signal,
           )

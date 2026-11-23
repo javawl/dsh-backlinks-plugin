@@ -25,7 +25,7 @@ export const Config: z<Config> = z.object({
   userDataDir: z.string(),
   headless: z.boolean().default(false),
   channel: z.string().default('chrome'),
-  defaultTimeoutMs: z.number().default(15_000),
+  defaultTimeoutMs: z.number().default(10_000),
   launchArgs: z.array(z.string()).default([]),
   ignoreDefaultArgs: z.array(z.string()).default([]),
   windowPosition: z.string(),
@@ -36,7 +36,7 @@ export function apply(ctx: Context, config: Config): void {
   if (userDataDir.length === 0) {
     throw new Error('browser-playwright: userDataDir must not be empty')
   }
-  const defaultTimeoutMs = config.defaultTimeoutMs ?? 15_000
+  const defaultTimeoutMs = config.defaultTimeoutMs ?? 10_000
   if (!Number.isSafeInteger(defaultTimeoutMs) || defaultTimeoutMs <= 0) {
     throw new Error(`browser-playwright: defaultTimeoutMs must be a positive integer, got ${defaultTimeoutMs}`)
   }

@@ -14,26 +14,34 @@ description: 本工作区所有"发外链/发布外链/发布批次/跑批次/�
 
 > 注意：经典版 Antigravity Desktop App 仅加载 `skills/` 与 `mcp_config.json`，不一定自动注入插件 `rules/AGENTS.md`。执行本技能时**必须严格遵守以下内置工具规范**：
 
-1. **`backlinks` 降 Token 与防并发**：
+1. **`backlinks` 零 LLM 预检、全局标签过滤与防并发**：
+   - **开跑必选第一步 `batch_preflight`**：在任何 `batch_claim` 之前，必须先调 `backlinks action="batch_preflight"`（传 `batchId`、`autoSkip: true`、`autoSkipTagged: true`、默认 `timeoutMs: 5000`、`concurrency: 6`）。工具不启动 Chrome、不耗 LLM，并发完成 HTTP 轻量预检与已有标签过滤：自动识别 `404`/`410`/持续 `5xx`/DNS/TLS/停服占位页（`Vercel Deployment Paused`、`suspendedpage.cgi`、`Account Suspended`、`Domain for Sale`）并回写 `skipped` + 打 `dead_site`；CloudFront/WAF 403 单独归类为 `waf_403`（绝不误删为死链）；对已带硬阻断标签的来源零请求直接跳过。
+   - **标准阻断标签常量集合**（遇到对应阻断时必须在 `item_result` 同步调用 `source_tags` 打标）：
+     - 硬阻断标签（预检 `autoSkipTagged: true` 直接跳过）：`paid_only`（强制收费）、`no_form`（无提交入口）、`dead_site`（死链/停服/占位）、`comments_closed`（关评）。
+     - 软阻断/警示标签：`has_captcha`（reCAPTCHA/SecureImg/Turnstile/数学题验证码）、`waf_403`（CloudFront/WAF 403 拦截）、`submitmatic_verify_fail`（`@submitmatic` 模板 Verify Badge 校验失败）。
+     - 描述性标签可并存：`免徽章`、`要徽章`、`可复用`。
    - `batch_list` 默认 `onlyPending: true`、`compact: true`、`limit: 20`、`offset: 0`（输出约 2–5 KB，避免超长落盘）；仅在确需查看历史已完成批次时传 `onlyPending: false` 或 `offset`。
-   - `batch_get` 默认 `compact: true`，保留 `batch`、网站 6 字段资料包、`anchors` 及精简条目字段；大批量批次可传 `pendingOnly: true`（及 `limit`/`offset` 分页），服务端仍会基于全批次返回 `publishedSourceIds` 以严防同 `sourceId` 重复发布；仅在确需原始大字段时传 `compact: false`。
-   - **单会话条目预算**：单次 `agy` 对话建议最多处理 **15–20 条（3–4 个 5 条分片）**。若仍有待发条目，完成当前分片后务必 `lease_release`，汇总已完成与剩余条数并提示新开 `agy` 会话续跑，防止上下文膨胀到 >300k token 拖慢响应。
-   - **分片认领**：不要整批几十条一次 `batch_claim`，按 `itemIds` 每次认领 **1–5 条**（同域名 `sourceHost` 必须同片串行），每完成 1–2 条调 `lease_heartbeat`，片尾务必 `lease_release`。
-   - **互换徽标免 `curl`**：需要触发站点刷新并验证首页是否出现目标链接时，直接调用 `backlinks action="badge_verify"`（Node.js 原生 `fetch()` 实现，Windows 与 macOS 通用，禁止调用 `bash`/`powershell` 跑 `curl`/`grep`）。
+   - `batch_get` 默认 `compact: true`，单批次仅拉取一次用于获取 `website` 6 字段资料包与 `anchors`（大批量传 `pendingOnly: true` + `limit`/`offset`，服务端始终基于全批次返回 `publishedSourceIds`）；禁止在单会话内反复重调 `batch_get` 或重复 `read_file` 已读文档。
+   - **单会话条目预算（10–12 条）**：单次 `agy` 对话推荐只处理 **10–12 条（2 片 × 5–6 条，硬上限 15 条）**。完成当前片后务必 `lease_release`，精简输出已完成与剩余条数并提示新开 `agy` 会话续跑，防止上下文膨胀与冗余回执。
+   - **分片认领**：按 `batch_preflight.runnableItemIds` 每次认领 **5–6 条**（同域名 `sourceHost` 必须同片串行），每完成 1–2 条调 `lease_heartbeat`，片尾务必 `lease_release`。
+   - **互换徽标校验与回滚**：需要触发站点刷新并验证首页是否出现目标链接时，直接调用 `backlinks action="badge_verify"`（禁止 `bash`/`powershell` 跑 `curl`/`grep`）。**铁律：挂载互换徽标并 `badge_verify` 后，如果对方 `Verify Badge` 校验失败且放弃提交，必须立即调用 `backlinks action="badge_deactivate"`（传 `websiteId`、`badgeId`、可选 `refreshUrl`）停用/删除该徽标，绝不在推广站首页残留无效徽标。**
    - **懒加载鉴权**：`CLOUDMAIL_TOKEN` 仅在调用 `mailbox_create` / `mail_wait` 时检查；未配置接码令牌时其余 Supermanager 批次动作照常可用。
-2. **`browser` 降 Token 与真机持久化 Chrome**：
-   - `navigate` 默认只返回精简文本摘要（3,000 字符）；`snapshot`（`text`/`aria`/`interactive`）默认上限 **8,000 字符**（避免触发 `agy` >10 KB 落盘）。仅在复杂页面确需完整内容时，显式传 `maxChars`（最高至服务端硬上限 `16,000`）。
+2. **`browser` 降 Token 与快速失败阈值**：
+   - **导航与慢等收紧**：`browser navigate` 默认超时已下调为 **10,000ms**（推荐显式传 `timeoutMs: 8000`–`10000` 快速失败，不再死等慢站）；`backlinks mail_wait` 默认上限已收紧至 **30,000ms**（30 秒未收到验证邮件直接回写 `failed + manual_required`，不卡死整片）；登录/OAuth 挂起超过 **15–20s** 直接判定阻塞并回写 `failed + manual_required`，禁止死循环重复点击。
+   - `navigate` 默认只返回精简文本摘要（3,000 字符）；`snapshot`（`text`/`aria`/`interactive`）默认上限 **8,000 字符**（避免触发 `agy` >10 KB 落盘）。仅在复杂页面确需完整内容时，显式传 `maxChars`（最高至服务端硬上限 `16,000`），且不要保留超大 snapshot 或冗余重试。
    - **多字段表单优先 `batch_fill`**：整张填表 + 可选提交尽量合并为一次 `browser action="batch_fill"`（传 `fields` 数组与可选 `submitTarget` / `submitNth`），大幅减少往返轮次。
    - **等待人工登录用 `wait_for_login`**：遇到首次 Google 登录或需要人工介入的登录墙，先 `bringToFront`（或直接调 `wait_for_login`，内置自动拉回窗口到可见屏幕并轮询），**禁止 LLM 自己循环每 10 秒 `snapshot` 轮询**。
    - **防 `strict mode violation` 与标签隔离**：`navigate` 返回 `[page pN]`，后续同一标签命令都传 `page`。点击 Submit / Sign in / Send Code / 申请入驻 / 发送验证码 等高频按钮时，**优先使用精确 `role:button|<精确名称>` / `role:link|<精确名称>`**，避免宽泛 `text:<子串>` 匹配到多处；如发生多元素匹配，按错误返回的 `[0]`、`[1]`… 候选列表传 `nth`（0-based，支持 `click`/`fill`/`select`/`upload`/`waitFor` 与 `batch_fill` 的 `fields[].nth`/`submitNth`）或改用精确 `role:` 选择器。iframe 加 `frame(<css>)>>` 前缀，无名控件用 `interactive` 快照给出的 `css` 或 `xy:<x>,<y>`。
 
 ## 执行流程
 
-收到"发外链"（或输入 `/backlink-publish [批次号]`）后：消息里已带具体批次号时跳过第 1 步直接拉取详情并分片认领。
+收到"发外链"（或输入 `/backlink-publish [批次号]`）后：消息里已带具体批次号时跳过第 1 步直接执行第 2 步预检。
 
 1. `backlinks action="batch_list"`（默认 `onlyPending: true, compact: true, limit: 20`）→ 若支持交互提问工具（如 `ask_question`）则渲染选项卡让用户选择，否则清晰列出最近待发批次请用户回复确认批次号：**用户确认后才继续；若取消或未获明确答复，立即停止，绝不自行认领任何批次。**
-2. `backlinks action="batch_get"`（默认 `compact: true`，大批量可带 `pendingOnly: true` + `limit`/`offset`）→ 展示条目并结合返回的 `publishedSourceIds` 先做**已发布分区**：条目 `publishStatus` 为 `submitted`/`live` 或 `publishedUrl` 非空 = 已发布；`sourceId` 在 `publishedSourceIds` 中或同批次内同 `sourceId` 的其余条目同样视为已发布。已发布条目本次**不认领、不执行**，汇总时单列"已发布跳过"。随后向用户确认三项设置（可通过 `ask_question` 或简洁文本选项确认）：
-   a. **范围**：全部待发布 / 仅待发布（不含失败重试） / 指定 `itemIds`；
+2. **前置零 LLM 预检与读取批次**：
+   - 先调 `backlinks action="batch_preflight"`（`batchId`、`autoSkip: true`、`autoSkipTagged: true`），一次性完成死链/停服/占位页预检跳过与硬阻断标签过滤，拿到存活可跑 `runnableItemIds`、`cautionItems`、`wafBlocked` 与 `publishedSourceIds`。
+   - 随后调一次 `backlinks action="batch_get"`（`compact: true, pendingOnly: true`）读取 `website` 6 字段资料包与 `anchors`（已发布条目与预检已跳过的条目本次**不认领、不执行**，汇总时单列）。向用户确认三项设置（可通过 `ask_question` 或简洁文本选项确认）：
+   a. **范围**：全部存活待发布（`runnableItemIds`） / 指定 `itemIds`；
    b. **执行模式**（本次运行生效）：
       - `智能匹配（推荐）`：只发布勘察后能匹配六类剧本之一的条目；类型不识别回写 `skipped`（原因写"类型不识别，智能匹配模式下跳过"）。
       - `全部尝试`：不做类型筛选，未知类型走通用主循环（勘察→注册→提交→核验→回写），绝不因类型跳过。
@@ -42,10 +50,10 @@ description: 本工作区所有"发外链/发布外链/发布批次/跑批次/�
       - `保留停靠页`：遇到 CAPTCHA/需人工介入的标签页保持开启（并 `bringToFront`），其余工作标签 `closePage` 关闭。
       - `结束即关浏览器`：本轮结束后调 `browser action="closeBrowser"` 关闭整个浏览器（登录态和 Cookie 仍保存在持久 profile 中）。
       未明确指定时默认 `保留停靠页`。
-3. **分片认领执行**：
-   - 每次从待处理列表按同域名归组挑选 **1–5 条 `itemIds`**，调用 `backlinks action="batch_claim"` 获得 `leaseId`。
-   - 若环境支持多工作器并发且跨域名条目 ≥ 3，可按 `sourceHost` 分组并确保同域串行（每组 1–5 条独立认领或在协调租约下保持心跳，且必须遵守下面单条目循环与 5 条硬纪律）。
-   - 单 Agent 会话中按分片顺序执行完当前切片，每 1–2 条调 `lease_heartbeat`，切片完成后调 `lease_release`，再决定是否认领下一片；单次对话处理达到 **15–20 条（3–4 片）** 后及时收尾交接，提示用户新开会话续跑剩余条目。
+3. **分片认领执行（单会话 10–12 条，2 片 × 5–6 条）**：
+   - 每次从 `runnableItemIds` 按同域名归组挑选 **5–6 条 `itemIds`**，调用 `backlinks action="batch_claim"` 获得 `leaseId`（若返回 `circuitBreakerAlerts`，立即按同模板熔断规则处理，不再深挖或挂徽标）。
+   - 若环境支持多工作器并发且跨域名条目 ≥ 3，可按 `sourceHost` 分组并确保同域串行（每组 5–6 条独立认领或在协调租约下保持心跳，且必须遵守下面单条目循环纪律）。
+   - 单 Agent 会话中按分片顺序执行完当前切片，每 1–2 条调 `lease_heartbeat`，切片完成后调 `lease_release`；单次对话处理 **10–12 条（2 片 × 5–6 条，硬上限 15 条）** 后及时收尾交接，提示用户新开会话续跑剩余条目。
 
 ## 单条目循环
 
@@ -65,20 +73,23 @@ description: 本工作区所有"发外链/发布外链/发布批次/跑批次/�
      - 已登录（显示账号头像/邮箱）→ 回到站点点 Google 按钮 → 选账号 → Allow/Continue → 跳回站点继续发布。
      - 未登录 → 有邮箱注册时走邮箱分支；仅有 Google 登录时回写 `failed + manual_required`，原因写"谷歌会话未初始化或已过期，请对智能体说『初始化谷歌会话』"。
      - Google 弹"确认是你本人"/二次验证 → 回写 `manual_required` 并 `bringToFront` 保留标签页等待人工一次处理。
-   - 有邮箱注册表单 → 先 `backlinks action="mailbox_create"`（`localPart`=随机前缀、`domain`="screwdom.org"，**缺 `domain` 会报错**）→ 用 `batch_fill` 填表注册 → `backlinks action="mail_wait"`（默认等 120 秒）拿 `code`/`link` → 完成验证 → 登录。**"要求登录"本身不是人工事件**。
-   - 只有 CAPTCHA/人机验证 → 调用 `browser action="bringToFront"` 将窗口拉回可见屏幕，回写 `manual_required` 并保留停靠标签页。
+   - 有邮箱注册表单 → 先 `backlinks action="mailbox_create"`（`localPart`=随机前缀、`domain`="screwdom.org"，**缺 `domain` 会报错**）→ 用 `batch_fill` 填表注册 → `backlinks action="mail_wait"`（**默认上限 30 秒 / 30000ms**；30 秒未收到验证邮件直接回写 `failed + manual_required`，绝不卡死整片）拿 `code`/`link` → 完成验证 → 登录。**"要求登录"本身不是人工事件**。
+   - **OAuth / 登录挂起熔断**：Google/OAuth 跳转或登录提交挂起超过 **15–20 秒**无进展，直接判定阻塞并回写 `failed + manual_required`，禁止重复死循环点击。
+   - 只有 CAPTCHA/人机验证（reCAPTCHA / SecureImg / Turnstile / 数学题）→ 调用 `browser action="bringToFront"` 将窗口拉回可见屏幕，回写 `failed + manual_required` 并同步打 `has_captcha`，保留停靠标签页。
 6. **填写与提交**：
    - 锚文本与目标 URL 从批次 `anchors` 选取（优先第一项）；资料优先复用 `website` 6 字段资料包（evidence 注明"使用后台资料包"），缺失项才自获取并注明"该项自获取"。
    - 带链方式：有 Website 字段则填字段、正文不带链；`contenteditable` 富文本/带工具栏禁止把 `<a>` 当纯文本输入（会被转义），须先输入观点句、选中锚文本、点工具栏链接按钮填 `targetUrl`；真纯文本框才直写 `<a href="targetUrl">anchorText</a>`；BBCode 框用 `[url=targetUrl]anchorText[/url]`；一段只嵌 1 个链接。
    - 多字段表单优先用 `browser action="batch_fill"`（可附带 `submitTarget`），提交前必要时 `snapshot` 复查。
-7. **核验**：提交后 `browser navigate` 到公开列表页（非预览）+ `snapshot format="aria"`，确认出现 `role:link` 且名称含锚文本或指向 `targetUrl`。裸 URL 字符串或被转义的 `<a href=...>` 不算上线；正文嵌链被转义 → 回写 `failed + manual_required`，绝不重发。
-8. **回写与打标**：
-   - 调用 `backlinks action="item_result"`（带 `itemId` 与对应结果字段）。
-   - 立即调用 `backlinks action="source_tags"`（`sourceId` + 本次观察标签：`免徽章` / `要徽章` / `可复用` / `有盾` / `付费`），并将所打标签记入 evidence。
-9. **互换徽标（仅当对方要求先挂反链时在提交前执行）**：
-   a. 从对方站点获取徽标 HTML → `backlinks action="badge_add"`（`websiteId`、`name`、`html`）。
+7. **核验**：提交后 `browser navigate` 到公开列表页（非预览，建议 `timeoutMs: 8000`–`10000`）+ `snapshot format="aria"`，确认出现 `role:link` 且名称含锚文本或指向 `targetUrl`。裸 URL 字符串或被转义的 `<a href=...>` 不算上线；正文嵌链被转义 → 回写 `failed + manual_required`，绝不重发。
+8. **回写、打标与同模板 2 次熔断**：
+   - 调用 `backlinks action="item_result"`（带 `itemId` 与对应结果字段；同模板失败时可传 `templateSignature`，如 `submitmatic:verify_badge_fail` 或 `blog:secureimg_captcha`）。
+   - **标准阻断标签强制同步打标**：遇到对应情况必须立即调用 `backlinks action="source_tags"` 补打标准标签（`paid_only` 强制收费、`no_form` 无提交入口、`comments_closed` 关评、`dead_site` 死链/停服、`has_captcha` 验证码、`waf_403` CloudFront/WAF 403、`submitmatic_verify_fail` Submitmatic 校验失败；可叠加 `免徽章`/`要徽章`/`可复用`），并将所打标签写进单行 `evidence`。
+   - **同模板站 2 次熔断机制**：当同一批内同模板/同源特征（如 `@submitmatic` 模板站 Verify Badge 失败、同模板博客站 `SecureImg + reCAPTCHA`）连续失败 **2 次**，或 MCP 返回 `circuitBreaker.tripped: true` 时，**立即触发熔断**：同批剩余匹配同模板特征的条目不再调用 `badge_add`、不再逐个深挖，直接快速核验或回写 `failed(manual_required)` / `skipped` 并写清原因与标准标签。
+9. **互换徽标与校验失败自动回滚（仅当对方要求先挂反链时在提交前执行）**：
+   a. 从对方站点获取徽标 HTML → `backlinks action="badge_add"`（`websiteId`、`name`、`html`，记住返回的 `backlinkId`）。
    b. 调用 `backlinks action="badge_verify"`：传入 `siteUrl`（我方站首页，如 `https://<我方host>/`）、`expectedTarget`（对方域名）、`refreshUrl`（若需触发回调，如 `https://<我方host>/footer/refresh`）、`retries: 3`、`retryDelayMs: 5000`。
-   c. 返回 `verified: true` 后再回对方站点点击 Verify Backlink / 提交；若 `verified: false` → 回写 `failed + manual_required`（原因写"徽标已入库但站点未刷新"）。若此前已在线上可查到徽标，跳过 `badge_add` 直接进入提交。
+   c. 返回 `verified: true` 后再回对方站点点击 `Verify Badge` / `Verify Backlink` / 提交；若 `verified: false` → 立即调用 `backlinks action="badge_deactivate"` 回滚，并回写 `failed + manual_required`（原因写"徽标已入库但站点未刷新且已回滚"）。
+   d. **自动回滚铁律**：挂载互换徽标并通过 `badge_verify` 后，如果目标站 `Verify Badge` 校验失败且放弃提交，**必须立即调用 `backlinks action="badge_deactivate"`**（传 `websiteId`、`badgeId` 与可选 `refreshUrl`）将刚挂载的徽标停用或删除，**绝不允许在推广站首页残留无效徽标**。若此前已在线上可查到徽标，跳过 `badge_add` 直接进入提交。
 
 ## 人工兜底与收尾
 

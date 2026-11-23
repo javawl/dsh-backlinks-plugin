@@ -11,6 +11,7 @@ export interface BrowserNavigateCommand extends BrowserPageAddress {
     readonly url: string;
     readonly waitUntil?: 'load' | 'domcontentloaded' | 'networkidle';
     readonly maxChars?: number;
+    readonly timeoutMs?: number;
 }
 export interface BrowserSnapshotCommand extends BrowserPageAddress {
     readonly kind: 'snapshot';

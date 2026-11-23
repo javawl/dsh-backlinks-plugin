@@ -4,6 +4,8 @@
 
 import { CodedError } from '../../shared/errors.ts'
 import type {
+  BacklinkBadgeDeactivateInput,
+  BacklinkBadgeDeactivateResult,
   BacklinkBadgeInput,
   BacklinkBadgeResult,
   BacklinkBatchDetail,
@@ -30,6 +32,11 @@ export interface BacklinkBatchSourceProvider {
   release(leaseId: number, signal?: AbortSignal): Promise<void>
   reportItemResult(itemId: number, result: BacklinkItemResult, signal?: AbortSignal): Promise<BacklinkItemOutcome>
   addBadge(websiteId: number, badge: BacklinkBadgeInput, signal?: AbortSignal): Promise<BacklinkBadgeResult>
+  deactivateBadge?(
+    websiteId: number,
+    input: BacklinkBadgeDeactivateInput,
+    signal?: AbortSignal,
+  ): Promise<BacklinkBadgeDeactivateResult>
   tagSource(sourceId: number, names: readonly string[], signal?: AbortSignal): Promise<BacklinkTagResult>
 }
 

@@ -380,7 +380,7 @@ export class PlaywrightSession implements BrowserSession {
         case 'navigate': {
           const { page, ref } = await this.resolveForNavigate(command.page)
           await page.goto(command.url, {
-            timeout: this.defaultTimeoutMs,
+            timeout: command.timeoutMs ?? this.defaultTimeoutMs,
             ...(command.waitUntil === undefined ? {} : { waitUntil: command.waitUntil }),
           })
           return await this.pageResult(page, ref, command.maxChars ?? this.defaultMaxChars)

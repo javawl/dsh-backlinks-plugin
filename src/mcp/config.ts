@@ -11,8 +11,9 @@ export const DEFAULT_MAX_OUTPUT_CHARS_CLAMP = 16_000
 export const DEFAULT_MAX_OUTPUT_CHARS = DEFAULT_MAX_OUTPUT_CHARS_CLAMP
 export const DEFAULT_SNAPSHOT_MAX_CHARS = 8_000
 export const DEFAULT_NAVIGATE_MAX_CHARS = 3_000
-export const DEFAULT_BROWSER_TIMEOUT_MS = 15_000
+export const DEFAULT_BROWSER_TIMEOUT_MS = 10_000
 export const DEFAULT_REQUEST_TIMEOUT_MS = 15_000
+export const DEFAULT_MAIL_WAIT_TIMEOUT_MS = 30_000
 
 export interface McpConfig {
   readonly supermanagerBaseUrl: string
@@ -21,6 +22,7 @@ export interface McpConfig {
   readonly cloudMailBaseUrl: string
   readonly cloudMailToken: string
   readonly cloudMailTimeoutMs: number
+  readonly mailWaitTimeoutMs: number
   readonly browserProfileDir: string
   readonly maxOutputChars: number
   readonly snapshotMaxChars: number
@@ -123,6 +125,7 @@ export function resolveMcpConfig(
     cloudMailBaseUrl: cloudMailBaseUrl.length > 0 ? cloudMailBaseUrl : DEFAULT_CLOUDMAIL_BASE_URL,
     cloudMailToken: readTrimmed(env, 'CLOUDMAIL_TOKEN'),
     cloudMailTimeoutMs: readPositiveIntEnv(env, 'CLOUDMAIL_TIMEOUT_MS', DEFAULT_REQUEST_TIMEOUT_MS),
+    mailWaitTimeoutMs: readPositiveIntEnv(env, 'BACKLINKS_MAIL_WAIT_TIMEOUT_MS', DEFAULT_MAIL_WAIT_TIMEOUT_MS),
     browserProfileDir,
     maxOutputChars: readPositiveIntEnv(env, 'BACKLINKS_MAX_OUTPUT_CHARS', DEFAULT_MAX_OUTPUT_CHARS_CLAMP),
     snapshotMaxChars: readPositiveIntEnv(env, 'BACKLINKS_SNAPSHOT_MAX_CHARS', DEFAULT_SNAPSHOT_MAX_CHARS),

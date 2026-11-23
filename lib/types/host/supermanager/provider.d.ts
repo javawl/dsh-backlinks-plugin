@@ -1,7 +1,7 @@
 /**
  * The supermanager implementation of the batch work-source seam (`/api/agent/*`).
  */
-import type { BacklinkBadgeInput, BacklinkBadgeResult, BacklinkBatchDetail, BacklinkBatchSourceProvider, BacklinkBatchSummary, BacklinkHeartbeat, BacklinkItemOutcome, BacklinkItemResult, BacklinkLeaseClaim, BacklinkTagResult } from '../backlinks/types.ts';
+import type { BacklinkBadgeDeactivateInput, BacklinkBadgeDeactivateResult, BacklinkBadgeInput, BacklinkBadgeResult, BacklinkBatchDetail, BacklinkBatchSourceProvider, BacklinkBatchSummary, BacklinkHeartbeat, BacklinkItemOutcome, BacklinkItemResult, BacklinkLeaseClaim, BacklinkTagResult } from '../backlinks/types.ts';
 export declare const SUPERMANAGER_BATCH_SOURCE_ID = "supermanager";
 export interface ResolvedSupermanagerConfig {
     readonly baseUrl: string;
@@ -20,6 +20,7 @@ export declare class SupermanagerBatchSource implements BacklinkBatchSourceProvi
     release(leaseId: number, signal?: AbortSignal): Promise<void>;
     reportItemResult(itemId: number, result: BacklinkItemResult, signal?: AbortSignal): Promise<BacklinkItemOutcome>;
     addBadge(websiteId: number, badge: BacklinkBadgeInput, signal?: AbortSignal): Promise<BacklinkBadgeResult>;
+    deactivateBadge(websiteId: number, input: BacklinkBadgeDeactivateInput, signal?: AbortSignal): Promise<BacklinkBadgeDeactivateResult>;
     tagSource(sourceId: number, names: readonly string[], signal?: AbortSignal): Promise<BacklinkTagResult>;
     private resultPayload;
     private requestJson;

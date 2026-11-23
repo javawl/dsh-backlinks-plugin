@@ -39,7 +39,12 @@ export function parseBrowserArgs(args: Record<string, unknown>): BrowserCommand 
     case 'navigate': {
       const target = readUrl(args.url)
       if (target === undefined) throw new Error('browser navigate requires an http(s) url.')
-      return addressed({ kind: 'navigate', url: target, ...(waitUntil === undefined ? {} : { waitUntil }) })
+      return addressed({
+        kind: 'navigate',
+        url: target,
+        ...(waitUntil === undefined ? {} : { waitUntil }),
+        ...(timeoutMs === undefined ? {} : { timeoutMs }),
+      })
     }
     case 'snapshot': {
       const format = readSnapshotFormat(args.format)
@@ -278,7 +283,7 @@ export function applyBrowserTool(ctx: Context, timeoutMs: number, maxOutputChars
       },
       timeoutMs: {
         type: 'number',
-        description: 'waitFor timeout in milliseconds.',
+        description: 'navigate or waitFor timeout in milliseconds.',
       },
     },
     output: {

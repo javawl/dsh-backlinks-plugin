@@ -111,6 +111,8 @@ node scripts/install-antigravity.mjs --target auto --dry-run
 | `BACKLINKS_MAX_OUTPUT_CHARS` | 否 | `16000` | 显式传入 `maxChars` 时的服务端硬上限（clamp）；未传 `maxChars` 时受下方快照/导航默认值限制 |
 | `BACKLINKS_SNAPSHOT_MAX_CHARS` | 否 | `8000` | `browser snapshot` 默认输出字符上限（避免触发 `agy` >10 KB 落盘） |
 | `BACKLINKS_NAVIGATE_MAX_CHARS` | 否 | `3000` | `browser navigate` 默认文本摘要字符上限 |
+| `BACKLINKS_BROWSER_TIMEOUT_MS` | 否 | `10000` | 浏览器导航与操作默认超时（毫秒，单次 `navigate` 可通过 `timeoutMs` 覆盖，推荐 8000–10000） |
+| `BACKLINKS_MAIL_WAIT_TIMEOUT_MS` | 否 | `30000` | `backlinks mail_wait` 默认等待验证邮件上限（毫秒，超时直接标 `manual_required`） |
 | `BACKLINKS_BROWSER_EXECUTABLE_PATH` | 否 | 自动按 `chrome` channel 查找 | 如需指定自定义 Chrome 可执行路径（如 Windows 非标准安装目录） |
 | `BACKLINKS_BROWSER_WINDOW_POSITION` | 否 | 可见默认位置 | 设为 `-32000,-32000` 可默认离屏启动；遇到 `bringToFront` 或 `wait_for_login` 时会自动拉回主屏可见区域 |
 
@@ -124,7 +126,7 @@ node scripts/install-antigravity.mjs --target auto --dry-run
    - **Windows**：`mkdir C:\Users\zlb\backlinks-work && cd C:\Users\zlb\backlinks-work`
    - **macOS**：`mkdir -p ~/backlinks-work && cd ~/backlinks-work`
 2. **选用轻快高性价比模型**：日常批量外链发布推荐使用 `--model gemini-4-neon-medium`（或 `gemini-3.8-flash-high`），避免使用过重的 `Neon (High)` / `Orchestrator`。
-3. **控制单会话条数（15–20 条）**：每次对话处理 **3–4 个分片（每片 1–5 条，合计 ≤ 15–20 条）**。若批次仍有待发条目，完成当前分片并 `lease_release` 后新开一次 `agy` 会话继续下一段。
+3. **控制单会话条数（10–12 条，上限 15 条）**：先调用 `batch_preflight` 完成零 LLM 预检与标签过滤，随后每次对话处理 **2 个分片（每片 5–6 条，合计 10–12 条，硬上限 15 条）**。若批次仍有待发条目，完成当前分片并 `lease_release` 后新开一次 `agy` 会话继续下一段。
 
 ---
 
@@ -143,13 +145,17 @@ node scripts/install-antigravity.mjs --target auto --dry-run
 
 ## 七、内置降 Token 与防冲突优化清单
 
-1. **`batch_list` 默认精简与分页**：默认 `onlyPending: true, compact: true, limit: 20, offset: 0`，过滤掉已完结批次并返回 `{ total, matched, offset, limit, hasMore, batches }`（典型体积约 2–5 KB，避免触发 `agy` >10 KB 落盘）。
-2. **`batch_get` 默认精简、分页与安全不变量**：`compact` 默认为 `true`，支持可选 `pendingOnly: true` 与 `limit`/`offset` 分页；无论是否过滤或分页，始终基于全批次条目计算并返回 `publishedSourceIds` 与汇总计数，绝不因分页丢失已发布 `sourceId` 校验。
-3. **降低浏览器文本回传**：`snapshot` 默认截断上限降至 `8,000` 字符（避开 `agy` ~10 KB 落盘），复杂页面确需更大快照时可显式传入 `maxChars`（最高至服务端硬上限 `16,000`）；`navigate` 默认只回传 `3,000` 字符页面摘要。
-4. **`nth` / `submitNth` 与 strict mode 候选诊断**：`click` / `fill` / `select` / `upload` / `waitFor` 与 `batch_fill`（`fields[].nth`、`submitNth`）支持 0-based `nth`；触发 Playwright `strict mode violation` 时自动采集前 5 个匹配元素的 tag/role/text/aria-label/name/visible 与推荐 `role:`/`nth` 提示。
-5. **整表合并提交 `batch_fill`**：支持一次传入 `fields`（`fill` / `select` / `click` / `check`）与可选 `submitTarget` / `submitNth`，单轮完成表单填写（若任意字段失败则跳过 `submitTarget`）。
-6. **进程内等待登录 `wait_for_login`**：彻底替代多轮 LLM 空转轮询，自动 `bringToFront` 并在 Node.js 内轮询 URL 或元素状态。
-7. **分片认领与单会话上限**：技能引导每次按 `itemIds` 认领 1–5 条，单会话控制在 15–20 条（3–4 片），避免长上下文膨胀。
+1. **零 LLM 前置 HTTP 预检 (`batch_preflight`)**：开跑前并发轻量 HTTP 探测（默认 5s 超时、6 并发），直接过滤死链（404/410/持续 5xx/DNS/TLS/`Vercel Deployment Paused`/`suspendedpage.cgi`/`Account Suspended`/`Domain for Sale`）与已带硬阻断标签源，区分 `waf_403` 与 `dead_site`；传 `autoSkip: true, autoSkipTagged: true` 可一键回写跳过并打 `dead_site` 标签。
+2. **全局标准阻断标签集合**：统一使用 `paid_only`、`no_form`、`dead_site`、`has_captcha`、`waf_403`、`submitmatic_verify_fail`、`comments_closed` 实现跨站点 0-token 过滤与复盘。
+3. **同模板熔断与徽标自动回滚 (`badge_deactivate`)**：同批次同模板特征（如 `@submitmatic` Verify Badge 失败、`SecureImg + reCAPTCHA`）连续失败 2 次自动触发熔断告警；若 Verify Badge 失败放弃提交，通过 `badge_deactivate` 立即停用/删除残留徽标。
+4. **超时与慢等阈值收紧**：`browser navigate` 默认降至 `10,000ms`（支持单次 `timeoutMs` 覆盖），`mail_wait` 默认收紧至 `30,000ms`，OAuth 挂起 >15–20s 快速熔断。
+5. **`batch_list` 默认精简与分页**：默认 `onlyPending: true, compact: true, limit: 20, offset: 0`，过滤掉已完结批次并返回 `{ total, matched, offset, limit, hasMore, batches }`（典型体积约 2–5 KB，避免触发 `agy` >10 KB 落盘）。
+6. **`batch_get` 默认精简、分页与安全不变量**：`compact` 默认为 `true`，支持可选 `pendingOnly: true` 与 `limit`/`offset` 分页；无论是否过滤或分页，始终基于全批次条目计算并返回 `publishedSourceIds` 与汇总计数，绝不因分页丢失已发布 `sourceId` 校验。
+7. **降低浏览器文本回传**：`snapshot` 默认截断上限降至 `8,000` 字符（避开 `agy` ~10 KB 落盘），复杂页面确需更大快照时可显式传入 `maxChars`（最高至服务端硬上限 `16,000`）；`navigate` 默认只回传 `3,000` 字符页面摘要。
+8. **`nth` / `submitNth` 与 strict mode 候选诊断**：`click` / `fill` / `select` / `upload` / `waitFor` 与 `batch_fill`（`fields[].nth`、`submitNth`）支持 0-based `nth`；触发 Playwright `strict mode violation` 时自动采集前 5 个匹配元素的 tag/role/text/aria-label/name/visible 与推荐 `role:`/`nth` 提示。
+9. **整表合并提交 `batch_fill`**：支持一次传入 `fields`（`fill` / `select` / `click` / `check`）与可选 `submitTarget` / `submitNth`，单轮完成表单填写（若任意字段失败则跳过 `submitTarget`）。
+10. **进程内等待登录 `wait_for_login`**：彻底替代多轮 LLM 空转轮询，自动 `bringToFront` 并在 Node.js 内轮询 URL 或元素状态。
+11. **分片认领与单会话上限**：单会话控制在 **10–12 条（2 片 × 5–6 条，硬上限 15 条）**，减少重复读文件与长上下文膨胀。
 
 ---
 

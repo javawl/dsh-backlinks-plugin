@@ -20,7 +20,7 @@
 4. aria 快照里的 **iframe 就是懒挂载评论区**（Disqus/Blogger/giscus），用 `frame()` 前缀进入，不要当装饰忽略。
 5. 兜底 `navigate` 到 `URL#comments` 再 `snapshot`。
 
-全走完仍无评论区 → 回写 `skipped`（skipReason 固定："评论区延迟加载探测后仍不存在"），禁止一句"静态页面"判死。
+全走完仍无评论区 → 回写 `skipped`（skipReason 固定："评论区延迟加载探测后仍不存在"）并同步调用 `source_tags` 打 `no_form`，禁止一句"静态页面"判死。若明确提示评论已关闭（"Comments are closed"）→ 回写 `skipped` 并打 `comments_closed`。若评论区带 SecureImg / reCAPTCHA / Turnstile / 数学验证码 → 回写 `failed + manual_required` 并打 `has_captcha`（同批同模板博客站连续 2 次触发熔断后不再逐个深挖）。
 
 ## 评论区识别信号
 

@@ -11,7 +11,7 @@
 import type { CallToolResult, Tool } from '@modelcontextprotocol/sdk/types.js';
 import type { BacklinkBatchSourceProvider, MailboxProvider } from '../host/backlinks/types.ts';
 import { type McpConfig } from './config.ts';
-export declare const BACKLINKS_ACTIONS: readonly ["batch_list", "batch_get", "batch_claim", "lease_heartbeat", "lease_release", "item_result", "badge_add", "badge_verify", "source_tags", "mailbox_create", "mail_wait"];
+export declare const BACKLINKS_ACTIONS: readonly ["batch_list", "batch_get", "batch_preflight", "batch_claim", "lease_heartbeat", "lease_release", "item_result", "badge_add", "badge_verify", "badge_deactivate", "source_tags", "mailbox_create", "mail_wait"];
 export type BacklinksAction = typeof BACKLINKS_ACTIONS[number];
 export type McpToolResult = CallToolResult;
 export type FetchLike = typeof fetch;
@@ -22,6 +22,7 @@ export interface BacklinksToolDependencies {
     readonly mailbox?: MailboxProvider;
     readonly fetchImpl?: FetchLike;
     readonly sleepImpl?: SleepLike;
+    readonly circuitBreakerThreshold?: number;
 }
 export declare const BACKLINKS_TOOL_DEFINITION: Tool;
 export declare function createBacklinksToolHandler(deps: BacklinksToolDependencies): (args: Record<string, unknown>, signal?: AbortSignal) => Promise<McpToolResult>;

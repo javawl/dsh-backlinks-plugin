@@ -17,6 +17,12 @@ import type {
   MailboxProvider,
 } from '../host/backlinks/types.ts'
 import {
+  DEFAULT_MAIL_WAIT_POLL_INTERVAL_MS,
+  DEFAULT_PREFLIGHT_CONCURRENCY,
+  DEFAULT_PREFLIGHT_TIMEOUT_MS,
+  STANDARD_BLOCKING_TAGS,
+} from '../host/backlinks/standards.ts'
+import {
   collectPublishedSourceIds,
   compactBatchDetail,
   compactBatchSummary,
@@ -33,17 +39,21 @@ import {
 import { CloudMailMailbox } from '../host/cloud-mail/provider.ts'
 import { SupermanagerBatchSource } from '../host/supermanager/provider.ts'
 import { assertNever } from '../shared/backlinks-types.ts'
+import { PublishSessionGuard } from './circuit-breaker.ts'
 import { isPlaceholderValue, redactSecrets, type McpConfig } from './config.ts'
+import { runBatchPreflight } from './preflight.ts'
 
 export const BACKLINKS_ACTIONS = [
   'batch_list',
   'batch_get',
+  'batch_preflight',
   'batch_claim',
   'lease_heartbeat',
   'lease_release',
   'item_result',
   'badge_add',
   'badge_verify',
+  'badge_deactivate',
   'source_tags',
   'mailbox_create',
   'mail_wait',
@@ -62,12 +72,13 @@ export interface BacklinksToolDependencies {
   readonly mailbox?: MailboxProvider
   readonly fetchImpl?: FetchLike
   readonly sleepImpl?: SleepLike
+  readonly circuitBreakerThreshold?: number
 }
 
 export const BACKLINKS_TOOL_DEFINITION: Tool = {
   name: 'backlinks',
   description:
-    'Run the publish-batch workflow against Supermanager & Cloud-mail: list/get/claim batches, heartbeat/release leases, report item results, add & verify reciprocal badges (badge_verify uses native fetch), tag sources, and create/poll verification mailboxes.',
+    'Run the publish-batch workflow against Supermanager & Cloud-mail: list/get/preflight/claim batches, heartbeat/release leases, report item results (with session same-template circuit breaker), add/verify/deactivate reciprocal badges, tag sources, and create/poll verification mailboxes.',
   inputSchema: {
     type: 'object',
     additionalProperties: false,
@@ -78,7 +89,7 @@ export const BACKLINKS_TOOL_DEFINITION: Tool = {
         enum: [...BACKLINKS_ACTIONS],
         description: `Action to perform: ${BACKLINKS_ACTIONS.join(', ')}.`,
       },
-      batchId: { type: 'integer', description: 'Batch ID for batch_get / batch_claim.' },
+      batchId: { type: 'integer', description: 'Batch ID for batch_get / batch_preflight / batch_claim.' },
       compact: {
         type: 'boolean',
         description: 'For batch_list and batch_get: return compact payload (default true); pass false for full raw objects.',
@@ -102,11 +113,16 @@ export const BACKLINKS_TOOL_DEFINITION: Tool = {
       itemIds: {
         type: 'array',
         items: { type: 'integer' },
-        description: 'Optional subset of plan item IDs for batch_claim (recommended 1-5 per slice).',
+        description: 'Optional subset of plan item IDs for batch_claim (recommended 1-5 per slice) or batch_preflight.',
       },
       leaseId: { type: 'integer', description: 'Lease ID for lease_heartbeat / lease_release.' },
       itemId: { type: 'integer', description: 'Plan item ID for item_result.' },
-      websiteId: { type: 'integer', description: 'Website ID for badge_add.' },
+      websiteId: { type: 'integer', description: 'Website ID for badge_add / badge_deactivate.' },
+      badgeId: { type: 'integer', description: 'Badge ID (returned as backlinkId by badge_add) for badge_deactivate.' },
+      remove: {
+        type: 'boolean',
+        description: 'For badge_deactivate: when true, hard-delete via DELETE instead of PATCH isActive=false (default false).',
+      },
       sourceId: { type: 'integer', description: 'Target source ID for source_tags.' },
       status: {
         type: 'string',
@@ -124,26 +140,50 @@ export const BACKLINKS_TOOL_DEFINITION: Tool = {
       },
       failureReason: { type: 'string', description: 'Reason when status=failed.' },
       skipReason: { type: 'string', description: 'Reason when status=skipped.' },
-      name: { type: 'string', description: 'Badge name for badge_add.' },
-      html: { type: 'string', description: 'Badge HTML snippet for badge_add.' },
+      templateSignature: {
+        type: 'string',
+        description: 'Optional template/failure signature for item_result circuit breaker tracking (e.g. submitmatic:verify_badge_fail, blog:secureimg_captcha).',
+      },
+      name: { type: 'string', description: 'Badge name for badge_add / badge_deactivate.' },
+      html: { type: 'string', description: 'Badge HTML snippet for badge_add / badge_deactivate.' },
       isActive: { type: 'boolean', description: 'Activate badge immediately (default true).' },
       tags: {
         type: 'array',
         items: { type: 'string' },
-        description: '1-10 source tag names for source_tags (e.g. ["免徽章", "可复用"]).',
+        description: `1-10 source tag names for source_tags (standard blocking tags: ${STANDARD_BLOCKING_TAGS.join(', ')}; plus descriptive tags like 免徽章, 要徽章, 可复用).`,
+      },
+      autoSkip: {
+        type: 'boolean',
+        description: 'For batch_preflight: when true, automatically report skipped and tag dead_site for definitive dead/paused/parked sites (default false).',
+      },
+      autoSkipTagged: {
+        type: 'boolean',
+        description: 'For batch_preflight: when true, automatically report skipped for items already carrying hard blocking tags (paid_only, dead_site, no_form, comments_closed) without HTTP requests (default false).',
+      },
+      skipTags: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'For batch_preflight: optional override list of blocking tag names treated as hard-skip tags.',
+      },
+      concurrency: {
+        type: 'integer',
+        description: `For batch_preflight: concurrent HTTP probe count (1-12, default ${DEFAULT_PREFLIGHT_CONCURRENCY}).`,
       },
       localPart: { type: 'string', description: 'Mailbox local part for mailbox_create.' },
       domain: { type: 'string', description: 'Mailbox domain for mailbox_create (e.g. screwdom.org).' },
       mailEmail: { type: 'string', description: 'Mailbox email address for mail_wait.' },
       subjectContains: { type: 'string', description: 'Optional subject filter for mail_wait.' },
       fromContains: { type: 'string', description: 'Optional sender filter for mail_wait.' },
-      waitTimeoutMs: { type: 'integer', description: 'Wait timeout in milliseconds for mail_wait (default 120000).' },
+      waitTimeoutMs: { type: 'integer', description: 'Wait timeout in milliseconds for mail_wait (default 30000).' },
       siteUrl: { type: 'string', description: 'Promoted website homepage URL to verify in badge_verify.' },
       expectedTarget: { type: 'string', description: 'Target site domain or href substring expected in siteUrl HTML for badge_verify.' },
-      refreshUrl: { type: 'string', description: 'Optional site refresh callback URL (e.g. https://site.example/footer/refresh) triggered before verifying in badge_verify.' },
+      refreshUrl: { type: 'string', description: 'Optional site refresh callback URL (e.g. https://site.example/footer/refresh) triggered in badge_verify or after badge_deactivate.' },
       retries: { type: 'integer', description: 'Max fetch verification attempts in badge_verify (1-5, default 3).' },
       retryDelayMs: { type: 'integer', description: 'Delay between badge_verify retries in ms (0-30000, default 5000).' },
-      timeoutMs: { type: 'integer', description: 'Per-request timeout in ms for badge_verify (1000-60000, default 15000).' },
+      timeoutMs: {
+        type: 'integer',
+        description: `Per-request timeout in ms for batch_preflight (1000-30000, default ${DEFAULT_PREFLIGHT_TIMEOUT_MS}) or badge_verify / badge_deactivate refresh (1000-60000, default 15000).`,
+      },
     },
   },
 }
@@ -273,6 +313,7 @@ export function createBacklinksToolHandler(deps: BacklinksToolDependencies) {
   const { config } = deps
   const fetchImpl = deps.fetchImpl ?? globalThis.fetch
   const sleepImpl = deps.sleepImpl ?? defaultSleep
+  const sessionGuard = new PublishSessionGuard(deps.circuitBreakerThreshold)
 
   const batchSource = deps.batchSource ?? new SupermanagerBatchSource(() => ({
     baseUrl: config.supermanagerBaseUrl,
@@ -351,6 +392,7 @@ export function createBacklinksToolHandler(deps: BacklinksToolDependencies) {
           const limit = readOptionalPositiveInt(args.limit, 'limit')
           const offset = readOptionalNonNegativeInt(args.offset, 'offset') ?? 0
           const detail = await batchSource.getBatch(readPositiveInt(args.batchId, 'batchId'), signal)
+          sessionGuard.recordBatchDetail(detail)
           const totalItems = detail.items.length
           const pendingItems = detail.items.filter(item => item.status === 'pending').length
           const publishedSourceIds = collectPublishedSourceIds(detail.items)
@@ -392,8 +434,15 @@ export function createBacklinksToolHandler(deps: BacklinksToolDependencies) {
           }
           break
         }
-        case 'batch_claim': {
+        case 'batch_preflight': {
           ensureBatchSourceReady()
+          const batchId = readPositiveInt(args.batchId, 'batchId')
+          if (args.autoSkip !== undefined && typeof args.autoSkip !== 'boolean') {
+            throw new Error('backlinks autoSkip must be a boolean.')
+          }
+          if (args.autoSkipTagged !== undefined && typeof args.autoSkipTagged !== 'boolean') {
+            throw new Error('backlinks autoSkipTagged must be a boolean.')
+          }
           let itemIds: readonly number[] | undefined
           if (args.itemIds !== undefined) {
             if (!Array.isArray(args.itemIds)) {
@@ -401,9 +450,64 @@ export function createBacklinksToolHandler(deps: BacklinksToolDependencies) {
             }
             itemIds = args.itemIds.map((entry, idx) => readPositiveInt(entry, `itemIds[${idx}]`))
           }
-          const claim = await batchSource.claim(readPositiveInt(args.batchId, 'batchId'), itemIds, signal)
+          let skipTags: readonly string[] | undefined
+          if (args.skipTags !== undefined) {
+            if (
+              !Array.isArray(args.skipTags)
+              || args.skipTags.some(tag => typeof tag !== 'string' || tag.trim().length === 0)
+            ) {
+              throw new Error('backlinks skipTags must be an array of non-empty strings.')
+            }
+            skipTags = args.skipTags.map(tag => tag.trim())
+          }
+          const timeoutMs = readBoundedInt(args.timeoutMs, 'timeoutMs', DEFAULT_PREFLIGHT_TIMEOUT_MS, 1_000, 30_000)
+          const concurrency = readBoundedInt(args.concurrency, 'concurrency', DEFAULT_PREFLIGHT_CONCURRENCY, 1, 12)
+
+          const detail = await batchSource.getBatch(batchId, signal)
+          sessionGuard.recordBatchDetail(detail)
+
+          const preflight = await runBatchPreflight(
+            batchSource,
+            detail,
+            {
+              timeoutMs,
+              concurrency,
+              autoSkip: args.autoSkip === true,
+              autoSkipTagged: args.autoSkipTagged === true,
+              ...(skipTags === undefined ? {} : { skipTags }),
+              ...(itemIds === undefined ? {} : { itemIds }),
+              fetchImpl,
+              sleepImpl,
+            },
+            signal,
+          )
+          for (const id of [...preflight.skippedDeadItemIds, ...preflight.skippedTaggedItemIds]) {
+            sessionGuard.markItemTerminal(id, 'skipped')
+          }
+          summary = preflight.summary
+          data = preflight.data
+          break
+        }
+        case 'batch_claim': {
+          ensureBatchSourceReady()
+          const batchId = readPositiveInt(args.batchId, 'batchId')
+          let itemIds: readonly number[] | undefined
+          if (args.itemIds !== undefined) {
+            if (!Array.isArray(args.itemIds)) {
+              throw new Error('backlinks itemIds must be an array of positive integers.')
+            }
+            itemIds = args.itemIds.map((entry, idx) => readPositiveInt(entry, `itemIds[${idx}]`))
+          }
+          const claim = await batchSource.claim(batchId, itemIds, signal)
+          sessionGuard.recordClaimedItems(batchId, claim.items)
+          const circuitBreakerAlerts = sessionGuard.getClaimAlerts(batchId, claim.items)
           summary = `lease ${claim.leaseId} over ${claim.items.length} item(s)`
-          data = claim
+            + (circuitBreakerAlerts.length > 0
+              ? ` [CIRCUIT BREAKER TRIPPED: ${circuitBreakerAlerts.map(a => a.fingerprint).join(', ')}]`
+              : '')
+          data = circuitBreakerAlerts.length > 0
+            ? { ...claim, circuitBreakerAlerts }
+            : claim
           break
         }
         case 'lease_heartbeat': {
@@ -423,10 +527,37 @@ export function createBacklinksToolHandler(deps: BacklinksToolDependencies) {
         }
         case 'item_result': {
           ensureBatchSourceReady()
+          const itemId = readPositiveInt(args.itemId, 'itemId')
+          const templateSignature = readOptionalString(args.templateSignature, 'templateSignature')
           const result = parseItemResult(args)
-          const outcome = await batchSource.reportItemResult(readPositiveInt(args.itemId, 'itemId'), result, signal)
+          const outcome = await batchSource.reportItemResult(itemId, result, signal)
+          const circuitBreaker = sessionGuard.recordItemResult({
+            itemId,
+            status: result.status,
+            ...(result.status === 'failed'
+              ? { failureReason: result.failureReason, ...(result.evidence === undefined ? {} : { evidence: result.evidence }) }
+              : {}),
+            ...(result.status === 'skipped' ? { skipReason: result.skipReason } : {}),
+            ...(templateSignature === undefined ? {} : { templateSignature }),
+          })
+          const badgeContext = result.status === 'failed'
+            ? `${result.failureReason} ${result.evidence ?? ''}`
+            : result.status === 'skipped'
+              ? result.skipReason
+              : ''
+          const badgeRollbackReminder = result.status === 'failed' || result.status === 'skipped'
+            ? sessionGuard.findActiveBadgeForItem(itemId, badgeContext)
+            : undefined
           summary = `item ${outcome.itemStatus}`
-          data = outcome
+            + (circuitBreaker ? ` [CIRCUIT BREAKER TRIPPED: ${circuitBreaker.fingerprint}]` : '')
+            + (badgeRollbackReminder ? ` [ROLLBACK BADGE ${badgeRollbackReminder.badgeId}]` : '')
+          data = circuitBreaker === undefined && badgeRollbackReminder === undefined
+            ? outcome
+            : {
+                ...outcome,
+                ...(circuitBreaker === undefined ? {} : { circuitBreaker }),
+                ...(badgeRollbackReminder === undefined ? {} : { badgeRollbackReminder }),
+              }
           break
         }
         case 'badge_add': {
@@ -434,12 +565,21 @@ export function createBacklinksToolHandler(deps: BacklinksToolDependencies) {
           if (args.isActive !== undefined && typeof args.isActive !== 'boolean') {
             throw new Error('backlinks isActive must be a boolean.')
           }
+          const websiteId = readPositiveInt(args.websiteId, 'websiteId')
           const badge: BacklinkBadgeInput = {
             name: readNonEmpty(args.name, 'name'),
             html: readNonEmpty(args.html, 'html'),
             ...(args.isActive === undefined ? {} : { isActive: args.isActive }),
           }
-          const outcome = await batchSource.addBadge(readPositiveInt(args.websiteId, 'websiteId'), badge, signal)
+          const outcome = await batchSource.addBadge(websiteId, badge, signal)
+          if (badge.isActive !== false) {
+            sessionGuard.recordBadgeAdded({
+              badgeId: outcome.backlinkId,
+              websiteId,
+              name: badge.name,
+              html: badge.html,
+            })
+          }
           summary = `badge ${outcome.backlinkId} created; `
             + (outcome.callbackTriggered
               ? 'site refresh callback fired — run backlinks action=badge_verify to confirm the badge is live'
@@ -529,6 +669,80 @@ export function createBacklinksToolHandler(deps: BacklinksToolDependencies) {
           }
           break
         }
+        case 'badge_deactivate': {
+          ensureBatchSourceReady()
+          const websiteId = readPositiveInt(args.websiteId, 'websiteId')
+          const badgeId = readOptionalPositiveInt(args.badgeId, 'badgeId')
+          const nameRaw = readOptionalString(args.name, 'name')
+          const htmlRaw = readOptionalString(args.html, 'html')
+          const name = nameRaw !== undefined && nameRaw.trim().length > 0 ? nameRaw.trim() : undefined
+          const html = htmlRaw !== undefined && htmlRaw.trim().length > 0 ? htmlRaw.trim() : undefined
+          if (badgeId === undefined && name === undefined && html === undefined) {
+            throw new Error('backlinks badge_deactivate requires badgeId, name, or html.')
+          }
+          if (args.remove !== undefined && typeof args.remove !== 'boolean') {
+            throw new Error('backlinks remove must be a boolean.')
+          }
+          const remove = args.remove === true
+          const refreshUrlRaw = readOptionalString(args.refreshUrl, 'refreshUrl')
+          const refreshUrl = refreshUrlRaw === undefined ? undefined : readHttpUrl(refreshUrlRaw, 'refreshUrl')
+          const timeoutMs = readBoundedInt(args.timeoutMs, 'timeoutMs', 15_000, 1_000, 60_000)
+
+          if (!batchSource.deactivateBadge) {
+            throw new BacklinksError('batch source provider does not support badge deactivation', 'BACKLINKS_API_ERROR')
+          }
+
+          const outcome = await batchSource.deactivateBadge(
+            websiteId,
+            {
+              ...(badgeId === undefined ? {} : { badgeId }),
+              ...(name === undefined ? {} : { name }),
+              ...(html === undefined ? {} : { html }),
+              ...(remove ? { remove: true } : {}),
+            },
+            signal,
+          )
+
+          const effectiveBadgeId = badgeId ?? outcome.backlinkId ?? undefined
+          sessionGuard.recordBadgeDeactivated({
+            websiteId,
+            ...(effectiveBadgeId === undefined ? {} : { badgeId: effectiveBadgeId }),
+            ...(name === undefined ? {} : { name }),
+            ...(html === undefined ? {} : { html }),
+          })
+
+          let refresh:
+            | {
+                readonly triggered: true
+                readonly url: string
+                readonly status?: number
+                readonly ok: boolean
+                readonly error?: string
+              }
+            | undefined
+
+          if (refreshUrl !== undefined) {
+            try {
+              const res = await fetchWithTimeout(fetchImpl, refreshUrl, timeoutMs, signal)
+              refresh = { triggered: true, url: refreshUrl, status: res.status, ok: res.ok }
+            } catch (error) {
+              if (signal?.aborted) throw error
+              refresh = {
+                triggered: true,
+                url: refreshUrl,
+                ok: false,
+                error: error instanceof Error ? error.message : String(error),
+              }
+            }
+          }
+
+          summary = `badge ${outcome.backlinkId ?? name ?? 'matched'} ${outcome.deleted ? 'deleted' : 'deactivated'} (isActive=false)`
+          data = {
+            ...outcome,
+            ...(refresh === undefined ? {} : { refresh }),
+          }
+          break
+        }
         case 'source_tags': {
           ensureBatchSourceReady()
           const sourceId = readPositiveInt(args.sourceId, 'sourceId')
@@ -555,7 +769,7 @@ export function createBacklinksToolHandler(deps: BacklinksToolDependencies) {
         case 'mail_wait': {
           ensureMailboxReady()
           const email = readNonEmpty(args.mailEmail, 'mailEmail')
-          const waitTimeoutMs = readOptionalPositiveInt(args.waitTimeoutMs, 'waitTimeoutMs') ?? 120_000
+          const waitTimeoutMs = readOptionalPositiveInt(args.waitTimeoutMs, 'waitTimeoutMs') ?? config.mailWaitTimeoutMs
           const subjectContains = readOptionalString(args.subjectContains, 'subjectContains')
           const fromContains = readOptionalString(args.fromContains, 'fromContains')
           const mail = await mailbox.pollMail(
@@ -564,7 +778,7 @@ export function createBacklinksToolHandler(deps: BacklinksToolDependencies) {
               ...(subjectContains === undefined ? {} : { subjectContains }),
               ...(fromContains === undefined ? {} : { fromContains }),
               timeoutMs: waitTimeoutMs,
-              intervalMs: 5_000,
+              intervalMs: DEFAULT_MAIL_WAIT_POLL_INTERVAL_MS,
             },
             signal,
           )

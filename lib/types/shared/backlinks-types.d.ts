@@ -120,6 +120,21 @@ export interface BacklinkBadgeResult {
     readonly backlinkId: number;
     readonly callbackTriggered: boolean;
 }
+/** Selector & mode for deactivating or removing a reciprocal footer badge. */
+export interface BacklinkBadgeDeactivateInput {
+    readonly badgeId?: number;
+    readonly name?: string;
+    readonly html?: string;
+    readonly remove?: boolean;
+}
+/** Reciprocal badge deactivation or removal effect. */
+export interface BacklinkBadgeDeactivateResult {
+    readonly backlinkId: number | null;
+    readonly isActive: false;
+    readonly deleted: boolean;
+    readonly callbackTriggered: boolean;
+    readonly strategy: 'patch_by_id' | 'delete_by_id' | 'patch_by_match';
+}
 /** One attached source tag resolution outcome. */
 export interface BacklinkTagResult {
     readonly sourceId: number;

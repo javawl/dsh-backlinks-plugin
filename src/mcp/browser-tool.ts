@@ -108,7 +108,7 @@ export const BROWSER_TOOL_DEFINITION: Tool = {
       },
       timeoutMs: {
         type: 'integer',
-        description: 'Timeout in ms for waitFor or wait_for_login (wait_for_login defaults to 300000).',
+        description: 'Timeout in ms for navigate (default 10000; overridable per call, recommend 8000-10000), waitFor (default 10000), or wait_for_login (default 300000).',
       },
       fields: {
         type: 'array',
@@ -704,6 +704,7 @@ export function createBrowserToolHandler(deps: BrowserToolDependencies) {
             kind: 'navigate',
             url: target,
             ...(waitUntil === undefined ? {} : { waitUntil }),
+            ...(timeoutMs === undefined ? {} : { timeoutMs }),
             maxChars: effectiveMaxChars,
           })
           break

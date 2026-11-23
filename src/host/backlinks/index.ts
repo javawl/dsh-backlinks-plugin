@@ -5,6 +5,8 @@
 import { Context, Service } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {
+  BacklinkBadgeDeactivateInput,
+  BacklinkBadgeDeactivateResult,
   BacklinkBadgeInput,
   BacklinkBadgeResult,
   BacklinkBatchDetail,
@@ -102,6 +104,18 @@ export class BacklinksRuntime extends Service {
 
   async addBadge(websiteId: number, badge: BacklinkBadgeInput, signal?: AbortSignal): Promise<BacklinkBadgeResult> {
     return this.resolveBatchSource().addBadge(websiteId, badge, signal)
+  }
+
+  async deactivateBadge(
+    websiteId: number,
+    input: BacklinkBadgeDeactivateInput,
+    signal?: AbortSignal,
+  ): Promise<BacklinkBadgeDeactivateResult> {
+    const provider = this.resolveBatchSource()
+    if (!provider.deactivateBadge) {
+      throw new BacklinksError('batch source provider does not support badge deactivation', 'BACKLINKS_API_ERROR')
+    }
+    return provider.deactivateBadge(websiteId, input, signal)
   }
 
   async tagSource(sourceId: number, names: readonly string[], signal?: AbortSignal): Promise<BacklinkTagResult> {
