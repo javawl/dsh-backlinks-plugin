@@ -96,16 +96,37 @@ describe('built MCP server artifact & stdio handshake', () => {
 
     const listResp = await waitForId(2)
     expect(listResp.error).toBeUndefined()
-    const tools = (listResp.result as { tools: Array<{ name: string; inputSchema: { properties: Record<string, { enum?: string[] }> } }> }).tools
+    const tools = (listResp.result as {
+      tools: Array<{
+        name: string
+        inputSchema: {
+          properties: Record<string, {
+            enum?: string[]
+            description?: string
+            items?: { properties?: Record<string, unknown> }
+          }>
+        }
+      }>
+    }).tools
     expect(tools.map(t => t.name)).toEqual(['backlinks', 'browser'])
 
     const backlinksTool = tools[0]!
     expect(backlinksTool.inputSchema.properties.action?.enum).toContain('badge_verify')
     expect(backlinksTool.inputSchema.properties.compact).toBeDefined()
+    expect(backlinksTool.inputSchema.properties.onlyPending).toBeDefined()
+    expect(backlinksTool.inputSchema.properties.pendingOnly).toBeDefined()
+    expect(backlinksTool.inputSchema.properties.limit).toBeDefined()
+    expect(backlinksTool.inputSchema.properties.offset).toBeDefined()
 
     const browserTool = tools[1]!
     expect(browserTool.inputSchema.properties.action?.enum).toContain('batch_fill')
     expect(browserTool.inputSchema.properties.action?.enum).toContain('wait_for_login')
+    expect(browserTool.inputSchema.properties.nth).toBeDefined()
+    expect(browserTool.inputSchema.properties.submitNth).toBeDefined()
+    expect(browserTool.inputSchema.properties.fields?.items?.properties?.nth).toBeDefined()
+    expect(browserTool.inputSchema.properties.maxChars?.description).toContain('3000')
+    expect(browserTool.inputSchema.properties.maxChars?.description).toContain('8000')
+    expect(browserTool.inputSchema.properties.maxChars?.description).toContain('16000')
 
     const exitCode = await new Promise<number | null>((resolveExit, rejectExit) => {
       const timer = setTimeout(() => {

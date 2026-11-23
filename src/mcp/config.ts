@@ -7,7 +7,9 @@ import { homedir } from 'node:os'
 import path from 'node:path'
 
 export const DEFAULT_CLOUDMAIL_BASE_URL = 'https://mail.screwdom.org/api'
-export const DEFAULT_MAX_OUTPUT_CHARS = 16_000
+export const DEFAULT_MAX_OUTPUT_CHARS_CLAMP = 16_000
+export const DEFAULT_MAX_OUTPUT_CHARS = DEFAULT_MAX_OUTPUT_CHARS_CLAMP
+export const DEFAULT_SNAPSHOT_MAX_CHARS = 8_000
 export const DEFAULT_NAVIGATE_MAX_CHARS = 3_000
 export const DEFAULT_BROWSER_TIMEOUT_MS = 15_000
 export const DEFAULT_REQUEST_TIMEOUT_MS = 15_000
@@ -21,6 +23,7 @@ export interface McpConfig {
   readonly cloudMailTimeoutMs: number
   readonly browserProfileDir: string
   readonly maxOutputChars: number
+  readonly snapshotMaxChars: number
   readonly navigateMaxChars: number
   readonly browserHeadless: boolean
   readonly browserChannel: string
@@ -121,7 +124,8 @@ export function resolveMcpConfig(
     cloudMailToken: readTrimmed(env, 'CLOUDMAIL_TOKEN'),
     cloudMailTimeoutMs: readPositiveIntEnv(env, 'CLOUDMAIL_TIMEOUT_MS', DEFAULT_REQUEST_TIMEOUT_MS),
     browserProfileDir,
-    maxOutputChars: readPositiveIntEnv(env, 'BACKLINKS_MAX_OUTPUT_CHARS', DEFAULT_MAX_OUTPUT_CHARS),
+    maxOutputChars: readPositiveIntEnv(env, 'BACKLINKS_MAX_OUTPUT_CHARS', DEFAULT_MAX_OUTPUT_CHARS_CLAMP),
+    snapshotMaxChars: readPositiveIntEnv(env, 'BACKLINKS_SNAPSHOT_MAX_CHARS', DEFAULT_SNAPSHOT_MAX_CHARS),
     navigateMaxChars: readPositiveIntEnv(env, 'BACKLINKS_NAVIGATE_MAX_CHARS', DEFAULT_NAVIGATE_MAX_CHARS),
     browserHeadless: readBooleanEnv(env, 'BACKLINKS_BROWSER_HEADLESS', false),
     browserChannel: browserChannel.length > 0 ? browserChannel : 'chrome',

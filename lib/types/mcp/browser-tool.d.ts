@@ -5,7 +5,8 @@
  * Exposes all 12 existing actions (`navigate`, `snapshot`, `click`, `fill`,
  * `select`, `press`, `upload`, `screenshot`, `waitFor`, `closePage`,
  * `bringToFront`, `closeBrowser`) plus:
- * - Lower default token limits (`maxOutputChars` 16,000; `navigate` summary 3,000)
+ * - Lower default token limits (`navigate` summary 3,000; `snapshot` default 8,000; hard clamp `maxOutputChars` 16,000)
+ * - Optional `nth` / `submitNth` disambiguation and Playwright strict-mode diagnostics
  * - `batch_fill`: serial multi-field form filling + optional submit in 1 round-trip
  * - `wait_for_login`: in-process polling waiting for manual login completion.
  */
@@ -21,6 +22,7 @@ export interface BatchFillField {
     readonly target: string;
     readonly value?: string;
     readonly op: BatchFillOp;
+    readonly nth?: number;
 }
 export declare const BROWSER_TOOL_DEFINITION: Tool;
 export declare class BrowserSessionManager {

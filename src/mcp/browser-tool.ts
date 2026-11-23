@@ -5,7 +5,8 @@
  * Exposes all 12 existing actions (`navigate`, `snapshot`, `click`, `fill`,
  * `select`, `press`, `upload`, `screenshot`, `waitFor`, `closePage`,
  * `bringToFront`, `closeBrowser`) plus:
- * - Lower default token limits (`maxOutputChars` 16,000; `navigate` summary 3,000)
+ * - Lower default token limits (`navigate` summary 3,000; `snapshot` default 8,000; hard clamp `maxOutputChars` 16,000)
+ * - Optional `nth` / `submitNth` disambiguation and Playwright strict-mode diagnostics
  * - `batch_fill`: serial multi-field form filling + optional submit in 1 round-trip
  * - `wait_for_login`: in-process polling waiting for manual login completion.
  */
@@ -51,6 +52,7 @@ export interface BatchFillField {
   readonly target: string
   readonly value?: string
   readonly op: BatchFillOp
+  readonly nth?: number
 }
 
 export const BROWSER_TOOL_DEFINITION: Tool = {
@@ -77,7 +79,11 @@ export const BROWSER_TOOL_DEFINITION: Tool = {
       },
       selector: {
         type: 'string',
-        description: 'Element selector: role:<role>|<name>, label:<text>, placeholder:<text>, text:<text>, bare CSS, optionally prefixed frame(<iframe css>)>>; click also accepts xy:<x>,<y>. Also used by wait_for_login to wait for a visible logged-in selector.',
+        description: 'Element selector: prefer exact role:<role>|<name> (e.g. role:button|Submit) over broad text:<text>; also supports label:<text>, placeholder:<text>, bare CSS, optionally prefixed frame(<iframe css>)>>; click also accepts xy:<x>,<y>. Pass nth if multiple elements match. Also used by wait_for_login.',
+      },
+      nth: {
+        type: 'integer',
+        description: 'Optional 0-based element index when selector matches multiple elements (supported by click, fill, select, upload, waitFor).',
       },
       format: {
         type: 'string',
@@ -98,7 +104,7 @@ export const BROWSER_TOOL_DEFINITION: Tool = {
       },
       maxChars: {
         type: 'integer',
-        description: 'Optional output character cap (clamped to server maxOutputChars; navigate defaults to 3000, snapshot defaults to 16000).',
+        description: 'Optional output character cap (navigate defaults to 3000, snapshot defaults to 8000; explicit maxChars clamped to server maxOutputChars, default 16000).',
       },
       timeoutMs: {
         type: 'integer',
@@ -119,12 +125,20 @@ export const BROWSER_TOOL_DEFINITION: Tool = {
               enum: ['fill', 'select', 'click', 'check'],
               description: 'Operation kind (default fill).',
             },
+            nth: {
+              type: 'integer',
+              description: 'Optional 0-based element index when target matches multiple elements.',
+            },
           },
         },
       },
       submitTarget: {
         type: 'string',
         description: 'For batch_fill: optional submit button selector clicked only when all fields succeed.',
+      },
+      submitNth: {
+        type: 'integer',
+        description: 'For batch_fill: optional 0-based element index for submitTarget when it matches multiple elements.',
       },
       stopOnError: {
         type: 'boolean',
@@ -314,9 +328,24 @@ function readSnapshotFormat(value: unknown): BrowserSnapshotCommand['format'] {
 
 function readPositiveInt(value: unknown, field: string): number | undefined {
   if (value === undefined || value === null) return undefined
+  if (typeof value === 'boolean' || (typeof value === 'string' && value.trim().length === 0)) {
+    throw new Error(`browser ${field} must be a positive integer.`)
+  }
   const parsed = Number(value)
   if (!Number.isSafeInteger(parsed) || parsed <= 0) {
     throw new Error(`browser ${field} must be a positive integer.`)
+  }
+  return parsed
+}
+
+function readNonNegativeInt(value: unknown, field: string): number | undefined {
+  if (value === undefined || value === null) return undefined
+  if (typeof value === 'boolean' || (typeof value === 'string' && value.trim().length === 0)) {
+    throw new Error(`browser ${field} must be a non-negative integer.`)
+  }
+  const parsed = Number(value)
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new Error(`browser ${field} must be a non-negative integer.`)
   }
   return parsed
 }
@@ -334,6 +363,7 @@ function parseBatchFillFields(rawFields: unknown): readonly BatchFillField[] {
     if (target === undefined) {
       throw new Error(`browser fields[${idx}].target is required.`)
     }
+    const nth = readNonNegativeInt(row.nth, `fields[${idx}].nth`)
     const opRaw = row.op === undefined ? 'fill' : row.op
     if (opRaw !== 'fill' && opRaw !== 'select' && opRaw !== 'click' && opRaw !== 'check') {
       throw new Error(`browser fields[${idx}].op must be fill, select, click, or check.`)
@@ -342,16 +372,16 @@ function parseBatchFillFields(rawFields: unknown): readonly BatchFillField[] {
       if (typeof row.value !== 'string') {
         throw new Error(`browser fields[${idx}].value must be a string for op=fill.`)
       }
-      return { target, op: opRaw, value: row.value }
+      return { target, op: opRaw, value: row.value, ...(nth === undefined ? {} : { nth }) }
     }
     if (opRaw === 'select') {
       const value = readNonEmpty(row.value, `fields[${idx}].value`)
       if (value === undefined) {
         throw new Error(`browser fields[${idx}].value must be a non-empty string for op=select.`)
       }
-      return { target, op: opRaw, value }
+      return { target, op: opRaw, value, ...(nth === undefined ? {} : { nth }) }
     }
-    return { target, op: opRaw }
+    return { target, op: opRaw, ...(nth === undefined ? {} : { nth }) }
   })
 }
 
@@ -427,6 +457,7 @@ export function createBrowserToolHandler(deps: BrowserToolDependencies) {
       if (action === 'batch_fill') {
         const fields = parseBatchFillFields(args.fields)
         const submitTarget = readSelector(args.submitTarget, 'submitTarget')
+        const submitNth = readNonNegativeInt(args.submitNth, 'submitNth')
         if (args.stopOnError !== undefined && typeof args.stopOnError !== 'boolean') {
           throw new Error('browser stopOnError must be a boolean.')
         }
@@ -445,19 +476,20 @@ export function createBrowserToolHandler(deps: BrowserToolDependencies) {
 
         for (let index = 0; index < fields.length; index++) {
           const field = fields[index]!
+          const nthField = field.nth === undefined ? {} : { nth: field.nth }
           let cmd: BrowserCommand
           switch (field.op) {
             case 'fill':
-              cmd = addressed({ kind: 'fill', selector: field.target, value: field.value ?? '' })
+              cmd = addressed({ kind: 'fill', selector: field.target, value: field.value ?? '', ...nthField })
               break
             case 'select':
-              cmd = addressed({ kind: 'select', selector: field.target, value: field.value ?? '' })
+              cmd = addressed({ kind: 'select', selector: field.target, value: field.value ?? '', ...nthField })
               break
             case 'click':
-              cmd = addressed({ kind: 'click', selector: field.target })
+              cmd = addressed({ kind: 'click', selector: field.target, ...nthField })
               break
             case 'check':
-              cmd = addressed({ kind: 'check', selector: field.target })
+              cmd = addressed({ kind: 'check', selector: field.target, ...nthField })
               break
             default:
               return assertNever(field.op, 'unhandled batch_fill op')
@@ -503,7 +535,14 @@ export function createBrowserToolHandler(deps: BrowserToolDependencies) {
             }
           } else {
             try {
-              await sessionManager.act(addressed({ kind: 'click', selector: submitTarget }), signal)
+              await sessionManager.act(
+                addressed({
+                  kind: 'click',
+                  selector: submitTarget,
+                  ...(submitNth === undefined ? {} : { nth: submitNth }),
+                }),
+                signal,
+              )
               submit = { target: submitTarget, attempted: true, ok: true }
             } catch (error) {
               if (signal?.aborted || (error instanceof BrowserError && error.code === 'BROWSER_ABORTED')) {
@@ -640,6 +679,8 @@ export function createBrowserToolHandler(deps: BrowserToolDependencies) {
       }
 
       const selector = readSelector(args.selector)
+      const nth = readNonNegativeInt(args.nth, 'nth')
+      const nthProp = nth === undefined ? {} : { nth }
       const url = readNonEmpty(args.url, 'url')
       const value = readNonEmpty(args.value, 'value')
       const waitUntil = readWaitUntil(args.waitUntil)
@@ -671,7 +712,7 @@ export function createBrowserToolHandler(deps: BrowserToolDependencies) {
           const format = readSnapshotFormat(args.format)
           effectiveMaxChars = requestedMaxChars !== undefined
             ? Math.min(requestedMaxChars, config.maxOutputChars)
-            : config.maxOutputChars
+            : Math.min(config.snapshotMaxChars, config.maxOutputChars)
           command = addressed({
             kind: 'snapshot',
             ...(selector === undefined ? {} : { selector }),
@@ -682,19 +723,19 @@ export function createBrowserToolHandler(deps: BrowserToolDependencies) {
         }
         case 'click':
           if (selector === undefined) throw new Error('browser click requires a selector.')
-          command = addressed({ kind: 'click', selector })
+          command = addressed({ kind: 'click', selector, ...nthProp })
           break
         case 'fill':
           if (selector === undefined) throw new Error('browser fill requires a selector.')
           if (typeof args.value !== 'string' || args.value.trim().length === 0) {
             throw new Error('browser fill requires a value.')
           }
-          command = addressed({ kind: 'fill', selector, value: value! })
+          command = addressed({ kind: 'fill', selector, value: value!, ...nthProp })
           break
         case 'select':
           if (selector === undefined) throw new Error('browser select requires a selector.')
           if (value === undefined) throw new Error('browser select requires a value.')
-          command = addressed({ kind: 'select', selector, value })
+          command = addressed({ kind: 'select', selector, value, ...nthProp })
           break
         case 'press':
           if (typeof args.key !== 'string' || args.key.trim().length === 0) {
@@ -711,7 +752,7 @@ export function createBrowserToolHandler(deps: BrowserToolDependencies) {
           ) {
             throw new Error('browser upload requires a non-empty files array of paths.')
           }
-          command = addressed({ kind: 'upload', selector, files: args.files.map(file => String(file)) })
+          command = addressed({ kind: 'upload', selector, files: args.files.map(file => String(file)), ...nthProp })
           break
         case 'screenshot':
           command = addressed({ kind: 'screenshot' })
@@ -722,7 +763,7 @@ export function createBrowserToolHandler(deps: BrowserToolDependencies) {
           }
           command = addressed({
             kind: 'waitFor',
-            ...(selector === undefined ? {} : { selector }),
+            ...(selector === undefined ? {} : { selector, ...nthProp }),
             ...(url === undefined ? {} : { url }),
             ...(timeoutMs === undefined ? {} : { timeoutMs }),
           })

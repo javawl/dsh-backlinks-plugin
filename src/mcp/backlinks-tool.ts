@@ -17,11 +17,15 @@ import type {
   MailboxProvider,
 } from '../host/backlinks/types.ts'
 import {
+  collectPublishedSourceIds,
   compactBatchDetail,
+  compactBatchSummary,
   parseItemResult,
   parseTags,
+  readClampedInt,
   readHttpUrl,
   readNonEmpty,
+  readOptionalNonNegativeInt,
   readOptionalPositiveInt,
   readOptionalString,
   readPositiveInt,
@@ -77,7 +81,23 @@ export const BACKLINKS_TOOL_DEFINITION: Tool = {
       batchId: { type: 'integer', description: 'Batch ID for batch_get / batch_claim.' },
       compact: {
         type: 'boolean',
-        description: 'For batch_get: return compact payload (default true) keeping batch, website 6-field profile, anchors, and essential item fields; pass false for full raw detail.',
+        description: 'For batch_list and batch_get: return compact payload (default true); pass false for full raw objects.',
+      },
+      onlyPending: {
+        type: 'boolean',
+        description: 'For batch_list: only return batches with pending items (default true; pass false for all batches).',
+      },
+      pendingOnly: {
+        type: 'boolean',
+        description: 'For batch_get: only return items with status=pending (default false). Always includes publishedSourceIds computed across the full batch to prevent duplicate-sourceId publishing.',
+      },
+      limit: {
+        type: 'integer',
+        description: 'Pagination page size: for batch_list defaults to 20 (clamped 1-100); for batch_get optional positive integer.',
+      },
+      offset: {
+        type: 'integer',
+        description: 'Pagination start offset (non-negative integer, default 0) for batch_list and batch_get.',
       },
       itemIds: {
         type: 'array',
@@ -294,9 +314,27 @@ export function createBacklinksToolHandler(deps: BacklinksToolDependencies) {
       switch (action) {
         case 'batch_list': {
           ensureBatchSourceReady()
-          const batches = await batchSource.listBatches(signal)
-          summary = `${batches.length} batch(es)`
-          data = { batches }
+          if (args.compact !== undefined && typeof args.compact !== 'boolean') {
+            throw new Error('backlinks compact must be a boolean.')
+          }
+          if (args.onlyPending !== undefined && typeof args.onlyPending !== 'boolean') {
+            throw new Error('backlinks onlyPending must be a boolean.')
+          }
+          const compact = args.compact !== false
+          const onlyPending = args.onlyPending !== false
+          const limit = readClampedInt(args.limit, 'limit', 20, 1, 100)
+          const offset = readOptionalNonNegativeInt(args.offset, 'offset') ?? 0
+          const allBatches = await batchSource.listBatches(signal)
+          const total = allBatches.length
+          const filtered = onlyPending ? allBatches.filter(batch => batch.counts.pending > 0) : allBatches
+          const matched = filtered.length
+          const sliced = filtered.slice(offset, offset + limit)
+          const hasMore = offset + sliced.length < matched
+          const batches = compact ? sliced.map(compactBatchSummary) : sliced
+          summary = onlyPending && matched === 0 && total > 0
+            ? `0 pending batch(es) (${total} total; pass onlyPending=false for all)`
+            : `${sliced.length} of ${matched} ${onlyPending ? 'pending ' : ''}batch(es) (${total} total, offset=${offset}, limit=${limit}${hasMore ? ', hasMore=true' : ''})`
+          data = { total, matched, offset, limit, hasMore, onlyPending, compact, batches }
           break
         }
         case 'batch_get': {
@@ -304,10 +342,54 @@ export function createBacklinksToolHandler(deps: BacklinksToolDependencies) {
           if (args.compact !== undefined && typeof args.compact !== 'boolean') {
             throw new Error('backlinks compact must be a boolean.')
           }
+          if (args.pendingOnly !== undefined && typeof args.pendingOnly !== 'boolean') {
+            throw new Error('backlinks pendingOnly must be a boolean.')
+          }
           const compact = args.compact !== false
+          const pendingOnly = args.pendingOnly === true
+          const hasPagination = args.limit !== undefined || args.offset !== undefined
+          const limit = readOptionalPositiveInt(args.limit, 'limit')
+          const offset = readOptionalNonNegativeInt(args.offset, 'offset') ?? 0
           const detail = await batchSource.getBatch(readPositiveInt(args.batchId, 'batchId'), signal)
-          summary = `${detail.batch.name}: ${detail.items.length} item(s)${compact ? ' (compact; pass compact=false for full)' : ' (full)'}`
-          data = compact ? compactBatchDetail(detail) : detail
+          const totalItems = detail.items.length
+          const pendingItems = detail.items.filter(item => item.status === 'pending').length
+          const publishedSourceIds = collectPublishedSourceIds(detail.items)
+          const filteredItems = pendingOnly ? detail.items.filter(item => item.status === 'pending') : detail.items
+          const slicedItems = limit === undefined
+            ? filteredItems.slice(offset)
+            : filteredItems.slice(offset, offset + limit)
+          const returnedItems = slicedItems.length
+          const hasMore = offset + returnedItems < filteredItems.length
+
+          if (!pendingOnly && !hasPagination) {
+            summary = `${detail.batch.name}: ${detail.items.length} item(s)${compact ? ' (compact; pass compact=false for full)' : ' (full)'}`
+            data = compact
+              ? {
+                  ...compactBatchDetail(detail),
+                  publishedSourceIds,
+                  totalItems,
+                  pendingItems,
+                  returnedItems,
+                  hasMore,
+                }
+              : detail
+          } else {
+            summary = `${detail.batch.name}: ${returnedItems}/${filteredItems.length} ${pendingOnly ? 'pending ' : ''}item(s) (${totalItems} total, ${pendingItems} pending, ${publishedSourceIds.length} published source(s))${compact ? ' (compact; pass compact=false for full)' : ' (full)'}`
+            const base = compact
+              ? compactBatchDetail({ ...detail, items: slicedItems })
+              : { ...detail, items: slicedItems }
+            data = {
+              ...base,
+              publishedSourceIds,
+              totalItems,
+              pendingItems,
+              returnedItems,
+              hasMore,
+              pendingOnly,
+              offset,
+              ...(limit === undefined ? {} : { limit }),
+            }
+          }
           break
         }
         case 'batch_claim': {

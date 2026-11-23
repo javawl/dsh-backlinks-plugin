@@ -108,14 +108,27 @@ node scripts/install-antigravity.mjs --target auto --dry-run
 | `CLOUDMAIL_BASE_URL` | 否 | `https://mail.screwdom.org/api` | Cloud-mail 接口根地址 |
 | `CLOUDMAIL_TOKEN` | 懒加载（仅接码时需要） | 无 | 未配置时仍可正常执行 Supermanager 批次与 `badge_verify`，仅在 `mailbox_create`/`mail_wait` 时提示补充 |
 | `DSH_BACKLINK_BROWSER_PROFILE` | 否 | `~/.dsh/backlink-browser-profile` | 支持 `~` 跨平台展开（Windows/macOS），直接复用现有 Chrome 登录态 |
-| `BACKLINKS_MAX_OUTPUT_CHARS` | 否 | `16000` | `browser` 快照默认输出字符上限（`navigate` 默认再收紧为 `3000` 摘要） |
+| `BACKLINKS_MAX_OUTPUT_CHARS` | 否 | `16000` | 显式传入 `maxChars` 时的服务端硬上限（clamp）；未传 `maxChars` 时受下方快照/导航默认值限制 |
+| `BACKLINKS_SNAPSHOT_MAX_CHARS` | 否 | `8000` | `browser snapshot` 默认输出字符上限（避免触发 `agy` >10 KB 落盘） |
 | `BACKLINKS_NAVIGATE_MAX_CHARS` | 否 | `3000` | `browser navigate` 默认文本摘要字符上限 |
 | `BACKLINKS_BROWSER_EXECUTABLE_PATH` | 否 | 自动按 `chrome` channel 查找 | 如需指定自定义 Chrome 可执行路径（如 Windows 非标准安装目录） |
 | `BACKLINKS_BROWSER_WINDOW_POSITION` | 否 | 可见默认位置 | 设为 `-32000,-32000` 可默认离屏启动；遇到 `bringToFront` 或 `wait_for_login` 时会自动拉回主屏可见区域 |
 
 ---
 
-## 五、只读冒烟验证（Antigravity App / Orca）
+## 五、`agy` CLI 推荐启动姿势（工作目录、模型与单会话规模）
+
+为避免无关仓库规则污染上下文或长会话导致 >300k token 延迟退化，建议按以下方式启动 `agy`：
+
+1. **从独立干净空目录启动**：专门建一个空工作目录运行 `agy`（避免自动加载其他代码仓库的 `AGENTS.md` 与无关 skills）：
+   - **Windows**：`mkdir C:\Users\zlb\backlinks-work && cd C:\Users\zlb\backlinks-work`
+   - **macOS**：`mkdir -p ~/backlinks-work && cd ~/backlinks-work`
+2. **选用轻快高性价比模型**：日常批量外链发布推荐使用 `--model gemini-4-neon-medium`（或 `gemini-3.8-flash-high`），避免使用过重的 `Neon (High)` / `Orchestrator`。
+3. **控制单会话条数（15–20 条）**：每次对话处理 **3–4 个分片（每片 1–5 条，合计 ≤ 15–20 条）**。若批次仍有待发条目，完成当前分片并 `lease_release` 后新开一次 `agy` 会话继续下一段。
+
+---
+
+## 六、只读冒烟验证（Antigravity App / Orca）
 
 重启 Antigravity App（或重新加载 MCP Server）后，先执行只读检查确认工具与浏览器状态：
 
@@ -128,17 +141,19 @@ node scripts/install-antigravity.mjs --target auto --dry-run
 
 ---
 
-## 六、内置降 Token 优化清单
+## 七、内置降 Token 与防冲突优化清单
 
-1. **`batch_get` 默认精简输出**：`compact` 默认为 `true`，保留 `batch` 元信息、网站 6 字段资料包、`anchors` 与核心条目字段，过滤冗余信息；确需原始完整结构时再传 `compact: false`。
-2. **降低浏览器文本回传**：`snapshot` 默认截断上限从 60,000 降至 `16,000` 字符，`navigate` 默认只回传 `3,000` 字符页面摘要。
-3. **整表合并提交 `batch_fill`**：支持一次传入 `fields`（`fill` / `select` / `click` / `check`）与可选 `submitTarget`，单轮完成表单填写（若任意字段失败则跳过 `submitTarget`）。
-4. **进程内等待登录 `wait_for_login`**：彻底替代 60 轮 LLM 空转轮询，自动 `bringToFront` 并在 Node.js 内轮询 URL 或元素状态。
-5. **分片认领**：技能引导每次按 `itemIds` 认领 1–5 条，避免大租约与长上下文膨胀。
+1. **`batch_list` 默认精简与分页**：默认 `onlyPending: true, compact: true, limit: 20, offset: 0`，过滤掉已完结批次并返回 `{ total, matched, offset, limit, hasMore, batches }`（典型体积约 2–5 KB，避免触发 `agy` >10 KB 落盘）。
+2. **`batch_get` 默认精简、分页与安全不变量**：`compact` 默认为 `true`，支持可选 `pendingOnly: true` 与 `limit`/`offset` 分页；无论是否过滤或分页，始终基于全批次条目计算并返回 `publishedSourceIds` 与汇总计数，绝不因分页丢失已发布 `sourceId` 校验。
+3. **降低浏览器文本回传**：`snapshot` 默认截断上限降至 `8,000` 字符（避开 `agy` ~10 KB 落盘），复杂页面确需更大快照时可显式传入 `maxChars`（最高至服务端硬上限 `16,000`）；`navigate` 默认只回传 `3,000` 字符页面摘要。
+4. **`nth` / `submitNth` 与 strict mode 候选诊断**：`click` / `fill` / `select` / `upload` / `waitFor` 与 `batch_fill`（`fields[].nth`、`submitNth`）支持 0-based `nth`；触发 Playwright `strict mode violation` 时自动采集前 5 个匹配元素的 tag/role/text/aria-label/name/visible 与推荐 `role:`/`nth` 提示。
+5. **整表合并提交 `batch_fill`**：支持一次传入 `fields`（`fill` / `select` / `click` / `check`）与可选 `submitTarget` / `submitNth`，单轮完成表单填写（若任意字段失败则跳过 `submitTarget`）。
+6. **进程内等待登录 `wait_for_login`**：彻底替代多轮 LLM 空转轮询，自动 `bringToFront` 并在 Node.js 内轮询 URL 或元素状态。
+7. **分片认领与单会话上限**：技能引导每次按 `itemIds` 认领 1–5 条，单会话控制在 15–20 条（3–4 片），避免长上下文膨胀。
 
 ---
 
-## 七、常见坑点与排查
+## 八、常见坑点与排查
 
 - **Windows Chrome Profile 占用锁（`SingletonLock` / `ProcessSingleton`）**：同一个 `backlink-browser-profile` 目录同一时刻只能被一个 Chrome 进程打开。如果 DSH、手动 Chrome 或残留进程正在占用该目录，先关闭已有实例或通过 `browser closeBrowser` 释放后再启动。
 - **Windows GUI 下 `node` 不在系统 PATH**：如果 Antigravity Desktop App 提示 `spawn node ENOENT`，将 `mcp_config.json` 中 `"command": "node"` 改为绝对路径（如 `"C:\\Program Files\\nodejs\\node.exe"`，macOS 如 `"/Users/<name>/.nvm/versions/node/v24.x.x/bin/node"`）。安装脚本在升级时会保留你已自定义的 `command` 路径。

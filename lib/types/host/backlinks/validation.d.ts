@@ -2,14 +2,35 @@
  * Pure, zero-DSH-dependency validation and payload-compaction helpers for
  * `backlinks` operations (shared between DSH `tool-backlinks` and the MCP server).
  */
-import type { BacklinkBatchDetail, BacklinkItemResult } from './types.ts';
+import type { BacklinkBatchDetail, BacklinkBatchItem, BacklinkBatchSummary, BacklinkItemResult } from './types.ts';
 export declare function readPositiveInt(value: unknown, field: string, prefix?: string): number;
 export declare function readOptionalPositiveInt(value: unknown, field: string, prefix?: string): number | undefined;
+export declare function readOptionalNonNegativeInt(value: unknown, field: string, prefix?: string): number | undefined;
+export declare function readClampedInt(value: unknown, field: string, fallback: number, min: number, max: number, prefix?: string): number;
 export declare function readNonEmpty(value: unknown, field: string, prefix?: string): string;
 export declare function readOptionalString(value: unknown, field: string, prefix?: string): string | undefined;
 export declare function readHttpUrl(value: unknown, field: string, prefix?: string): string;
 export declare function parseItemResult(args: Record<string, unknown>): BacklinkItemResult;
 export declare function parseTags(tags: unknown): readonly string[];
+export interface CompactBacklinkBatchSummary {
+    readonly id: number;
+    readonly name: string;
+    readonly websiteId: number;
+    readonly websiteName: string;
+    readonly websiteHost: string;
+    readonly plannedAt?: string;
+    readonly counts: {
+        readonly pending: number;
+        readonly total: number;
+        readonly executed?: number;
+        readonly skipped?: number;
+        readonly failed?: number;
+    };
+    readonly executing?: true;
+}
+export declare function compactBatchSummary(batch: BacklinkBatchSummary): CompactBacklinkBatchSummary;
+export declare function isPublishedItem(item: Pick<BacklinkBatchItem, 'publishStatus' | 'publishedUrl'>): boolean;
+export declare function collectPublishedSourceIds(items: readonly BacklinkBatchItem[]): readonly number[];
 export interface CompactBacklinkBatchItem {
     readonly id: number;
     readonly sourceId: number;

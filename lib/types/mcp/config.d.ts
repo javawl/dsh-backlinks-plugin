@@ -4,7 +4,9 @@
  */
 import path from 'node:path';
 export declare const DEFAULT_CLOUDMAIL_BASE_URL = "https://mail.screwdom.org/api";
+export declare const DEFAULT_MAX_OUTPUT_CHARS_CLAMP = 16000;
 export declare const DEFAULT_MAX_OUTPUT_CHARS = 16000;
+export declare const DEFAULT_SNAPSHOT_MAX_CHARS = 8000;
 export declare const DEFAULT_NAVIGATE_MAX_CHARS = 3000;
 export declare const DEFAULT_BROWSER_TIMEOUT_MS = 15000;
 export declare const DEFAULT_REQUEST_TIMEOUT_MS = 15000;
@@ -17,6 +19,7 @@ export interface McpConfig {
     readonly cloudMailTimeoutMs: number;
     readonly browserProfileDir: string;
     readonly maxOutputChars: number;
+    readonly snapshotMaxChars: number;
     readonly navigateMaxChars: number;
     readonly browserHeadless: boolean;
     readonly browserChannel: string;

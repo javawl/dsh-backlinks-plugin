@@ -8,6 +8,7 @@ import type {
   MailboxProvider,
 } from '../src/host/backlinks/types.ts'
 import { BacklinksError } from '../src/host/backlinks/types.ts'
+import { enrichStrictModeError, PlaywrightSession } from '../src/host/browser-playwright/provider.ts'
 import type {
   BrowserAutomationProvider,
   BrowserCommand,
@@ -19,7 +20,9 @@ import { BrowserSessionManager, createBrowserToolHandler } from '../src/mcp/brow
 import {
   DEFAULT_CLOUDMAIL_BASE_URL,
   DEFAULT_MAX_OUTPUT_CHARS,
+  DEFAULT_MAX_OUTPUT_CHARS_CLAMP,
   DEFAULT_NAVIGATE_MAX_CHARS,
+  DEFAULT_SNAPSHOT_MAX_CHARS,
   expandHomePath,
   redactSecrets,
   resolveMcpConfig,
@@ -120,9 +123,12 @@ describe('MCP config & cross-platform home path expansion', () => {
     expect(expandHomePath('~other/profile', '/Users/zlb', path.posix)).toBe('~other/profile')
   })
 
-  it('resolves defaults (16000 / 3000 / cloudmail URL / profile) and overrides', () => {
+  it('resolves defaults (8000 snapshot / 16000 clamp / 3000 navigate / cloudmail URL / profile) and overrides', () => {
     const defaults = resolveMcpConfig({}, { homeDir: 'C:\\Users\\zlb', pathImpl: path.win32 })
     expect(defaults.maxOutputChars).toBe(DEFAULT_MAX_OUTPUT_CHARS)
+    expect(defaults.maxOutputChars).toBe(DEFAULT_MAX_OUTPUT_CHARS_CLAMP)
+    expect(defaults.snapshotMaxChars).toBe(DEFAULT_SNAPSHOT_MAX_CHARS)
+    expect(defaults.snapshotMaxChars).toBe(8_000)
     expect(defaults.navigateMaxChars).toBe(DEFAULT_NAVIGATE_MAX_CHARS)
     expect(defaults.cloudMailBaseUrl).toBe(DEFAULT_CLOUDMAIL_BASE_URL)
     expect(defaults.browserProfileDir).toBe('C:\\Users\\zlb\\.dsh\\backlink-browser-profile')
@@ -137,6 +143,7 @@ describe('MCP config & cross-platform home path expansion', () => {
         CLOUDMAIL_TOKEN: 'cm_secret_456',
         DSH_BACKLINK_BROWSER_PROFILE: '~/custom-chrome-profile',
         BACKLINKS_MAX_OUTPUT_CHARS: '12000',
+        BACKLINKS_SNAPSHOT_MAX_CHARS: '6500',
         BACKLINKS_NAVIGATE_MAX_CHARS: '2500',
         BACKLINKS_BROWSER_WINDOW_POSITION: '-32000,-32000',
       },
@@ -144,6 +151,7 @@ describe('MCP config & cross-platform home path expansion', () => {
     )
     expect(custom.browserProfileDir).toBe('/Users/zlb/custom-chrome-profile')
     expect(custom.maxOutputChars).toBe(12_000)
+    expect(custom.snapshotMaxChars).toBe(6_500)
     expect(custom.navigateMaxChars).toBe(2_500)
     expect(custom.browserWindowPosition).toBe('-32000,-32000')
     expect(redactSecrets('failed with smag_secret_123 and cm_secret_456', custom))
@@ -186,6 +194,11 @@ describe('MCP backlinks tool handler', () => {
     expect(compactData.compact).toBe(true)
     expect(compactData.website).toEqual(detail.website)
     expect(compactData.anchors).toEqual(detail.anchors)
+    expect(compactData.publishedSourceIds).toEqual([502])
+    expect(compactData.totalItems).toBe(2)
+    expect(compactData.pendingItems).toBe(1)
+    expect(compactData.returnedItems).toBe(2)
+    expect(compactData.hasMore).toBe(false)
     const items = compactData.items as Array<Record<string, unknown>>
     expect(items[0]?.plannedAt).toBeUndefined()
     expect(items[0]?.failureReason).toBeUndefined()
@@ -197,6 +210,220 @@ describe('MCP backlinks tool handler', () => {
     const fullPayload = parseToolPayload(fullRes as never)
     expect(fullPayload.summary).toContain('(full)')
     expect(fullPayload.data).toEqual(detail)
+  })
+
+  it('supports batch_list compact, onlyPending, and pagination defaults & overrides', async () => {
+    const rawBatches = Array.from({ length: 28 }, (_, idx) => {
+      const id = idx + 1
+      const isPending = idx < 23
+      return {
+        id,
+        name: `Batch ${id}`,
+        websiteId: 100 + (id % 3),
+        websiteName: `Site ${id % 3}`,
+        websiteHost: `site${id % 3}.example.com`,
+        plannedAt: '2026-11-20T00:00:00Z',
+        counts: {
+          pending: isPending ? 5 : 0,
+          executed: isPending ? 0 : 10,
+          skipped: idx === 0 ? 2 : 0,
+          failed: 0,
+          total: isPending ? 5 + (idx === 0 ? 2 : 0) : 10,
+        },
+        executing: idx === 1,
+      }
+    })
+
+    const batchSource: BacklinkBatchSourceProvider = {
+      id: 'mock',
+      available: () => true,
+      listBatches: async () => rawBatches,
+      getBatch: async () => { throw new Error('unused') },
+      claim: async () => { throw new Error('unused') },
+      heartbeat: async () => { throw new Error('unused') },
+      release: async () => {},
+      reportItemResult: async () => { throw new Error('unused') },
+      addBadge: async () => { throw new Error('unused') },
+      tagSource: async () => { throw new Error('unused') },
+    }
+    const handle = createBacklinksToolHandler({ config: baseConfig, batchSource })
+
+    const defaultRes = await handle({ action: 'batch_list' })
+    expect(defaultRes.isError).toBeUndefined()
+    const defaultData = parseToolPayload(defaultRes as never).data as {
+      total: number
+      matched: number
+      offset: number
+      limit: number
+      hasMore: boolean
+      onlyPending: boolean
+      compact: boolean
+      batches: Array<Record<string, unknown>>
+    }
+    expect(defaultData).toMatchObject({
+      total: 28,
+      matched: 23,
+      offset: 0,
+      limit: 20,
+      hasMore: true,
+      onlyPending: true,
+      compact: true,
+    })
+    expect(defaultData.batches).toHaveLength(20)
+    expect(defaultData.batches[0]).toEqual({
+      id: 1,
+      name: 'Batch 1',
+      websiteId: 101,
+      websiteName: 'Site 1',
+      websiteHost: 'site1.example.com',
+      plannedAt: '2026-11-20T00:00:00Z',
+      counts: { pending: 5, total: 7, skipped: 2 },
+    })
+    expect(defaultData.batches[1]).toMatchObject({ executing: true })
+
+    const page2 = parseToolPayload(await handle({ action: 'batch_list', offset: 20, limit: 10 }) as never).data as {
+      matched: number
+      offset: number
+      limit: number
+      hasMore: boolean
+      batches: Array<{ id: number }>
+    }
+    expect(page2).toMatchObject({ matched: 23, offset: 20, limit: 10, hasMore: false })
+    expect(page2.batches.map(b => b.id)).toEqual([21, 22, 23])
+
+    const allFull = parseToolPayload(await handle({
+      action: 'batch_list',
+      onlyPending: false,
+      compact: false,
+      limit: 200,
+    }) as never).data as {
+      total: number
+      matched: number
+      limit: number
+      hasMore: boolean
+      batches: unknown[]
+    }
+    expect(allFull).toMatchObject({ total: 28, matched: 28, limit: 100, hasMore: false })
+    expect(allFull.batches).toEqual(rawBatches)
+
+    const clampedMin = parseToolPayload(await handle({ action: 'batch_list', limit: 0 }) as never).data as {
+      limit: number
+      batches: unknown[]
+    }
+    expect(clampedMin.limit).toBe(1)
+    expect(clampedMin.batches).toHaveLength(1)
+
+    const badOffset = await handle({ action: 'batch_list', offset: -1 })
+    expect(badOffset.isError).toBe(true)
+    const badOnlyPending = await handle({ action: 'batch_list', onlyPending: 'false' })
+    expect(badOnlyPending.isError).toBe(true)
+  })
+
+  it('batch_get pendingOnly and pagination always compute publishedSourceIds across the full batch', async () => {
+    const baseDetail = makeSampleDetail()
+    const fullDetail: BacklinkBatchDetail = {
+      ...baseDetail,
+      items: [
+        {
+          ...baseDetail.items[0]!,
+          id: 201,
+          sourceId: 502,
+          sourceName: 'DupPendingSameSourceAsLive',
+          status: 'pending',
+          publishStatus: null,
+          publishedUrl: null,
+        },
+        {
+          ...baseDetail.items[1]!,
+          id: 202,
+          sourceId: 502,
+          sourceName: 'AlreadyLiveSameSource',
+          status: 'executed',
+          publishStatus: 'live',
+          publishedUrl: 'https://dirtwo.example.org/demo',
+        },
+        {
+          ...baseDetail.items[0]!,
+          id: 203,
+          sourceId: 503,
+          sourceName: 'PendingWithSubmittedRecord',
+          status: 'pending',
+          publishStatus: 'submitted',
+          publishedUrl: null,
+        },
+        {
+          ...baseDetail.items[0]!,
+          id: 204,
+          sourceId: 504,
+          sourceName: 'CleanPendingTarget',
+          status: 'pending',
+          publishStatus: null,
+          publishedUrl: null,
+        },
+      ],
+    }
+
+    const batchSource: BacklinkBatchSourceProvider = {
+      id: 'mock',
+      available: () => true,
+      listBatches: async () => [fullDetail.batch],
+      getBatch: async () => fullDetail,
+      claim: async () => { throw new Error('unused') },
+      heartbeat: async () => { throw new Error('unused') },
+      release: async () => {},
+      reportItemResult: async () => { throw new Error('unused') },
+      addBadge: async () => { throw new Error('unused') },
+      tagSource: async () => { throw new Error('unused') },
+    }
+    const handle = createBacklinksToolHandler({ config: baseConfig, batchSource })
+
+    const pendingPage1 = parseToolPayload(await handle({
+      action: 'batch_get',
+      batchId: 42,
+      pendingOnly: true,
+      limit: 1,
+      offset: 0,
+    }) as never).data as {
+      publishedSourceIds: number[]
+      totalItems: number
+      pendingItems: number
+      returnedItems: number
+      hasMore: boolean
+      items: Array<{ id: number }>
+    }
+    expect(pendingPage1).toMatchObject({
+      publishedSourceIds: [502, 503],
+      totalItems: 4,
+      pendingItems: 3,
+      returnedItems: 1,
+      hasMore: true,
+    })
+    expect(pendingPage1.items.map(item => item.id)).toEqual([201])
+
+    const pendingPage2 = parseToolPayload(await handle({
+      action: 'batch_get',
+      batchId: 42,
+      pendingOnly: true,
+      compact: false,
+      limit: 2,
+      offset: 1,
+    }) as never).data as {
+      publishedSourceIds: number[]
+      totalItems: number
+      pendingItems: number
+      returnedItems: number
+      hasMore: boolean
+      items: Array<{ id: number; plannedAt?: string }>
+    }
+    expect(pendingPage2).toMatchObject({
+      publishedSourceIds: [502, 503],
+      totalItems: 4,
+      pendingItems: 3,
+      returnedItems: 2,
+      hasMore: false,
+    })
+    expect(pendingPage2.items.map(item => item.id)).toEqual([203, 204])
+    expect(pendingPage2.items[0]?.plannedAt).toBe('2026-11-20T00:00:00Z')
   })
 
   it('supports badge_verify with refreshUrl, retries, and requires no tokens', async () => {
@@ -390,7 +617,7 @@ describe('MCP browser tool handler', () => {
     }
   }
 
-  it('caps navigate output at 3000 chars and snapshot at BACKLINKS_MAX_OUTPUT_CHARS (default 16000)', async () => {
+  it('caps navigate at 3000 chars, snapshot default at 8000 chars, and respects explicit maxChars up to 16000 clamp', async () => {
     const longText = 'X'.repeat(20_000)
     const { manager, commands } = createMockManager(async (cmd) => ({
       kind: 'page',
@@ -411,10 +638,71 @@ describe('MCP browser tool handler', () => {
     expect(navText.length).toBeLessThan(3_200)
 
     const snap = await handle({ action: 'snapshot', format: 'aria' })
-    expect(commands[1]).toMatchObject({ kind: 'snapshot', maxChars: 16_000 })
+    expect(commands[1]).toMatchObject({ kind: 'snapshot', maxChars: 8_000 })
     const snapText = snap.content[0]?.type === 'text' ? snap.content[0].text : ''
     expect(snapText).toContain('… (truncated)')
-    expect(snapText.length).toBeLessThan(16_200)
+    expect(snapText.length).toBeLessThan(8_200)
+
+    const snap16k = await handle({ action: 'snapshot', format: 'aria', maxChars: 16_000 })
+    expect(commands[2]).toMatchObject({ kind: 'snapshot', maxChars: 16_000 })
+    const snap16kText = snap16k.content[0]?.type === 'text' ? snap16k.content[0].text : ''
+    expect(snap16kText.length).toBeGreaterThan(15_900)
+    expect(snap16kText.length).toBeLessThan(16_200)
+
+    const snapClamped = await handle({ action: 'snapshot', format: 'aria', maxChars: 30_000 })
+    expect(commands[3]).toMatchObject({ kind: 'snapshot', maxChars: 16_000 })
+    expect((snapClamped.content[0]?.type === 'text' ? snapClamped.content[0].text : '').length).toBeLessThan(16_200)
+
+    const tightHandle = createBrowserToolHandler({
+      sessionManager: manager,
+      config: resolveMcpConfig({ BACKLINKS_MAX_OUTPUT_CHARS: '6000' }),
+    })
+    await tightHandle({ action: 'snapshot', format: 'aria' })
+    await tightHandle({ action: 'snapshot', format: 'aria', maxChars: 16_000 })
+    expect(commands[4]).toMatchObject({ kind: 'snapshot', maxChars: 6_000 })
+    expect(commands[5]).toMatchObject({ kind: 'snapshot', maxChars: 6_000 })
+  })
+
+  it('forwards nth on single actions and fields[].nth / submitNth on batch_fill', async () => {
+    const { manager, commands } = createMockManager(async () => ({ kind: 'acked' }))
+    const handle = createBrowserToolHandler({ sessionManager: manager, config: resolveMcpConfig({}) })
+
+    await handle({ action: 'click', selector: 'text:Submit', nth: 0 })
+    await handle({ action: 'fill', selector: 'label:Email', value: 'a@example.org', nth: 1 })
+    await handle({ action: 'select', selector: 'label:Category', value: 'tools', nth: 2 })
+    await handle({ action: 'upload', selector: 'input[type=file]', files: ['/tmp/logo.png'], nth: 0 })
+    await handle({ action: 'waitFor', selector: 'text:Done', nth: 3 })
+    await handle({
+      action: 'batch_fill',
+      page: 'p3',
+      fields: [
+        { target: 'label:Name', value: 'Tool', nth: 1 },
+        { target: 'label:Agree', op: 'check', nth: 0 },
+      ],
+      submitTarget: 'role:button|Submit',
+      submitNth: 2,
+    })
+
+    expect(commands).toEqual([
+      { kind: 'click', selector: 'text:Submit', nth: 0 },
+      { kind: 'fill', selector: 'label:Email', value: 'a@example.org', nth: 1 },
+      { kind: 'select', selector: 'label:Category', value: 'tools', nth: 2 },
+      { kind: 'upload', selector: 'input[type=file]', files: ['/tmp/logo.png'], nth: 0 },
+      { kind: 'waitFor', selector: 'text:Done', nth: 3 },
+      { kind: 'fill', page: 'p3', selector: 'label:Name', value: 'Tool', nth: 1 },
+      { kind: 'check', page: 'p3', selector: 'label:Agree', nth: 0 },
+      { kind: 'click', page: 'p3', selector: 'role:button|Submit', nth: 2 },
+    ])
+
+    const badNth = await handle({ action: 'click', selector: 'text:Submit', nth: -1 })
+    expect(badNth.isError).toBe(true)
+    const badSubmitNth = await handle({
+      action: 'batch_fill',
+      fields: [{ target: 'label:Name', value: 'Demo' }],
+      submitTarget: 'role:button|Submit',
+      submitNth: true,
+    })
+    expect(badSubmitNth.isError).toBe(true)
   })
 
   it('executes batch_fill serially and skips submitTarget when any field fails', async () => {
@@ -546,5 +834,174 @@ describe('MCP browser tool handler', () => {
     const closeRes = await handle({ action: 'closeBrowser' })
     expect(closeRes.content[0]?.text).toBe('ok')
     expect(closed()).toBe(true)
+  })
+})
+
+describe('PlaywrightSession nth selection and strict mode diagnostics', () => {
+  interface FakeNode {
+    readonly tagName: string
+    readonly textContent?: string
+    readonly innerText?: string
+    readonly attrs?: Record<string, string>
+    readonly visible?: boolean
+  }
+
+  function createMockPlaywrightSession(options: {
+    readonly nodes?: readonly FakeNode[]
+    readonly clickError?: Error
+    readonly countThrows?: boolean
+    readonly stallEvaluateMs?: number
+  }) {
+    const calls: string[] = []
+    const nodes = options.nodes ?? []
+
+    const makeNthLocator = (index: number) => ({
+      click: vi.fn(async () => {
+        calls.push(`nth(${index}).click`)
+      }),
+      fill: vi.fn(async (value: string) => {
+        calls.push(`nth(${index}).fill(${value})`)
+      }),
+      selectOption: vi.fn(async (value: string) => {
+        calls.push(`nth(${index}).select(${value})`)
+      }),
+      check: vi.fn(async () => {
+        calls.push(`nth(${index}).check`)
+      }),
+      waitFor: vi.fn(async () => {
+        calls.push(`nth(${index}).waitFor`)
+      }),
+      isVisible: vi.fn(async () => nodes[index]?.visible ?? true),
+      evaluate: vi.fn(async (fn: (node: unknown) => unknown) => {
+        if (options.stallEvaluateMs !== undefined) {
+          await new Promise(resolve => setTimeout(resolve, options.stallEvaluateMs))
+        }
+        const raw = nodes[index]
+        if (!raw) return { tag: 'unknown' }
+        const fakeEl = {
+          tagName: raw.tagName,
+          textContent: raw.textContent ?? null,
+          innerText: raw.innerText,
+          getAttribute: (key: string) => raw.attrs?.[key] ?? null,
+        }
+        return fn(fakeEl)
+      }),
+    })
+
+    const rootLocator = {
+      nth: vi.fn((index: number) => makeNthLocator(index)),
+      count: vi.fn(async () => {
+        if (options.countThrows) throw new Error('count exploded')
+        return nodes.length
+      }),
+      click: vi.fn(async () => {
+        if (options.clickError) throw options.clickError
+        calls.push('root.click')
+      }),
+      fill: vi.fn(async () => {}),
+      selectOption: vi.fn(async () => {}),
+      check: vi.fn(async () => {}),
+      setInputFiles: vi.fn(async () => {}),
+      waitFor: vi.fn(async () => {}),
+    }
+
+    const mockPage = {
+      isClosed: () => false,
+      on: () => mockPage,
+      getByText: vi.fn(() => rootLocator),
+      getByRole: vi.fn(() => rootLocator),
+      getByLabel: vi.fn(() => rootLocator),
+      getByPlaceholder: vi.fn(() => rootLocator),
+      locator: vi.fn(() => rootLocator),
+    }
+
+    const mockContext = {
+      on: () => mockContext,
+      pages: () => [mockPage],
+      close: async () => {},
+    }
+
+    return {
+      session: new PlaywrightSession(mockContext as never, 5_000, 8_000),
+      calls,
+      rootLocator,
+    }
+  }
+
+  it('applies .nth(nth) before click, fill, select, check, and waitFor', async () => {
+    const { session, calls, rootLocator } = createMockPlaywrightSession({})
+
+    await session.act({ kind: 'click', selector: 'text:Submit', nth: 2 })
+    await session.act({ kind: 'fill', selector: 'label:Email', value: 'user@example.com', nth: 1 })
+    await session.act({ kind: 'select', selector: 'label:Category', value: 'ai', nth: 0 })
+    await session.act({ kind: 'check', selector: 'label:Agree', nth: 1 })
+    await session.act({ kind: 'waitFor', selector: 'text:Done', nth: 3 })
+
+    expect(rootLocator.nth).toHaveBeenCalledWith(2)
+    expect(calls).toEqual([
+      'nth(2).click',
+      'nth(1).fill(user@example.com)',
+      'nth(0).select(ai)',
+      'nth(1).check',
+      'nth(3).waitFor',
+    ])
+  })
+
+  it('enriches strict mode violation errors with up to 5 candidate elements and exact selector hints', async () => {
+    const nodes: FakeNode[] = Array.from({ length: 7 }, (_, i) => ({
+      tagName: i === 0 ? 'SPAN' : 'BUTTON',
+      innerText: i === 0 ? 'Submit info' : i === 1 ? 'Submit' : `Submit #${i}`,
+      attrs: {
+        ...(i === 1 ? { type: 'submit', 'aria-label': 'Submit tool', name: 'submitBtn' } : {}),
+        ...(i === 2 ? { role: 'button' } : {}),
+      },
+      visible: i !== 0,
+    }))
+    const { session } = createMockPlaywrightSession({
+      nodes,
+      clickError: new Error("locator.click: Error: strict mode violation: getByText('Submit') resolved to 7 elements"),
+    })
+
+    let caught: unknown
+    try {
+      await session.act({ kind: 'click', selector: 'text:Submit' })
+    } catch (error) {
+      caught = error
+    }
+
+    expect(caught).toBeInstanceOf(Error)
+    const msg = (caught as Error).message
+    expect(msg).toContain('strict mode violation')
+    expect(msg).toContain('Matched 7 element(s) (showing first 5):')
+    expect(msg).toContain('[0] <span> text="Submit info" visible=false')
+    expect(msg).toContain('[1] <button> role=button type=submit text="Submit" aria-label="Submit tool" name="submitBtn" visible=true')
+    expect(msg).toContain('[4] <button>')
+    expect(msg).not.toContain('[5]')
+    expect(msg).toContain('nth: 1')
+    expect(msg).toContain('role:button|Submit tool')
+  })
+
+  it('never masks the original strict mode error when candidate inspection fails or times out', async () => {
+    const throwingSession = createMockPlaywrightSession({
+      countThrows: true,
+      clickError: new Error('strict mode violation: resolved to 2 elements'),
+    }).session
+
+    await expect(throwingSession.act({ kind: 'click', selector: 'text:Sign in' })).rejects.toThrow(
+      /strict mode violation: resolved to 2 elements[\s\S]*Hint: pass nth: <i>/,
+    )
+
+    const { rootLocator } = createMockPlaywrightSession({
+      nodes: [{ tagName: 'BUTTON', innerText: 'Submit' }],
+      stallEvaluateMs: 500,
+    })
+    const timedOut = await enrichStrictModeError(
+      'click',
+      rootLocator as never,
+      new Error('strict mode violation: resolved to 1 elements'),
+      25,
+    )
+    expect(timedOut?.message).toContain('strict mode violation: resolved to 1 elements')
+    expect(timedOut?.message).toContain('Hint: pass nth: <i>')
   })
 })

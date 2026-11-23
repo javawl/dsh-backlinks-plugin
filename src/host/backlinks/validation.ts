@@ -6,10 +6,14 @@
 import type {
   BacklinkBatchDetail,
   BacklinkBatchItem,
+  BacklinkBatchSummary,
   BacklinkItemResult,
 } from './types.ts'
 
 export function readPositiveInt(value: unknown, field: string, prefix = 'backlinks'): number {
+  if (typeof value === 'boolean' || (typeof value === 'string' && value.trim().length === 0)) {
+    throw new Error(`${prefix} ${field} must be a positive integer.`)
+  }
   const parsed = Number(value)
   if (!Number.isSafeInteger(parsed) || parsed <= 0) {
     throw new Error(`${prefix} ${field} must be a positive integer.`)
@@ -20,6 +24,37 @@ export function readPositiveInt(value: unknown, field: string, prefix = 'backlin
 export function readOptionalPositiveInt(value: unknown, field: string, prefix = 'backlinks'): number | undefined {
   if (value === undefined || value === null) return undefined
   return readPositiveInt(value, field, prefix)
+}
+
+export function readOptionalNonNegativeInt(value: unknown, field: string, prefix = 'backlinks'): number | undefined {
+  if (value === undefined || value === null) return undefined
+  if (typeof value === 'boolean' || (typeof value === 'string' && value.trim().length === 0)) {
+    throw new Error(`${prefix} ${field} must be a non-negative integer.`)
+  }
+  const parsed = Number(value)
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new Error(`${prefix} ${field} must be a non-negative integer.`)
+  }
+  return parsed
+}
+
+export function readClampedInt(
+  value: unknown,
+  field: string,
+  fallback: number,
+  min: number,
+  max: number,
+  prefix = 'backlinks',
+): number {
+  if (value === undefined || value === null) return fallback
+  if (typeof value === 'boolean' || (typeof value === 'string' && value.trim().length === 0)) {
+    throw new Error(`${prefix} ${field} must be an integer.`)
+  }
+  const parsed = Number(value)
+  if (!Number.isSafeInteger(parsed)) {
+    throw new Error(`${prefix} ${field} must be an integer.`)
+  }
+  return Math.min(Math.max(parsed, min), max)
 }
 
 export function readNonEmpty(value: unknown, field: string, prefix = 'backlinks'): string {
@@ -107,6 +142,62 @@ function truncateNote(value: string | null | undefined, maxLength: number): stri
   const trimmed = value.trim()
   if (trimmed.length === 0) return undefined
   return trimmed.length <= maxLength ? trimmed : `${trimmed.slice(0, maxLength)}…`
+}
+
+export interface CompactBacklinkBatchSummary {
+  readonly id: number
+  readonly name: string
+  readonly websiteId: number
+  readonly websiteName: string
+  readonly websiteHost: string
+  readonly plannedAt?: string
+  readonly counts: {
+    readonly pending: number
+    readonly total: number
+    readonly executed?: number
+    readonly skipped?: number
+    readonly failed?: number
+  }
+  readonly executing?: true
+}
+
+export function compactBatchSummary(batch: BacklinkBatchSummary): CompactBacklinkBatchSummary {
+  return {
+    id: batch.id,
+    name: batch.name,
+    websiteId: batch.websiteId,
+    websiteName: batch.websiteName,
+    websiteHost: batch.websiteHost,
+    ...(batch.plannedAt.trim().length > 0 ? { plannedAt: batch.plannedAt } : {}),
+    counts: {
+      pending: batch.counts.pending,
+      total: batch.counts.total,
+      ...(batch.counts.executed > 0 ? { executed: batch.counts.executed } : {}),
+      ...(batch.counts.skipped > 0 ? { skipped: batch.counts.skipped } : {}),
+      ...(batch.counts.failed > 0 ? { failed: batch.counts.failed } : {}),
+    },
+    ...(batch.executing ? { executing: true as const } : {}),
+  }
+}
+
+export function isPublishedItem(item: Pick<BacklinkBatchItem, 'publishStatus' | 'publishedUrl'>): boolean {
+  const normalizedStatus = typeof item.publishStatus === 'string'
+    ? item.publishStatus.trim().toLowerCase()
+    : ''
+  if (normalizedStatus === 'submitted' || normalizedStatus === 'live') {
+    return true
+  }
+  return typeof item.publishedUrl === 'string' && item.publishedUrl.trim().length > 0
+}
+
+export function collectPublishedSourceIds(items: readonly BacklinkBatchItem[]): readonly number[] {
+  const ids = new Set<number>()
+  for (const item of items) {
+    if (isPublishedItem(item)) {
+      ids.add(item.sourceId)
+    }
+  }
+  return [...ids].sort((left, right) => left - right)
 }
 
 export interface CompactBacklinkBatchItem {

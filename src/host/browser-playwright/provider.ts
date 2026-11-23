@@ -16,6 +16,26 @@ import { parseControlReport, renderPageControls, VISIBLE_CONTROLS_SCRIPT } from 
 
 export const PLAYWRIGHT_BROWSER_PROVIDER_ID = 'playwright'
 export const DEFAULT_SNAPSHOT_MAX_CHARS = 60_000
+export const STRICT_MODE_INSPECT_TIMEOUT_MS = 1_500
+export const STRICT_MODE_MAX_CANDIDATES = 5
+
+const STRICT_MODE_PATTERN = /strict mode violation/iu
+
+export interface StrictModeCandidate {
+  readonly index: number
+  readonly tag: string
+  readonly role?: string
+  readonly text?: string
+  readonly ariaLabel?: string
+  readonly name?: string
+  readonly type?: string
+  readonly visible?: boolean
+}
+
+export interface StrictModeInspection {
+  readonly total: number
+  readonly candidates: readonly StrictModeCandidate[]
+}
 
 export interface ResolvedPlaywrightConfig {
   readonly userDataDir: string
@@ -146,12 +166,158 @@ function buildLocator(page: Page, addressing: Addressing): Locator | undefined {
   }
 }
 
-function elementLocator(page: Page, addressing: Addressing): Locator {
+function applyNth(locator: Locator, nth: number | undefined): Locator {
+  if (nth === undefined) return locator
+  if (!Number.isSafeInteger(nth) || nth < 0) {
+    throw new BrowserError(`browser nth must be a non-negative integer, got ${nth}`, 'BROWSER_ACTION_FAILED')
+  }
+  return locator.nth(nth)
+}
+
+function elementLocator(page: Page, addressing: Addressing, nth?: number): Locator {
   const locator = buildLocator(page, addressing)
   if (locator === undefined) {
     throw new BrowserError('browser xy addressing supports click only', 'BROWSER_ACTION_FAILED')
   }
-  return locator
+  return applyNth(locator, nth)
+}
+
+export async function inspectStrictModeCandidates(
+  locator: Locator,
+  timeoutMs = STRICT_MODE_INSPECT_TIMEOUT_MS,
+): Promise<StrictModeInspection | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const inspect = async (): Promise<StrictModeInspection | undefined> => {
+    const total = await locator.count()
+    if (!Number.isFinite(total) || total <= 0) return undefined
+    const limit = Math.min(total, STRICT_MODE_MAX_CANDIDATES)
+    const evalTimeout = Math.max(100, Math.min(timeoutMs, 1_000))
+    const candidates = await Promise.all(
+      Array.from({ length: limit }, async (_, index): Promise<StrictModeCandidate> => {
+        const nthLocator = locator.nth(index)
+        const [meta, visible] = await Promise.all([
+          nthLocator.evaluate((rawNode: unknown) => {
+            interface BrowserDomElementLike {
+              readonly tagName?: string
+              readonly textContent?: string | null
+              readonly innerText?: string
+              getAttribute?(name: string): string | null
+            }
+            const el = rawNode as BrowserDomElementLike | null
+            if (!el || typeof el.tagName !== 'string') {
+              return { tag: 'unknown' }
+            }
+            const tag = el.tagName.toLowerCase()
+            const attr = (key: string): string | undefined => {
+              const raw = typeof el.getAttribute === 'function' ? el.getAttribute(key) : null
+              if (typeof raw !== 'string') return undefined
+              const cleaned = raw.replace(/\s+/gu, ' ').trim()
+              return cleaned.length > 0 ? cleaned.slice(0, 80) : undefined
+            }
+            const typeAttr = attr('type')
+            const explicitRole = attr('role')
+            const inferredRole = explicitRole ?? (
+              tag === 'button' || (tag === 'input' && (typeAttr === 'button' || typeAttr === 'submit' || typeAttr === 'reset'))
+                ? 'button'
+                : tag === 'a' && attr('href') !== undefined
+                  ? 'link'
+                  : tag === 'input' || tag === 'textarea'
+                    ? 'textbox'
+                    : tag === 'select'
+                      ? 'combobox'
+                      : undefined
+            )
+            const rawText = typeof el.innerText === 'string' && el.innerText.trim().length > 0
+              ? el.innerText
+              : typeof el.textContent === 'string'
+                ? el.textContent
+                : ''
+            const cleanedText = rawText.replace(/\s+/gu, ' ').trim()
+            const text = cleanedText.length > 0
+              ? (cleanedText.length > 80 ? `${cleanedText.slice(0, 80)}…` : cleanedText)
+              : undefined
+            const ariaLabel = attr('aria-label')
+            const name = attr('name')
+            return {
+              tag,
+              ...(inferredRole === undefined ? {} : { role: inferredRole }),
+              ...(text === undefined ? {} : { text }),
+              ...(ariaLabel === undefined ? {} : { ariaLabel }),
+              ...(name === undefined ? {} : { name }),
+              ...(typeAttr === undefined ? {} : { type: typeAttr }),
+            }
+          }, undefined, { timeout: evalTimeout }).catch(() => ({ tag: 'unknown' })),
+          nthLocator.isVisible().catch(() => undefined),
+        ])
+        return {
+          index,
+          ...meta,
+          ...(visible === undefined ? {} : { visible }),
+        }
+      }),
+    )
+    return { total, candidates }
+  }
+
+  try {
+    return await Promise.race([
+      inspect().catch(() => undefined),
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => { resolve(undefined) }, timeoutMs)
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
+function formatStrictModeCandidates(inspection: StrictModeInspection): string {
+  const lines = [
+    `Matched ${inspection.total} element(s) (showing first ${inspection.candidates.length}):`,
+  ]
+  for (const candidate of inspection.candidates) {
+    const parts = [`  [${candidate.index}] <${candidate.tag}>`]
+    if (candidate.role !== undefined) parts.push(`role=${candidate.role}`)
+    if (candidate.type !== undefined) parts.push(`type=${candidate.type}`)
+    if (candidate.text !== undefined) parts.push(`text=${JSON.stringify(candidate.text)}`)
+    if (candidate.ariaLabel !== undefined) parts.push(`aria-label=${JSON.stringify(candidate.ariaLabel)}`)
+    if (candidate.name !== undefined) parts.push(`name=${JSON.stringify(candidate.name)}`)
+    if (candidate.visible !== undefined) parts.push(`visible=${String(candidate.visible)}`)
+    lines.push(parts.join(' '))
+  }
+  const suggested = inspection.candidates.find(
+    c => c.visible !== false && c.role !== undefined && (c.ariaLabel !== undefined || c.text !== undefined),
+  ) ?? inspection.candidates.find(
+    c => c.role !== undefined && (c.ariaLabel !== undefined || c.text !== undefined),
+  )
+  const label = suggested?.ariaLabel ?? suggested?.text
+  if (suggested !== undefined && suggested.role !== undefined && label !== undefined) {
+    lines.push(
+      `Hint: pass nth: <i> (0-based, e.g. nth: ${suggested.index}) or use an exact selector such as role:${suggested.role}|${label}.`,
+    )
+  } else {
+    lines.push('Hint: pass nth: <i> (0-based) or use an exact role:button|<name> selector.')
+  }
+  return lines.join('\n')
+}
+
+export async function enrichStrictModeError(
+  commandKind: BrowserCommand['kind'],
+  locator: Locator,
+  error: unknown,
+  timeoutMs = STRICT_MODE_INSPECT_TIMEOUT_MS,
+): Promise<BrowserError | undefined> {
+  const rawMessage = String(error instanceof Error ? error.message : error)
+  if (!STRICT_MODE_PATTERN.test(rawMessage)) return undefined
+  const inspection = await inspectStrictModeCandidates(locator, timeoutMs)
+  const details = inspection !== undefined && inspection.candidates.length > 0
+    ? formatStrictModeCandidates(inspection)
+    : 'Hint: pass nth: <i> (0-based) or use an exact role:button|<name> selector.'
+  return new BrowserError(
+    `playwright ${commandKind} failed: ${rawMessage}\n${details}`,
+    'BROWSER_ACTION_FAILED',
+    { cause: error },
+  )
 }
 
 function throwIfAborted(signal: AbortSignal | undefined, commandKind: string): void {
@@ -160,7 +326,7 @@ function throwIfAborted(signal: AbortSignal | undefined, commandKind: string): v
   }
 }
 
-class PlaywrightSession implements BrowserSession {
+export class PlaywrightSession implements BrowserSession {
   private closed = false
   private readonly pages = new Map<string, Page>()
   private readonly chains = new Map<string, Promise<unknown>>()
@@ -242,25 +408,26 @@ class PlaywrightSession implements BrowserSession {
             await page.mouse.click(addressing.x, addressing.y)
             return { kind: 'acked' }
           }
-          await buildLocator(page, addressing)?.click({ timeout: this.defaultTimeoutMs })
+          const locator = elementLocator(page, addressing, command.nth)
+          await this.runLocatorAction('click', locator, () => locator.click({ timeout: this.defaultTimeoutMs }))
           return { kind: 'acked' }
         }
         case 'fill': {
           const { page } = await this.requirePage(command.page)
-          const locator = elementLocator(page, parseSelector(command.selector))
-          await locator.fill(command.value, { timeout: this.defaultTimeoutMs })
+          const locator = elementLocator(page, parseSelector(command.selector), command.nth)
+          await this.runLocatorAction('fill', locator, () => locator.fill(command.value, { timeout: this.defaultTimeoutMs }))
           return { kind: 'acked' }
         }
         case 'select': {
           const { page } = await this.requirePage(command.page)
-          const locator = elementLocator(page, parseSelector(command.selector))
-          await locator.selectOption(command.value, { timeout: this.defaultTimeoutMs })
+          const locator = elementLocator(page, parseSelector(command.selector), command.nth)
+          await this.runLocatorAction('select', locator, () => locator.selectOption(command.value, { timeout: this.defaultTimeoutMs }))
           return { kind: 'acked' }
         }
         case 'check': {
           const { page } = await this.requirePage(command.page)
-          const locator = elementLocator(page, parseSelector(command.selector))
-          await locator.check({ timeout: this.defaultTimeoutMs })
+          const locator = elementLocator(page, parseSelector(command.selector), command.nth)
+          await this.runLocatorAction('check', locator, () => locator.check({ timeout: this.defaultTimeoutMs }))
           return { kind: 'acked' }
         }
         case 'press': {
@@ -270,8 +437,8 @@ class PlaywrightSession implements BrowserSession {
         }
         case 'upload': {
           const { page } = await this.requirePage(command.page)
-          const locator = elementLocator(page, parseSelector(command.selector))
-          await locator.setInputFiles([...command.files], { timeout: this.defaultTimeoutMs })
+          const locator = elementLocator(page, parseSelector(command.selector), command.nth)
+          await this.runLocatorAction('upload', locator, () => locator.setInputFiles([...command.files], { timeout: this.defaultTimeoutMs }))
           return { kind: 'acked' }
         }
         case 'screenshot': {
@@ -286,8 +453,8 @@ class PlaywrightSession implements BrowserSession {
           const { page } = await this.requirePage(command.page)
           const timeout = command.timeoutMs ?? this.defaultTimeoutMs
           if (command.selector !== undefined) {
-            const locator = elementLocator(page, parseSelector(command.selector))
-            await locator.waitFor({ state: 'visible', timeout })
+            const locator = elementLocator(page, parseSelector(command.selector), command.nth)
+            await this.runLocatorAction('waitFor', locator, () => locator.waitFor({ state: 'visible', timeout }))
           } else {
             await page.waitForURL(command.url as string, { timeout })
           }
@@ -330,6 +497,20 @@ class PlaywrightSession implements BrowserSession {
         'BROWSER_ACTION_FAILED',
         { cause: error },
       )
+    }
+  }
+
+  private async runLocatorAction<T>(
+    commandKind: BrowserCommand['kind'],
+    locator: Locator,
+    run: () => Promise<T>,
+  ): Promise<T> {
+    try {
+      return await run()
+    } catch (error) {
+      const enriched = await enrichStrictModeError(commandKind, locator, error)
+      if (enriched !== undefined) throw enriched
+      throw error
     }
   }
 

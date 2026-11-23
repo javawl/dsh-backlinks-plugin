@@ -46,23 +46,27 @@ export interface BrowserBringToFrontCommand extends BrowserPageAddress {
 export interface BrowserClickCommand extends BrowserPageAddress {
   readonly kind: 'click'
   readonly selector: string
+  readonly nth?: number
 }
 
 export interface BrowserFillCommand extends BrowserPageAddress {
   readonly kind: 'fill'
   readonly selector: string
   readonly value: string
+  readonly nth?: number
 }
 
 export interface BrowserSelectCommand extends BrowserPageAddress {
   readonly kind: 'select'
   readonly selector: string
   readonly value: string
+  readonly nth?: number
 }
 
 export interface BrowserCheckCommand extends BrowserPageAddress {
   readonly kind: 'check'
   readonly selector: string
+  readonly nth?: number
 }
 
 export interface BrowserPressCommand extends BrowserPageAddress {
@@ -74,6 +78,7 @@ export interface BrowserUploadCommand extends BrowserPageAddress {
   readonly kind: 'upload'
   readonly selector: string
   readonly files: readonly string[]
+  readonly nth?: number
 }
 
 export interface BrowserScreenshotCommand extends BrowserPageAddress {
@@ -85,6 +90,7 @@ export interface BrowserWaitForCommand extends BrowserPageAddress {
   readonly selector?: string
   readonly url?: string
   readonly timeoutMs?: number
+  readonly nth?: number
 }
 
 export interface BrowserProbeCommand extends BrowserPageAddress {
