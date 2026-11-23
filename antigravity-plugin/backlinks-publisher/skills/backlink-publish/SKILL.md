@@ -20,7 +20,7 @@ description: 本工作区所有"发外链/发布外链/发布批次/跑批次/�
 2. **读取批次（仅 1 次）**：`backlinks action="batch_get"`（`compact: true`, `pendingOnly: true`），一次拿齐 `website` 6 字段、`anchors` 与 `publishedSourceIds`。
 3. **分片认领**：仅从 `runnableItemIds` 挑 **5–6 条** `batch_claim`（同域 `sourceHost` 串行；单会话 10–12 条 / 2 片）。
 4. **博客评论 1-Call 确定性快路径（`comment_publish`）**：
-   - 对 `siteHint` 为 `wordpress_comment` / `wix_blog` / `comments_closed_hint`（或任意博客文章页），**直接调用 `browser action="comment_publish"`**（传 `url`、`commentText`、`authorName`、`authorEmail`、`websiteUrl`、`anchorText`、可选 `page`），1 次调用完成导航→滚底等懒加载→识别→填表→提交→重载核验！
+   - 对 `siteHint` 为 `wordpress_comment` / `wix_blog` / `comments_closed_hint`（或任意博客文章页），**直接调用 `browser action="comment_publish"`**（传 `url`、`commentText`、`authorName`、`authorEmail`、`websiteUrl`、`anchorText`、可选 `page`），1 次调用完成导航→3–4 步渐进滚底与 4–5s 懒加载等待→main frame 与 child iframes 探测→展开 `comment-box-placeholder`→填表提交→重载核验！对复杂 Wix 布局/列表页/`comments-section-placeholder`/需会员登录无验证码页，`comment_publish` 会安全返回 `needs_llm_fallback`（附带 `bottomSnapshot`），绝不误报 `no_form`。
    - 返回 `outcome` 映射：
      - `live` → `item_result(live, publicUrl)`
      - `submitted` → `item_result(submitted, publicUrl)`
@@ -28,7 +28,7 @@ description: 本工作区所有"发外链/发布外链/发布批次/跑批次/�
      - `no_form` → `item_result(skipped, skipReason)` + `source_tags(["no_form"])`
      - `blocked_captcha` → `bringToFront`，`item_result(failed, manual_required, templateSignature)` + `source_tags(["has_captcha"])`（绝不绕过验证码）
      - `uncertain_after_submit` → **`item_result(failed, manual_required)`（严守幂等，绝不重发）**
-     - `needs_llm_fallback` → 页面已打开且附带 `formSummary`，**直接接着做紧凑 `snapshot` + `batch_fill`**，不要重新 `navigate`！
+     - `needs_llm_fallback` → 页面已打开且附带 `formSummary` 与紧凑 `bottomSnapshot`（含 Wix 列表页文章链接/占位状态/底部控件/子 iframe），**先读取 `bottomSnapshot`**（列表页进 `/post/`、登录墙开面板跑 `snapshot format="interactive"` 查 Google SSO），再直接接着用紧凑 `snapshot` + `batch_fill`，不要重复 `navigate`！
 5. **非博客/回退站点**：`snapshot` 默认开启**紧凑压缩模式（4,500 字符）**，自动裁剪页头导航/页脚/SVG 噪音并保留表单与评论区；仅当关键控件缺失时传 `full: true` 展开（上限 16,000）。多字段用 `batch_fill`，人工登录用 `wait_for_login`。
 6. **回写与打标**：调用 `item_result` + `source_tags`（服务端自动将 `comments_closed` 映射为现网兼容的 `评论关闭`，且遇 5xx 会自动中文别名回退或非致命降级警告，绝不中断主流程）。每 1–2 条 `lease_heartbeat`，片尾 `lease_release`。
 

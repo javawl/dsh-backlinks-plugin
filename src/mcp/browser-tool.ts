@@ -449,6 +449,7 @@ export function formatMcpBrowserOutput(result: BrowserResult, maxChars: number):
         submitTriggered: result.submitTriggered,
         ...(result.probeOnly === undefined ? {} : { probeOnly: result.probeOnly }),
         ...(result.formSummary === undefined ? {} : { formSummary: result.formSummary }),
+        ...(result.bottomSnapshot === undefined ? {} : { bottomSnapshot: result.bottomSnapshot }),
       }
       return `[page ${result.page}] comment_publish: ${result.outcome} (${result.siteType}) -> ${targetDisplay}\n${JSON.stringify(payload)}`
     }

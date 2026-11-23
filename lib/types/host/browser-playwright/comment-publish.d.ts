@@ -13,6 +13,8 @@ import type { Page } from 'playwright-core';
 import type { BrowserCommentPublishCommand, BrowserCommentPublishResult, CommentPublishFormSummary } from '../browser/types.ts';
 import type { SleepLike } from '../../mcp/backlinks-tool.ts';
 export declare const DEFAULT_LAZY_WAIT_MAX_MS = 2500;
+export declare const DEFAULT_WIX_LAZY_WAIT_MAX_MS = 5000;
+export declare const DEFAULT_WIX_EXPAND_WAIT_MAX_MS = 4000;
 export interface WordPressInspection {
     readonly found: boolean;
     readonly formSelector?: string;
@@ -34,6 +36,12 @@ export interface WixInspection {
     readonly loginRequired: boolean;
     readonly captchaDetected: boolean;
     readonly hasGuestEditor: boolean;
+    readonly hasLazyPlaceholder: boolean;
+    readonly hasCommentCountOnly: boolean;
+    readonly hasBlogPostStructure: boolean;
+    readonly isBlogListPage: boolean;
+    readonly isComplexWixLayout: boolean;
+    readonly commentHooks?: readonly string[];
     readonly editorSelector?: string;
     readonly editorIsContentEditable?: boolean;
     readonly triggerSelector?: string;
@@ -43,18 +51,29 @@ export interface WixInspection {
     readonly submitSelector?: string;
     readonly linkButtonSelector?: string;
 }
+export interface ChildFramesInspection {
+    readonly frames: readonly string[];
+    readonly hasActionableCommentFrame: boolean;
+    readonly hasUnknownInteractiveFrame: boolean;
+    readonly captchaDetected: boolean;
+    readonly commentsClosedPhrase?: string;
+}
 export interface CommentPageInspection {
     readonly title: string;
     readonly finalUrl: string;
     readonly isWix: boolean;
     readonly isWordPress: boolean;
+    readonly readyState?: string;
+    readonly scrollHeight?: number;
     readonly commentsClosed: {
         readonly matched: boolean;
         readonly phrase?: string;
     };
     readonly wordpress: WordPressInspection;
     readonly wix: WixInspection;
+    readonly childFrames?: ChildFramesInspection;
     readonly formSummary: CommentPublishFormSummary;
+    readonly bottomSnapshot?: string;
 }
 export interface CommentVerifyOutcome {
     readonly liveLinkFound: boolean;
@@ -79,6 +98,8 @@ export declare function stripHtmlLinkForRichEditor(commentText: string, anchorTe
  * comments-closed banners, CAPTCHAs, and minimal fallback form metadata.
  */
 export declare const INSPECT_COMMENT_PAGE_SCRIPT: string;
+/** Lightweight self-contained script run inside non-ad child frames. */
+export declare const INSPECT_CHILD_FRAME_SCRIPT: string;
 /**
  * Self-contained browser evaluation function checking post-submit / post-reload
  * live clickable links, escaped HTML `<a>` text, moderation notices, and WP errors.
@@ -92,6 +113,8 @@ export declare function verifyCommentResultInDom(params: {
 export interface ExecuteCommentPublishOptions {
     readonly defaultTimeoutMs: number;
     readonly lazyWaitMaxMs?: number;
+    readonly wixLazyWaitMaxMs?: number;
+    readonly wixExpandWaitMaxMs?: number;
     readonly sleepImpl?: SleepLike;
     readonly signal?: AbortSignal;
 }

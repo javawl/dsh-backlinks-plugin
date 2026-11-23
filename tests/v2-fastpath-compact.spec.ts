@@ -72,22 +72,44 @@ function evalVerifyInJsdom(
   }
 }
 
+interface MockChildFrameSpec {
+  readonly url: string
+  readonly html: string
+  readonly crossOriginError?: boolean
+  readonly detached?: boolean
+}
+
 /** Lightweight jsdom-backed Playwright Page mock for driving `executeCommentPublish` end-to-end. */
 function createDomDrivenMockPage(routes: Record<string, {
   title: string
   html: string
+  frames?: readonly MockChildFrameSpec[]
+  onScroll?: (fraction: number, scrollCount: number) => string | void
+  onInspect?: (inspectCount: number) => string | void
   onAction?: (kind: string, selector: string, value?: string) => { navigateTo?: string; mutateHtml?: string } | void
 }>) {
+  const buildDom = (html: string, url: string) => {
+    const next = new JSDOM(html, { url, runScripts: 'outside-only' })
+    next.window.scrollTo = () => {}
+    return next
+  }
+
   let currentUrl = Object.keys(routes)[0] ?? 'https://blog.example.org/post-1'
-  let dom = new JSDOM(routes[currentUrl]?.html ?? '<html></html>', { url: currentUrl, runScripts: 'outside-only' })
+  let dom = buildDom(routes[currentUrl]?.html ?? '<html></html>', currentUrl)
   const actions: Array<{ kind: string; selector?: string; value?: string }> = []
+  const scrollFractions: number[] = []
+  let scrollCount = 0
+  let inspectCount = 0
+  const mainFrameStub = { url: () => currentUrl, isDetached: () => false }
+
+  const activeRoute = () => routes[currentUrl] ?? routes[currentUrl.split('#')[0]!]
 
   const loadRoute = (targetUrl: string) => {
     const cleanTarget = targetUrl.split('#')[0]!
     const route = routes[targetUrl] ?? routes[cleanTarget]
     if (!route) throw new Error(`No mock route for ${targetUrl}`)
     currentUrl = targetUrl
-    dom = new JSDOM(route.html, { url: targetUrl, runScripts: 'outside-only' })
+    dom = buildDom(route.html, targetUrl)
   }
 
   const runWithDomGlobals = <T>(fn: () => T): T => {
@@ -118,13 +140,50 @@ function createDomDrivenMockPage(routes: Record<string, {
     on: () => {},
     url: () => currentUrl,
     title: async () => dom.window.document.title || '',
+    mainFrame: () => mainFrameStub,
+    frames: () => {
+      const specs = activeRoute()?.frames ?? []
+      return [
+        mainFrameStub,
+        ...specs.map(spec => ({
+          url: () => spec.url,
+          isDetached: () => spec.detached === true,
+          evaluate: async (scriptOrFn: unknown) => {
+            if (spec.crossOriginError) {
+              throw new Error('Blocked cross-origin frame')
+            }
+            const fDom = new JSDOM(spec.html, { url: spec.url, runScripts: 'outside-only' })
+            if (typeof scriptOrFn === 'string') {
+              return fDom.window.eval(scriptOrFn)
+            }
+            return undefined
+          },
+        })),
+      ]
+    },
     goto: async (url: string) => {
       actions.push({ kind: 'goto', value: url })
       loadRoute(url)
     },
     waitForLoadState: async () => {},
     evaluate: async (fnOrScript: unknown, arg?: unknown) => {
+      const route = activeRoute()
+      if (typeof fnOrScript === 'function' && typeof arg === 'number') {
+        scrollFractions.push(arg)
+        const mutated = route?.onScroll?.(arg, scrollCount++)
+        if (mutated) {
+          route!.html = mutated
+          dom = buildDom(mutated, currentUrl)
+        }
+      }
       if (typeof fnOrScript === 'string') {
+        if (fnOrScript.includes('wixHasCommentSection')) {
+          const mutated = route?.onInspect?.(++inspectCount)
+          if (mutated) {
+            route!.html = mutated
+            dom = buildDom(mutated, currentUrl)
+          }
+        }
         return dom.window.eval(fnOrScript)
       }
       return runWithDomGlobals(() => (fnOrScript as (a?: unknown) => unknown)(arg))
@@ -133,6 +192,7 @@ function createDomDrivenMockPage(routes: Record<string, {
       const resolveFirst = () => dom.window.document.querySelector(selector)
       const count = async () => dom.window.document.querySelectorAll(selector).length
       const firstApi = {
+        scrollIntoViewIfNeeded: async () => {},
         fill: async (val: string) => {
           actions.push({ kind: 'fill', selector, value: val })
           const el = resolveFirst() as HTMLInputElement | HTMLTextAreaElement | HTMLElement | null
@@ -142,18 +202,18 @@ function createDomDrivenMockPage(routes: Record<string, {
           } else {
             el.textContent = val
           }
-          const route = routes[currentUrl] ?? routes[currentUrl.split('#')[0]!]
+          const route = activeRoute()
           const effect = route?.onAction?.('fill', selector, val)
           if (effect?.mutateHtml) {
-            dom = new JSDOM(effect.mutateHtml, { url: currentUrl, runScripts: 'outside-only' })
+            dom = buildDom(effect.mutateHtml, currentUrl)
           }
         },
         click: async () => {
           actions.push({ kind: 'click', selector })
-          const route = routes[currentUrl] ?? routes[currentUrl.split('#')[0]!]
+          const route = activeRoute()
           const effect = route?.onAction?.('click', selector)
           if (effect?.mutateHtml) {
-            dom = new JSDOM(effect.mutateHtml, { url: currentUrl, runScripts: 'outside-only' })
+            dom = buildDom(effect.mutateHtml, currentUrl)
           }
           if (effect?.navigateTo) {
             loadRoute(effect.navigateTo)
@@ -161,10 +221,10 @@ function createDomDrivenMockPage(routes: Record<string, {
         },
         press: async (key: string) => {
           actions.push({ kind: 'press', selector, value: key })
-          const route = routes[currentUrl] ?? routes[currentUrl.split('#')[0]!]
+          const route = activeRoute()
           const effect = route?.onAction?.('press', selector, key)
           if (effect?.mutateHtml) {
-            dom = new JSDOM(effect.mutateHtml, { url: currentUrl, runScripts: 'outside-only' })
+            dom = buildDom(effect.mutateHtml, currentUrl)
           }
         },
       }
@@ -176,7 +236,7 @@ function createDomDrivenMockPage(routes: Record<string, {
     },
   }
 
-  return { page, actions, getUrl: () => currentUrl }
+  return { page, actions, scrollFractions, getUrl: () => currentUrl }
 }
 
 describe('comment_publish fast-path helpers, inspection & end-to-end flows', () => {
@@ -817,6 +877,302 @@ describe('comment_publish fast-path helpers, inspection & end-to-end flows', () 
       siteType: 'wordpress',
       publicUrl: 'https://blog.example.org/post#comment-42',
       submitTriggered: true,
+    })
+  })
+
+  it('does not short-circuit on Wix comments-section-placeholder/comment-count, performs progressive scroll + delayed Ricos expand', async () => {
+    const postUrl = 'https://br.wixsite.com/blog/post/cultura-2026'
+    let clickedPlaceholder = false
+    let pollsAfterClick = 0
+
+    const { page, scrollFractions } = createDomDrivenMockPage({
+      [postUrl]: {
+        title: 'Cultura 2026',
+        html: `
+          <html><head><title>Cultura 2026</title><script src="https://static.parastorage.com/communities-blog-ooi/app.js"></script></head><body>
+            <div id="SITE_CONTAINER">
+              <article data-hook="post">
+                <span data-hook="comment-count">2 comments</span>
+                <p>Artigo de teste.</p>
+                <div data-hook="comments-section-placeholder"></div>
+              </article>
+            </div>
+          </body></html>
+        `,
+        onScroll: (_fraction, scrollIdx) => {
+          if (scrollIdx === 2) {
+            return `
+              <html><head><title>Cultura 2026</title><script src="https://static.parastorage.com/communities-blog-ooi/app.js"></script></head><body>
+                <div id="SITE_CONTAINER">
+                  <article data-hook="post">
+                    <span data-hook="comment-count">2 comments</span>
+                    <div id="root-comment-box-start-1" data-hook="comment-box comment-box-top">
+                      <button data-hook="comment-box-placeholder"><span>Escreva um comentário</span></button>
+                    </div>
+                    <div data-hook="top-level-comment-list"></div>
+                  </article>
+                </div>
+              </body></html>
+            `
+          }
+        },
+        onAction: (kind, selector) => {
+          if (kind === 'click' && selector.includes('comment-box-placeholder')) {
+            clickedPlaceholder = true
+          }
+        },
+        onInspect: () => {
+          if (!clickedPlaceholder) return
+          pollsAfterClick++
+          if (pollsAfterClick === 3) {
+            return `
+              <html><head><title>Cultura 2026</title><script src="https://static.parastorage.com/communities-blog-ooi/app.js"></script></head><body>
+                <div id="SITE_CONTAINER">
+                  <article data-hook="post">
+                    <div id="root-comment-box-start-1" data-hook="comment-box comment-box-top">
+                      <div data-hook="fullRicosEditor">
+                        <div data-hook="ricos-tiptap-editor">
+                          <div contenteditable="true" class="tiptap ProseMirror" role="textbox"></div>
+                        </div>
+                      </div>
+                      <button type="button" data-hook="primary-btn">Publicar</button>
+                    </div>
+                  </article>
+                </div>
+              </body></html>
+            `
+          }
+        },
+      },
+    })
+
+    const res = await executeCommentPublish(
+      page as never,
+      'p-wix-lazy',
+      { kind: 'comment_publish', url: postUrl, commentText: '', probeOnly: true },
+      { defaultTimeoutMs: 10_000, sleepImpl: async () => {} },
+    )
+
+    expect(clickedPlaceholder).toBe(true)
+    expect(scrollFractions.slice(0, 3)).toEqual([0.3, 0.6, 0.85])
+    expect(res).toMatchObject({
+      outcome: 'form_ready',
+      siteType: 'wix',
+      probeOnly: true,
+      submitTriggered: false,
+    })
+  })
+
+  it('routes Wix Log in to publish as a member without CAPTCHA to needs_llm_fallback (not no_form/blocked_captcha) while blocking when reCAPTCHA appears', async () => {
+    const memberOnlyUrl = 'https://myremc.example.coop/post/board-2026'
+    const { page: memberPage } = createDomDrivenMockPage({
+      [memberOnlyUrl]: {
+        title: 'Board 2026',
+        html: `
+          <html><head><title>Board 2026</title><script src="https://static.wixstatic.com/app.js"></script></head><body>
+            <div id="SITE_CONTAINER">
+              <article data-hook="post">
+                <div data-hook="comment-box comment-box-top">
+                  <button data-hook="comment-box-placeholder">Write a comment...</button>
+                </div>
+              </article>
+            </div>
+          </body></html>
+        `,
+        onAction: (kind, selector) => {
+          if (kind === 'click' && selector.includes('comment-box-placeholder')) {
+            return {
+              mutateHtml: `
+                <html><head><title>Board 2026</title><script src="https://static.wixstatic.com/app.js"></script></head><body>
+                  <div id="SITE_CONTAINER">
+                    <article data-hook="post">
+                      <div data-hook="comment-box comment-box-top">
+                        <span>Log in to publish as a member</span>
+                        <button data-hook="login-as-member-text-button">Log in</button>
+                        <button data-hook="primary-btn">Publish</button>
+                      </div>
+                    </article>
+                  </div>
+                </body></html>
+              `,
+            }
+          }
+        },
+      },
+    })
+
+    const memberRes = await executeCommentPublish(
+      memberPage as never,
+      'p-wix-login',
+      { kind: 'comment_publish', url: memberOnlyUrl, commentText: 'Great post', probeOnly: true },
+      { defaultTimeoutMs: 10_000, sleepImpl: async () => {} },
+    )
+    expect(memberRes).toMatchObject({
+      outcome: 'needs_llm_fallback',
+      siteType: 'wix',
+      submitTriggered: false,
+      formSummary: { hasLoginWall: true },
+    })
+    expect(memberRes.suggestedTags).toBeUndefined()
+    expect(memberRes.bottomSnapshot).toBeTruthy()
+
+    // Delayed reCAPTCHA after login wall appears still triggers blocked_captcha.
+    let expanded = false
+    let polls = 0
+    const { page: capPage } = createDomDrivenMockPage({
+      [memberOnlyUrl]: {
+        title: 'Board 2026 Cap',
+        html: `
+          <html><head><title>Board 2026 Cap</title><script src="https://static.wixstatic.com/app.js"></script></head><body>
+            <div data-hook="comment-box comment-box-top">
+              <button data-hook="comment-box-placeholder">Write a comment...</button>
+            </div>
+          </body></html>
+        `,
+        onAction: (kind, selector) => {
+          if (kind === 'click' && selector.includes('comment-box-placeholder')) {
+            expanded = true
+            return {
+              mutateHtml: `
+                <html><head><title>Board 2026 Cap</title><script src="https://static.wixstatic.com/app.js"></script></head><body>
+                  <div data-hook="comment-box comment-box-top">
+                    <span>Log in to publish as a member</span>
+                    <button data-hook="login-as-member-text-button">Log in</button>
+                  </div>
+                </body></html>
+              `,
+            }
+          }
+        },
+        onInspect: () => {
+          if (!expanded) return
+          polls++
+          if (polls >= 2) {
+            return `
+              <html><head><title>Board 2026 Cap</title><script src="https://static.wixstatic.com/app.js"></script></head><body>
+                <div data-hook="comment-box comment-box-top">
+                  <span>Log in to publish as a member</span>
+                  <div class="g-recaptcha"></div>
+                </div>
+              </body></html>
+            `
+          }
+        },
+      },
+    })
+    const capRes = await executeCommentPublish(
+      capPage as never,
+      'p-wix-cap-late',
+      { kind: 'comment_publish', url: memberOnlyUrl, commentText: 'Great post' },
+      { defaultTimeoutMs: 10_000, sleepImpl: async () => {} },
+    )
+    expect(capRes).toMatchObject({
+      outcome: 'blocked_captcha',
+      siteType: 'wix',
+      templateSignature: 'wix:signup_recaptcha',
+      suggestedTags: ['has_captcha'],
+      submitTriggered: false,
+    })
+  })
+
+  it('enforces anti-false-no_form guardrails on Wix placeholders, unexpanded triggers, blog list pages, and complex post layouts', async () => {
+    const cases = [
+      {
+        name: 'persistent lazy placeholder',
+        url: 'https://a.wixsite.com/blog/post/slow-post',
+        html: `<html><head><title>Slow Post</title><script src="https://static.wixstatic.com/a.js"></script></head><body><div id="SITE_CONTAINER"><article data-hook="post"><div data-hook="comments-section-placeholder"></div><div data-hook="skeleton-loader"></div></article></div></body></html>`,
+      },
+      {
+        name: 'unrecognized trigger expansion',
+        url: 'https://b.wixsite.com/blog/post/custom-box',
+        html: `<html><head><title>Custom Box</title><script src="https://static.wixstatic.com/a.js"></script></head><body><div data-hook="comment-box comment-box-top"><button data-hook="comment-box-placeholder">Write a comment...</button></div></body></html>`,
+      },
+      {
+        name: 'wix blog list index page',
+        url: 'https://www.nhtcinc.example.org/news-and-events',
+        html: `<html><head><title>News and Events</title><script src="https://static.wixstatic.com/a.js"></script></head><body><div id="SITE_CONTAINER"><main><div data-hook="skeleton-loader"></div><div data-hook="post-footer"><a href="/post/update-1">Update 1</a><button data-hook="more-button">More</button></div><div data-hook="post-footer"><a href="/post/update-2">Update 2</a><button data-hook="more-button">More</button></div></main></div></body></html>`,
+        expectedBottom: 'list=true',
+      },
+      {
+        name: 'complex wix post layout without comment hooks',
+        url: 'https://c.wixsite.com/blog/post/complex-layout',
+        html: `<html><head><title>Complex Post</title><script src="https://static.parastorage.com/communities-blog-ooi/viewer.js"></script></head><body><div id="SITE_CONTAINER"><article data-hook="post"><h1 data-hook="post-title">Complex Post</h1><p>Content</p></article></div></body></html>`,
+      },
+    ]
+
+    for (const c of cases) {
+      const { page } = createDomDrivenMockPage({
+        [c.url]: { title: c.name, html: c.html },
+      })
+      const res = await executeCommentPublish(
+        page as never,
+        `p-${c.name}`,
+        { kind: 'comment_publish', url: c.url, commentText: 'Nice insight', probeOnly: true },
+        { defaultTimeoutMs: 10_000, wixLazyWaitMaxMs: 800, wixExpandWaitMaxMs: 800, sleepImpl: async () => {} },
+      )
+      expect(res.outcome, c.name).toBe('needs_llm_fallback')
+      expect(res.siteType, c.name).toBe('wix')
+      expect(res.submitTriggered, c.name).toBe(false)
+      expect(res.suggestedTags, c.name).toBeUndefined()
+      expect(res.bottomSnapshot, c.name).toBeTruthy()
+      if (c.expectedBottom) {
+        expect(res.bottomSnapshot, c.name).toContain(c.expectedBottom)
+      }
+    }
+  })
+
+  it('inspects non-ad child frames while ignoring ad/video iframes, and serializes bottomSnapshot via MCP formatter', async () => {
+    const embedUrl = 'https://embed.wixsite.com/blog/post/disqus-post'
+    const { page: framePage } = createDomDrivenMockPage({
+      [embedUrl]: {
+        title: 'Disqus Wix Post',
+        html: `<html><head><title>Disqus Wix Post</title><script src="https://static.wixstatic.com/a.js"></script></head><body><div id="SITE_CONTAINER"><article data-hook="post"><iframe src="https://disqus.com/embed/comments/"></iframe></article></div></body></html>`,
+        frames: [
+          { url: 'https://googleads.g.doubleclick.net/pagead/ads?client=ca-pub-123', html: '<body>Ad</body>' },
+          { url: 'https://video.wixstatic.com/video/demo/360p/mp4/file.mp4', html: '<body></body>' },
+          { url: 'https://disqus.com/embed/comments/?f=demo', html: '<body><textarea placeholder="Join the discussion"></textarea></body>' },
+        ],
+      },
+    })
+
+    const frameRes = await executeCommentPublish(
+      framePage as never,
+      'p-frame',
+      { kind: 'comment_publish', url: embedUrl, commentText: 'Great breakdown' },
+      { defaultTimeoutMs: 10_000, sleepImpl: async () => {} },
+    )
+    expect(frameRes.outcome).toBe('needs_llm_fallback')
+    expect(frameRes.siteType).toBe('wix')
+    expect(frameRes.submitTriggered).toBe(false)
+    expect(frameRes.suggestedTags).toBeUndefined()
+    expect(frameRes.formSummary?.childFrames?.some(f => f.includes('disqus.com'))).toBe(true)
+    expect(frameRes.formSummary?.childFrames?.some(f => f.includes('doubleclick'))).toBe(false)
+    expect(frameRes.bottomSnapshot).toContain('[child-frames]')
+
+    const formatted = formatMcpBrowserOutput(frameRes, 4_500)
+    expect(formatted).toContain('"bottomSnapshot"')
+
+    // Child iframe containing reCAPTCHA blocks cleanly.
+    const capFrameUrl = 'https://capframe.example.org/post'
+    const { page: capFramePage } = createDomDrivenMockPage({
+      [capFrameUrl]: {
+        title: 'Captcha Frame',
+        html: `<html><head><title>Captcha Frame</title></head><body><main><p>Post</p></main></body></html>`,
+        frames: [
+          { url: 'https://widget.example.org/comment-box', html: '<body><div class="g-recaptcha"></div></body>' },
+        ],
+      },
+    })
+    const capFrameRes = await executeCommentPublish(
+      capFramePage as never,
+      'p-cap-frame',
+      { kind: 'comment_publish', url: capFrameUrl, commentText: 'Hi' },
+      { defaultTimeoutMs: 10_000, sleepImpl: async () => {} },
+    )
+    expect(capFrameRes).toMatchObject({
+      outcome: 'blocked_captcha',
+      suggestedTags: ['has_captcha'],
+      submitTriggered: false,
     })
   })
 })

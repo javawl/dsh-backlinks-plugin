@@ -20,7 +20,7 @@ You operate the `backlinks` and `browser` MCP tools provided by `backlinks-publi
      - `no_form` → `item_result(skipped, skipReason)` + `source_tags(["no_form"])`
      - `blocked_captcha` → `bringToFront`, `item_result(failed, manual_required, templateSignature)` + `source_tags(["has_captcha"])` (never bypass CAPTCHA!)
      - `uncertain_after_submit` → **`item_result(failed, manual_required)` (IDEMPOTENT: NEVER retry submit!)**
-     - `needs_llm_fallback` → tab is already at `finalUrl` with `formSummary`; continue directly with compact `snapshot` / `batch_fill` without re-navigating!
+     - `needs_llm_fallback` → tab is already at `finalUrl` with `formSummary` and compact `bottomSnapshot` (Wix complex/list pages, unexpanded `comment-box-placeholder`, child-frame widgets, or `Log in to publish as a member` without CAPTCHA never auto-tag `no_form`); inspect `bottomSnapshot` first (open a recent `/post/` article if on a blog index, or run `snapshot format="interactive"` on login modal for Google SSO) and continue without re-navigating!
 5. **Fallback Form Flow & Compact Snapshots**:
    - `snapshot` defaults to **compact mode (4,500 chars)** pruning nav/header/footer/SVG bloat while preserving forms/inputs/buttons/alerts. Pass `full: true` (up to 16,000 chars) only when essential controls are missing.
    - Use `batch_fill` for multi-field forms and `wait_for_login` for manual logins.

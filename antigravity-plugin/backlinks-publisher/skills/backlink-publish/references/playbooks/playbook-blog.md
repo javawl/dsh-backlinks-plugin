@@ -1,6 +1,6 @@
 # 博客评论（category: 博客）
 
-> **v2 确定性快路径优先**：常规 WordPress 与 Wix 博客请**直接调用 `browser action="comment_publish"`**（传入 `url`、`commentText`、`authorName`、`authorEmail`、`websiteUrl`、`anchorText`），1 次调用完成导航、滚底懒加载探测、关评/CAPTCHA 识别、填表提交与重载核验；仅当 `comment_publish` 返回 `needs_llm_fallback` 或需要登录注册时，再回退到下文手工勘察流程。遇评论关闭时直接打 `评论关闭`（或 `comments_closed`，客户端会自动映射为现网兼容标签）。
+> **v2 确定性快路径优先**：常规 WordPress 与 Wix 博客请**直接调用 `browser action="comment_publish"`**（传入 `url`、`commentText`、`authorName`、`authorEmail`、`websiteUrl`、`anchorText`），1 次调用完成导航、3–4 步渐进滚底与 4–5s 懒加载等待、main frame + child iframes 探测、`comment-box-placeholder` 展开等待、关评/CAPTCHA 识别、填表提交与重载核验；对复杂 Wix 布局/列表页/仅提示 `Log in to publish as a member` 且无验证码时，`comment_publish` 设有**防误报护栏**——会返回 `needs_llm_fallback`（附带 `bottomSnapshot` 底部紧凑上下文与 `formSummary`），绝不误报 `no_form`。拿到 `needs_llm_fallback` 后可直接基于 `bottomSnapshot`（若在博客列表页则点进近期 `/post/` 文章；若提示登录则打开登录面板 + `snapshot format="interactive"` 走登录决策树）继续处理。遇评论关闭时直接打 `评论关闭`（或 `comments_closed`，客户端会自动映射为现网兼容标签）。
 
 在相关博客文章下留评论形成外链：表单有 Website 字段时填填写者主页 URL，没有时把链接嵌进评论正文。
 
@@ -31,7 +31,7 @@
 | WordPress | 表单 action 含 `wp-comments-post`、`commentform`、`comment_post_ID`、"allowed HTML tags" 提示 |
 | Blogger/Blogspot | `iframe[src*='blogger.com']`、"Post a Comment"、Google 账号选择器 |
 | Disqus | `#disqus_thread` 容器、`iframe[src*='disqus.com']` |
-| Wix | "Write a comment..." 占位符、表情/GIF 工具栏、需会员登录 |
+| Wix | `button[data-hook="comment-box-placeholder"]`（`"Write a comment..."` / 多语言占位符）、`ricos-tiptap-editor` / `.tiptap.ProseMirror` 富文本、表情/GIF 工具栏、`primary-btn`（Publish）、或 `Log in to publish as a member` 需会员登录 |
 | 通用富文本 | 正文框带加粗/链接工具栏、`contenteditable` 区域 |
 
 ## 正文嵌链（无 Website 字段的评论区）

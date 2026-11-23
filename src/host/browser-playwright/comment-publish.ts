@@ -10,7 +10,7 @@
  * - Rich-editor safety: never types raw `<a>` markup into `contenteditable` editors.
  */
 
-import type { Page } from 'playwright-core'
+import type { Frame, Page } from 'playwright-core'
 import type {
   BrowserCommentPublishCommand,
   BrowserCommentPublishResult,
@@ -21,7 +21,11 @@ import { BrowserError } from '../browser/types.ts'
 import type { SleepLike } from '../../mcp/backlinks-tool.ts'
 
 export const DEFAULT_LAZY_WAIT_MAX_MS = 2_500
-const LAZY_POLL_INTERVAL_MS = 350
+export const DEFAULT_WIX_LAZY_WAIT_MAX_MS = 5_000
+export const DEFAULT_WIX_EXPAND_WAIT_MAX_MS = 4_000
+const LAZY_POLL_INTERVAL_MS = 400
+const FRAME_INSPECT_TIMEOUT_MS = 1_000
+const BOTTOM_SNAPSHOT_MAX_CHARS = 1_200
 
 export interface WordPressInspection {
   readonly found: boolean
@@ -45,6 +49,12 @@ export interface WixInspection {
   readonly loginRequired: boolean
   readonly captchaDetected: boolean
   readonly hasGuestEditor: boolean
+  readonly hasLazyPlaceholder: boolean
+  readonly hasCommentCountOnly: boolean
+  readonly hasBlogPostStructure: boolean
+  readonly isBlogListPage: boolean
+  readonly isComplexWixLayout: boolean
+  readonly commentHooks?: readonly string[]
   readonly editorSelector?: string
   readonly editorIsContentEditable?: boolean
   readonly triggerSelector?: string
@@ -55,18 +65,30 @@ export interface WixInspection {
   readonly linkButtonSelector?: string
 }
 
+export interface ChildFramesInspection {
+  readonly frames: readonly string[]
+  readonly hasActionableCommentFrame: boolean
+  readonly hasUnknownInteractiveFrame: boolean
+  readonly captchaDetected: boolean
+  readonly commentsClosedPhrase?: string
+}
+
 export interface CommentPageInspection {
   readonly title: string
   readonly finalUrl: string
   readonly isWix: boolean
   readonly isWordPress: boolean
+  readonly readyState?: string
+  readonly scrollHeight?: number
   readonly commentsClosed: {
     readonly matched: boolean
     readonly phrase?: string
   }
   readonly wordpress: WordPressInspection
   readonly wix: WixInspection
+  readonly childFrames?: ChildFramesInspection
   readonly formSummary: CommentPublishFormSummary
+  readonly bottomSnapshot?: string
 }
 
 export interface CommentVerifyOutcome {
@@ -170,6 +192,20 @@ export const INSPECT_COMMENT_PAGE_SCRIPT = String.raw`(() => {
     }
   };
 
+  const scopeSelectorFor = (scopeEl) => {
+    if (!scopeEl) return '';
+    if (scopeEl.id) {
+      const byId = '#' + escapeCss(scopeEl.id);
+      if (uniqueInScope(scopeEl, byId)) return byId;
+    }
+    const hook = scopeEl.getAttribute && scopeEl.getAttribute('data-hook');
+    if (hook) {
+      const byHook = '[data-hook="' + hook.replace(/"/g, '\\"') + '"]';
+      if (uniqueInScope(scopeEl, byHook)) return byHook;
+    }
+    return scopeEl.localName || '';
+  };
+
   const selectorFor = (el, scopeEl) => {
     if (!el) return '';
     if (el.id) {
@@ -192,18 +228,30 @@ export const INSPECT_COMMENT_PAGE_SCRIPT = String.raw`(() => {
       if (uniqueInScope(el, byTestId)) return byTestId;
     }
     if (scopeEl) {
-      const scopeSel = scopeEl.id ? '#' + escapeCss(scopeEl.id) : scopeEl.localName;
+      const scopeSel = scopeSelectorFor(scopeEl);
       if (scopeSel && nameAttr) {
         const scopedName = scopeSel + ' ' + el.localName + '[name="' + nameAttr.replace(/"/g, '\\"') + '"]';
         if (uniqueInScope(el, scopedName)) return scopedName;
+      }
+      if (scopeSel && hookAttr) {
+        const scopedHook = scopeSel + ' [data-hook="' + hookAttr.replace(/"/g, '\\"') + '"]';
+        if (uniqueInScope(el, scopedHook)) return scopedHook;
       }
       if (scopeSel && el.type) {
         const scopedType = scopeSel + ' ' + el.localName + '[type="' + String(el.type).replace(/"/g, '\\"') + '"]';
         if (uniqueInScope(el, scopedType)) return scopedType;
       }
+      if (scopeSel && el.getAttribute('contenteditable') === 'true') {
+        const scopedCe = scopeSel + ' [contenteditable="true"]';
+        if (uniqueInScope(el, scopedCe)) return scopedCe;
+      }
+      if (scopeSel && el.getAttribute('role') === 'textbox') {
+        const scopedTb = scopeSel + ' [role="textbox"]';
+        if (uniqueInScope(el, scopedTb)) return scopedTb;
+      }
     }
     let path = '';
-    for (let node = el, depth = 0; node && node.nodeType === 1 && depth < 5; node = node.parentElement, depth++) {
+    for (let node = el, depth = 0; node && node.nodeType === 1 && depth < 8; node = node.parentElement, depth++) {
       const tag = node.localName;
       const parent = node.parentNode;
       if (!parent) break;
@@ -218,12 +266,25 @@ export const INSPECT_COMMENT_PAGE_SCRIPT = String.raw`(() => {
   const docHtmlPrefix = (document.documentElement ? document.documentElement.innerHTML : '').slice(0, 65536);
   const isWix = !!(
     document.querySelector('[data-hook*="comment"], [id*="SITE_CONTAINER"], meta[name="generator"][content*="Wix" i], script[src*="wixstatic.com"], script[src*="parastorage.com"]')
-    || /wixstatic\.com|static\.parastorage\.com|_wixCIDX|wix-warmup-data/i.test(docHtmlPrefix)
+    || /wixstatic\.com|static\.parastorage\.com|_wixCIDX|wix-warmup-data|communities-blog-ooi/i.test(docHtmlPrefix)
   );
   const isWordPress = !!(
     document.querySelector('form#commentform, form[action*="wp-comments-post.php"], meta[name="generator"][content*="WordPress" i], link[href*="wp-content"]')
     || /wp-comments-post\.php|wp-content/i.test(docHtmlPrefix)
   );
+
+  // Extract visible text safely without pulling inline <script>/<style> JSON into jsdom textContent.
+  const extractVisibleText = (el) => {
+    if (!el) return '';
+    if (typeof el.innerText === 'string' && el.innerText.length > 0) {
+      return clean(el.innerText);
+    }
+    const clone = el.cloneNode(true);
+    if (clone && typeof clone.querySelectorAll === 'function') {
+      for (const s of clone.querySelectorAll('script,style,noscript')) s.remove();
+    }
+    return clean(clone ? clone.textContent : '');
+  };
 
   // Detect explicit comments-closed banners outside script/style tags.
   const closedRegex = /\bcomments\s+are\s+closed\b|\bcommenting\s+(?:is|has\s+been)\s+closed\b|\bcomments\s+(?:have\s+been\s+)?disabled\b|评论已关闭|评论功能已关闭|已关闭评论/i;
@@ -232,7 +293,7 @@ export const INSPECT_COMMENT_PAGE_SCRIPT = String.raw`(() => {
   const closedTargets = closedContainers.length > 0 ? closedContainers : (document.body ? [document.body] : []);
   for (const container of closedTargets) {
     if (!isVisible(container)) continue;
-    const text = clean(container.innerText || container.textContent);
+    const text = extractVisibleText(container);
     const match = closedRegex.exec(text);
     if (match) {
       closedPhrase = match[0];
@@ -240,9 +301,7 @@ export const INSPECT_COMMENT_PAGE_SCRIPT = String.raw`(() => {
     }
   }
   if (!closedPhrase && document.body) {
-    const clone = document.body.cloneNode(true);
-    for (const s of clone.querySelectorAll('script,style,noscript')) s.remove();
-    const match = closedRegex.exec(clean(clone.textContent));
+    const match = closedRegex.exec(extractVisibleText(document.body));
     if (match) closedPhrase = match[0];
   }
 
@@ -261,7 +320,7 @@ export const INSPECT_COMMENT_PAGE_SCRIPT = String.raw`(() => {
 
     const respondRoot = wpFormCandidate.closest('#respond, #comments') || wpFormCandidate;
     const formHtml = wpFormCandidate.outerHTML || '';
-    const formText = clean(respondRoot.innerText || respondRoot.textContent);
+    const formText = extractVisibleText(respondRoot);
 
     let captcha = { detected: false };
     if (respondRoot.querySelector('.g-recaptcha, iframe[src*="recaptcha"], [data-sitekey], textarea[name="g-recaptcha-response"], input[name*="recaptcha" i]')) {
@@ -302,73 +361,181 @@ export const INSPECT_COMMENT_PAGE_SCRIPT = String.raw`(() => {
     }
   }
 
-  // Wix blog comment detection.
-  const wixCommentRoots = Array.from(document.querySelectorAll('[data-hook*="comment"], [data-testid*="comment"], #comments')).filter(isVisible);
+  // Wix blog comment & layout structure detection (separates lazy placeholders & counters from interactive controls).
+  const isSectionPlaceholderHook = hook => /^comments-section-placeholder$/i.test(hook);
+  const isCounterHook = hook => /^comments?-count(?:er)?(?:-wrapper)?$|^post-footer__comment-count$/i.test(hook);
+  const allCommentHookEls = Array.from(document.querySelectorAll('[data-hook*="comment" i], [data-testid*="comment" i], #comments'));
+  const commentHooks = [];
+  for (const el of allCommentHookEls) {
+    const h = clean(el.getAttribute('data-hook') || el.getAttribute('data-testid') || (el.id === 'comments' ? '#comments' : ''));
+    if (h && !commentHooks.includes(h)) commentHooks.push(h);
+    if (commentHooks.length >= 12) break;
+  }
+  const hasCommentCountOnly = allCommentHookEls.some(el => isCounterHook(clean(el.getAttribute('data-hook'))));
+  const wixCommentRoots = allCommentHookEls.filter(el => {
+    if (!isVisible(el)) return false;
+    const h = clean(el.getAttribute('data-hook'));
+    if (isSectionPlaceholderHook(h) || /^skeleton-loader$/i.test(h) || isCounterHook(h) || /comment-count/i.test(h)) return false;
+    const text = extractVisibleText(el);
+    const hasInteractiveChild = !!el.querySelector('button, input, textarea, select, iframe, [contenteditable="true"], [role="textbox"]');
+    const isInteractiveItself = el.localName === 'button'
+      || el.localName === 'textarea'
+      || el.getAttribute('contenteditable') === 'true'
+      || el.getAttribute('role') === 'textbox';
+    return !!(text || hasInteractiveChild || isInteractiveItself);
+  });
+
+  const pathLower = (location.pathname || '/').toLowerCase();
+  const hasPostSlugUrl = /\/post\/[^/?#]+|\/single-post\/[^/?#]+/i.test(pathLower);
+  const postHrefLinks = Array.from(document.querySelectorAll('a[href*="/post/"], a[href*="/single-post/"]'))
+    .map(a => clean(a.getAttribute('href')))
+    .filter(Boolean);
+  const uniquePostLinks = Array.from(new Set(postHrefLinks));
+  const multiCardCount = document.querySelectorAll('[data-hook="feed-post"], [data-hook="post-list-item"], [data-hook="post-footer"], [data-hook="more-button"]').length;
+  const hasSingleArticleNode = !!document.querySelector('article[data-hook="post"], [data-hook="post-hero-image"], [data-hook="comments-section-placeholder"], [data-hook*="comment-box"]');
+  const hasListDom = !!document.querySelector('[data-hook*="post-list" i], [data-hook="blog-post-list"], [data-hook="feed-post"], [data-hook="blog-feed"], [data-hook="recent-posts"] [data-hook="recent-post-list-item"]')
+    || (!hasSingleArticleNode && multiCardCount >= 2);
+  const listPathLooksLikeIndex = /\/(?:blog|news|news-and-events|news-and-updates|articles|posts|insights|stories|updates)(?:\/(?:page\/\d+\/?)?)?$/i.test(pathLower)
+    || (pathLower === '/' && uniquePostLinks.length >= 2);
+  const isBlogListPage = isWix && !hasPostSlugUrl && !hasSingleArticleNode && (
+    hasListDom
+    || uniquePostLinks.length >= 2
+    || listPathLooksLikeIndex
+  );
+  const hasPostArticleDom = hasSingleArticleNode || (!isBlogListPage && !!document.querySelector('[data-hook="post-title"], [data-hook="post-footer"]'));
+  const hasWixBlogScript = !!document.querySelector('script[src*="communities-blog-ooi" i], link[href*="communities-blog-ooi" i]');
+  const hasBlogPostStructure = isWix && !isBlogListPage && (hasPostSlugUrl || hasPostArticleDom || hasWixBlogScript);
+  const hasLazyPlaceholder = isWix && (
+    !!document.querySelector('[data-hook="comments-section-placeholder"]')
+    || allCommentHookEls.some(el => isSectionPlaceholderHook(clean(el.getAttribute('data-hook'))))
+    || (!isBlogListPage && !!document.querySelector('[data-hook="skeleton-loader"]'))
+  );
+
+  const scrollHeight = Math.max(
+    document.documentElement ? (document.documentElement.scrollHeight || 0) : 0,
+    document.body ? (document.body.scrollHeight || 0) : 0,
+  );
+  const scrollY = Math.round(window.scrollY || (document.documentElement ? document.documentElement.scrollTop : 0) || 0);
+  const readyState = typeof document.readyState === 'string' ? document.readyState : 'complete';
+  const bodyTextClean = extractVisibleText(document.body);
+  const tailWindowText = bodyTextClean.slice(-1500);
+  const hasCommentHintText = /\b(?:write a comment|comments?|leave a comment|add a comment|escreva um coment|coment[aá]rios?|escribe un coment|commentaires?|kommentare?|评论|留言)\b/i.test(tailWindowText);
+  const isComplexWixLayout = isWix && (
+    !!document.querySelector('[id*="SITE_CONTAINER"], [data-hook="recent-posts"]')
+    || /wix-warmup-data|communities-blog-ooi/i.test(docHtmlPrefix)
+    || scrollHeight > 1800
+    || readyState !== 'complete'
+    || hasCommentHintText
+  );
+
   const wixHasCommentSection = isWix && wixCommentRoots.length > 0;
-  const wixLoginRegex = /\b(?:log\s*in|sign\s*in)\s+to\s+(?:comment|publish|reply|post)\b|\b(?:log\s*in|sign\s*in)\s+to\s+publish\s+as\s+a\s+member\b|\bsign\s*up\s+to\s+comment\b|登录.*(?:评论|发表)/i;
-  const wixContainerText = wixCommentRoots.map(r => clean(r.innerText || r.textContent)).join(' ');
-  const pageVisibleCaptcha = !!document.querySelector('iframe[src*="recaptcha"], iframe[src*="hcaptcha"], iframe[src*="turnstile"], .g-recaptcha, .h-captcha, .cf-turnstile');
-  const wixLoginButton = Array.from(document.querySelectorAll('[data-hook*="login"], [data-testid*="signUp"], [data-testid*="login"], button, a'))
+  const wixLoginRegex = /\b(?:log\s*in|sign\s*in)\s+to\s+(?:comment|publish|reply|post)\b|\b(?:log\s*in|sign\s*in)\s+to\s+publish\s+as\s+a\s+member\b|\bsign\s*up\s+to\s+comment\b|faça\s+login\s+para\s+(?:comentar|publicar)|inicia\s+sesi[oó]n\s+para\s+(?:comentar|publicar)|connectez-vous\s+pour\s+(?:commenter|publier)|登录.*(?:评论|发表)/i;
+  const wixContainerText = wixCommentRoots.map(r => extractVisibleText(r)).join(' ');
+  const pageVisibleCaptcha = !!document.querySelector(
+    'iframe[src*="recaptcha" i], iframe[src*="hcaptcha" i], iframe[src*="turnstile" i], .g-recaptcha, .h-captcha, .cf-turnstile, textarea[name="g-recaptcha-response"], textarea[name="h-captcha-response"], input[name="cf-turnstile-response"]'
+  );
+  const wixExplicitMemberLogin = Array.from(document.querySelectorAll(
+    '[data-hook="login-as-member-text-button"], [data-testid="signUp.headline"], [data-testid="login.headline"]'
+  )).find(el => isVisible(el));
+  const wixMemberDialog = Array.from(document.querySelectorAll('[id^="SM_ROOT_COMP"], [role="dialog"]')).find(el => {
+    if (!isVisible(el)) return false;
+    const t = extractVisibleText(el);
+    return !!(
+      el.querySelector('input[type="password"], input[type="email"], [data-testid*="signUp" i], [data-testid*="login" i], iframe[src*="recaptcha" i]')
+      || /\b(?:log\s*in|sign\s*up|sign\s*in|continue\s+with\s+google)\b/i.test(t)
+    );
+  });
+  const wixLoginButton = Array.from(document.querySelectorAll('[data-hook*="login" i], [data-testid*="signUp" i], [data-testid*="login" i], button, a'))
     .find(el => isVisible(el) && wixLoginRegex.test(clean(el.innerText || el.textContent || el.getAttribute('aria-label'))));
-  const wixLoginRequired = isWix && (wixLoginRegex.test(wixContainerText) || !!wixLoginButton);
+  const wixLoginRequired = isWix && (
+    wixLoginRegex.test(wixContainerText)
+    || !!wixLoginButton
+    || !!wixExplicitMemberLogin
+    || !!wixMemberDialog
+  );
 
   let wix = {
     hasCommentSection: wixHasCommentSection,
     loginRequired: wixLoginRequired,
     captchaDetected: isWix && pageVisibleCaptcha,
     hasGuestEditor: false,
+    hasLazyPlaceholder: isWix && hasLazyPlaceholder,
+    hasCommentCountOnly: isWix && hasCommentCountOnly,
+    hasBlogPostStructure,
+    isBlogListPage,
+    isComplexWixLayout,
+    ...(commentHooks.length > 0 ? { commentHooks } : {}),
   };
 
   if (isWix && !wixLoginRequired) {
     const editorEl = Array.from(document.querySelectorAll(
-      '[data-hook="comment-box"] [contenteditable="true"], [data-hook="create-comment-input"], [data-hook*="comment"] [contenteditable="true"], [data-hook*="comment"] textarea, [placeholder*="Write a comment" i], [aria-label*="Write a comment" i]',
-    )).find(el => isVisible(el) && (el.getAttribute('contenteditable') === 'true' || el.localName === 'textarea'));
+      '[data-hook*="comment-box"] [contenteditable="true"], [data-hook="ricos-tiptap-editor"] [contenteditable="true"], [data-hook="fullRicosEditor"] [contenteditable="true"], [data-hook="create-comment-input"], [data-hook*="comment"] [contenteditable="true"], [data-hook*="comment"] [role="textbox"], [data-hook*="comment"] textarea, [data-hook*="comment"] .tiptap.ProseMirror, [data-hook*="comment"] .public-DraftEditor-content, [placeholder*="Write a comment" i], [aria-label*="Write a comment" i]'
+    )).find(el => isVisible(el) && (el.getAttribute('contenteditable') === 'true' || el.localName === 'textarea' || el.getAttribute('role') === 'textbox'));
 
-    const triggerEl = Array.from(document.querySelectorAll(
-      '[data-hook="comment-box-placeholder"], [data-hook="open-comment-box"], [data-hook*="comment"] button, [data-hook*="comment"] [role="button"], [placeholder*="Write a comment" i]',
-    )).find(el => isVisible(el) && el !== editorEl && /write a comment|leave a comment|add a comment|写评论/i.test(clean(el.innerText || el.textContent || el.getAttribute('placeholder') || el.getAttribute('aria-label'))));
+    const triggerTextRegex = /write\s+a\s+comment|leave\s+a\s+comment|add\s+a\s+comment|post\s+a\s+comment|escreva\s+um\s+coment|escribe\s+un\s+coment|écrire\s+un\s+coment|kommentar\s+schreiben|写评论|发表评论|留下评论/i;
+    const triggerEl = editorEl ? null : (
+      Array.from(document.querySelectorAll('[data-hook="comment-box-placeholder"], [data-hook="open-comment-box"], [data-hook*="comment-box-placeholder"]'))
+        .find(el => isVisible(el) && el !== editorEl)
+      || Array.from(document.querySelectorAll('[data-hook*="comment" i] button, [data-hook*="comment" i] [role="button"], [data-testid*="comment" i] button, [data-testid*="comment" i] [role="button"], #comments button, [placeholder*="Write a comment" i], [placeholder*="comment" i]'))
+        .find(el => {
+          if (!isVisible(el) || el === editorEl) return false;
+          const h = clean(el.getAttribute('data-hook'));
+          if (isCounterHook(h)) return false;
+          return triggerTextRegex.test(clean(el.innerText || el.textContent || el.getAttribute('placeholder') || el.getAttribute('aria-label')));
+        })
+      || Array.from(document.querySelectorAll('main button, article button, main [role="button"], article [role="button"], button'))
+        .find(el => {
+          if (!isVisible(el) || el === editorEl || el.closest('header, nav, [role="navigation"]')) return false;
+          return /^\s*(?:write|leave|add|post)\s+a\s+comment\b|^\s*(?:escreva\s+um\s+coment|escribe\s+un\s+coment|写评论)/i.test(clean(el.innerText || el.textContent || el.getAttribute('aria-label')));
+        })
+    );
 
     if (editorEl) {
-      const boxScope = (editorEl.parentElement ? editorEl.parentElement.closest('[data-hook*="comment"], [data-testid*="comment"], form') : null) || document;
-      const outerScope = (boxScope.parentElement ? boxScope.parentElement.closest('[data-hook*="comment"], [data-testid*="comment"], section') : null) || document;
+      const boxScope = editorEl.closest('[data-hook*="comment-box"]:not([data-hook*="rce-wrapper"])')
+        || (editorEl.parentElement ? editorEl.parentElement.closest('[data-hook*="comment"], [data-testid*="comment"], form') : null)
+        || document;
+      const outerScope = editorEl.closest('[data-hook*="comments-section"], [data-testid*="comment"], #comments, section')
+        || (boxScope.parentElement ? boxScope.parentElement.closest('[data-hook*="comment"], [data-testid*="comment"], section') : null)
+        || document;
       const nameEl = Array.from(boxScope.querySelectorAll('input[type="text"], input:not([type])')).find(el => isVisible(el) && /name|nick|author|昵称|姓名/i.test(clean((el.getAttribute('name') || '') + ' ' + (el.getAttribute('placeholder') || '') + ' ' + (el.getAttribute('aria-label') || ''))));
       const emailEl = Array.from(boxScope.querySelectorAll('input[type="email"], input[name*="email" i]')).find(isVisible);
       const websiteEl = Array.from(boxScope.querySelectorAll('input[type="url"], input[name*="website" i], input[name*="url" i], input[placeholder*="website" i]')).find(isVisible);
       const findLinkBtn = (scope) => Array.from(scope.querySelectorAll('button, [role="button"]')).find(el => isVisible(el) && /\blink\b|插入链接|链接/i.test(clean((el.getAttribute('aria-label') || '') + ' ' + (el.getAttribute('title') || '') + ' ' + (el.getAttribute('data-hook') || '') + ' ' + (el.getAttribute('data-testid') || ''))));
-      const findSubmitBtn = (scope) => Array.from(scope.querySelectorAll('[data-hook="submit-comment-button"], [data-hook="publish-comment-button"], button[type="submit"], button')).find(el => {
+      const findSubmitBtn = (scope) => Array.from(scope.querySelectorAll('[data-hook="submit-comment-button"], [data-hook="publish-comment-button"], [data-hook="primary-btn"], button[type="submit"], button')).find(el => {
         if (!isVisible(el)) return false;
         const hook = clean(el.getAttribute('data-hook'));
         if (hook === 'submit-comment-button' || hook === 'publish-comment-button') return true;
-        return /^(?:publish|post|submit|comment|reply|发布|提交)$/i.test(clean(el.innerText || el.textContent || el.getAttribute('aria-label')));
+        if (hook === 'primary-btn' && el.closest('[data-hook*="comment-box"], [data-hook*="comments-section"]')) return true;
+        return /^(?:publish|post|submit|comment|reply|publicar|enviar|publier|veröffentlichen|发布|提交|评论)$/i.test(clean(el.innerText || el.textContent || el.getAttribute('aria-label')));
       });
       const linkBtn = findLinkBtn(boxScope) || findLinkBtn(outerScope);
       const submitEl = findSubmitBtn(boxScope) || findSubmitBtn(outerScope);
 
       wix = {
+        ...wix,
         hasCommentSection: true,
         loginRequired: false,
-        captchaDetected: pageVisibleCaptcha,
         hasGuestEditor: true,
-        editorSelector: selectorFor(editorEl),
-        editorIsContentEditable: editorEl.getAttribute('contenteditable') === 'true',
-        ...(nameEl ? { nameSelector: selectorFor(nameEl) } : {}),
-        ...(emailEl ? { emailSelector: selectorFor(emailEl) } : {}),
-        ...(websiteEl ? { websiteSelector: selectorFor(websiteEl) } : {}),
-        ...(linkBtn ? { linkButtonSelector: selectorFor(linkBtn) } : {}),
-        ...(submitEl ? { submitSelector: selectorFor(submitEl) } : {}),
+        editorSelector: selectorFor(editorEl, boxScope),
+        editorIsContentEditable: editorEl.getAttribute('contenteditable') === 'true' || editorEl.getAttribute('role') === 'textbox',
+        ...(nameEl ? { nameSelector: selectorFor(nameEl, boxScope) } : {}),
+        ...(emailEl ? { emailSelector: selectorFor(emailEl, boxScope) } : {}),
+        ...(websiteEl ? { websiteSelector: selectorFor(websiteEl, boxScope) } : {}),
+        ...(linkBtn ? { linkButtonSelector: selectorFor(linkBtn, boxScope) } : {}),
+        ...(submitEl ? { submitSelector: selectorFor(submitEl, boxScope) } : {}),
       };
     } else if (triggerEl) {
       wix = {
+        ...wix,
         hasCommentSection: true,
         loginRequired: false,
-        captchaDetected: pageVisibleCaptcha,
         hasGuestEditor: false,
         triggerSelector: selectorFor(triggerEl),
       };
     }
   }
 
-  // Minimal fallback form summary for LLM handoff when needs_llm_fallback triggers.
+  // Minimal fallback form summary + compact bottom-of-page snapshot for LLM handoff.
   const allForms = Array.from(document.querySelectorAll('form')).filter(isVisible);
   const allTextareas = Array.from(document.querySelectorAll('textarea, [contenteditable="true"]')).filter(isVisible);
   const allIframes = Array.from(document.querySelectorAll('iframe')).filter(isVisible);
@@ -385,19 +552,47 @@ export const INSPECT_COMMENT_PAGE_SCRIPT = String.raw`(() => {
     .map(el => clean(el.innerText || el.textContent || el.getAttribute('value') || el.getAttribute('aria-label')))
     .filter(Boolean)
     .slice(0, 8);
-  const bodySnippet = clean(document.body ? (document.body.innerText || document.body.textContent) : '').slice(0, 260);
+  const bodySnippet = bodyTextClean.slice(0, 260);
+
+  const bottomControlNodes = Array.from(document.querySelectorAll(
+    '[data-hook*="comment" i] button, [data-hook*="comment" i] input, [data-hook*="comment" i] textarea, [data-hook*="comment" i] [contenteditable="true"], [role="dialog"] button, [role="dialog"] input, main button, main input:not([type="hidden"]), main textarea, article button, a[href*="/post/"]'
+  )).filter(isVisible);
+  const bottomControls = [];
+  for (const el of bottomControlNodes.slice(-12)) {
+    const tag = el.localName;
+    const hook = clean(el.getAttribute('data-hook'));
+    const txt = clean(el.innerText || el.textContent || el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.getAttribute('href'));
+    const entry = tag + (hook ? '[' + hook.slice(0, 28) + ']' : '') + (txt ? ':' + txt.slice(0, 48) : '');
+    if (entry && !bottomControls.includes(entry)) bottomControls.push(entry);
+    if (bottomControls.length >= 10) break;
+  }
+
+  const commentTextTail = wixContainerText
+    ? wixContainerText.slice(0, 260)
+    : bodyTextClean.slice(-500);
+  const bottomParts = [
+    'state: ready=' + readyState + ' scroll=' + scrollY + '/' + scrollHeight + ' wix=' + isWix + ' list=' + isBlogListPage + ' post=' + hasBlogPostStructure + ' placeholder=' + hasLazyPlaceholder,
+    ...(commentHooks.length > 0 ? ['hooks: ' + commentHooks.slice(0, 8).join(', ')] : []),
+    ...(isBlogListPage && uniquePostLinks.length > 0 ? ['posts: ' + uniquePostLinks.slice(0, 4).join(' | ')] : []),
+    ...(bottomControls.length > 0 ? ['controls: ' + bottomControls.join('; ')] : []),
+    ...(commentTextTail ? ['tail: ' + commentTextTail] : []),
+  ];
+  const bottomSnapshot = bottomParts.join('\n').slice(0, 1200);
 
   return {
     title: clean(document.title),
     finalUrl: location.href,
     isWix,
     isWordPress,
+    readyState,
+    scrollHeight,
     commentsClosed: {
       matched: closedPhrase.length > 0,
       ...(closedPhrase ? { phrase: closedPhrase } : {}),
     },
     wordpress,
     wix,
+    ...(bottomSnapshot ? { bottomSnapshot } : {}),
     formSummary: {
       forms: allForms.length,
       textareas: allTextareas.length,
@@ -405,8 +600,40 @@ export const INSPECT_COMMENT_PAGE_SCRIPT = String.raw`(() => {
       buttons,
       iframes: allIframes.length,
       hasLoginWall: wixLoginRequired || !!document.querySelector('input[type="password"]'),
+      ...(commentHooks.length > 0 ? { commentHooks: commentHooks.slice(0, 8) } : {}),
       ...(bodySnippet ? { snippet: bodySnippet } : {}),
     },
+  };
+})()`
+
+/** Lightweight self-contained script run inside non-ad child frames. */
+export const INSPECT_CHILD_FRAME_SCRIPT = String.raw`(() => {
+  const clean = value => String(value ?? '').replace(/\s+/g, ' ').trim();
+  const closedRegex = /\bcomments\s+are\s+closed\b|\bcommenting\s+(?:is|has\s+been)\s+closed\b|\bcomments\s+(?:have\s+been\s+)?disabled\b|评论已关闭|评论功能已关闭|已关闭评论/i;
+  const loginRegex = /\b(?:log\s*in|sign\s*in)\s+to\s+(?:comment|publish|reply|post)\b|\bsign\s*up\s+to\s+comment\b|faça\s+login|登录/i;
+  const body = document.body;
+  const text = (() => {
+    if (!body) return '';
+    if (typeof body.innerText === 'string' && body.innerText.length > 0) return clean(body.innerText);
+    const clone = body.cloneNode(true);
+    for (const s of clone.querySelectorAll('script,style,noscript')) s.remove();
+    return clean(clone.textContent);
+  })();
+  const closedMatch = closedRegex.exec(text);
+  const captchaDetected = !!document.querySelector(
+    '.g-recaptcha, .h-captcha, .cf-turnstile, iframe[src*="recaptcha" i], iframe[src*="hcaptcha" i], iframe[src*="turnstile" i], textarea[name="g-recaptcha-response"], textarea[name="h-captcha-response"]'
+  );
+  const hasEditor = !!document.querySelector('textarea, [contenteditable="true"], [role="textbox"]');
+  const hasTrigger = !!document.querySelector('[data-hook*="comment" i] button, button[data-hook*="comment" i]')
+    || Array.from(document.querySelectorAll('button, a')).some(el => /write\s+a\s+comment|leave\s+a\s+comment|post\s+comment|escreva\s+um\s+coment|评论/i.test(clean(el.innerText || el.textContent)));
+  const loginRequired = loginRegex.test(text) || !!document.querySelector('input[type="password"], [data-hook*="login" i]');
+  return {
+    captchaDetected,
+    commentsClosedPhrase: closedMatch ? closedMatch[0] : '',
+    hasEditor,
+    hasTrigger,
+    loginRequired,
+    snippet: text.slice(0, 140),
   };
 })()`
 
@@ -549,9 +776,19 @@ export function verifyCommentResultInDom(params: {
 export interface ExecuteCommentPublishOptions {
   readonly defaultTimeoutMs: number
   readonly lazyWaitMaxMs?: number
+  readonly wixLazyWaitMaxMs?: number
+  readonly wixExpandWaitMaxMs?: number
   readonly sleepImpl?: SleepLike
   readonly signal?: AbortSignal
 }
+
+const WIX_PROGRESSIVE_SCROLL_STEPS = [0.3, 0.6, 0.85, 1.0] as const
+const DEFAULT_PROGRESSIVE_SCROLL_STEPS = [0.5, 0.85, 1.0] as const
+const AD_OR_MEDIA_FRAME_PATTERN =
+  /^$|^about:blank$|doubleclick\.net|googlesyndication\.com|googleadservices\.com|googletagmanager\.com|google-analytics\.com|connect\.facebook\.net\/.*fbevents|video\.wixstatic\.com|youtube\.com\/embed|vimeo\.com/iu
+const CAPTCHA_FRAME_URL_PATTERN = /recaptcha|hcaptcha|turnstile/iu
+const KNOWN_COMMENT_FRAME_URL_PATTERN =
+  /disqus\.com|blogger\.com\/comment|giscus\.app|utteranc\.es|hyvor\.com|commentbox\.io|intensedebate|facebook\.com\/plugins\/comments|comments-ooi|wixapps\.net.*comment|comment.*iframe/iu
 
 function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
   if (ms <= 0) return Promise.resolve()
@@ -577,35 +814,197 @@ function throwIfAborted(signal?: AbortSignal): void {
   }
 }
 
-async function scrollToCommentsArea(page: Page): Promise<void> {
-  await page.evaluate(() => {
+async function scrollPageStep(page: Page, fraction: number): Promise<void> {
+  await page.evaluate((stepFraction: number) => {
     const dom = globalThis as unknown as BrowserDomGlobalLike & {
-      readonly document: BrowserDomGlobalLike['document'] & { readonly body: (BrowserDomElementLike & { readonly scrollHeight?: number }) | null }
+      readonly document: BrowserDomGlobalLike['document'] & {
+        readonly documentElement?: { readonly scrollHeight?: number } | null
+        readonly body: (BrowserDomElementLike & { readonly scrollHeight?: number }) | null
+      }
+      readonly window: BrowserDomGlobalLike['window'] & {
+        dispatchEvent?(ev: unknown): void
+      }
+      readonly Event?: new (type: string) => unknown
     }
-    const anchor = dom.document.querySelector('#comments, #respond, form#commentform, [data-hook*="comment"], [id*="comment"]')
-    if (anchor && typeof anchor.scrollIntoView === 'function') {
-      anchor.scrollIntoView({ behavior: 'instant', block: 'center' })
-      return
+    const docHeight = Math.max(
+      dom.document.documentElement?.scrollHeight ?? 0,
+      dom.document.body?.scrollHeight ?? 0,
+    )
+    if (stepFraction >= 0.65) {
+      const anchor = dom.document.querySelector(
+        '#comments, #respond, form#commentform, [data-hook="comments-section-placeholder"], [data-hook*="comment-box"], [data-hook="comments-section"], [data-hook="top-level-comment-list"]',
+      )
+      if (anchor && typeof anchor.scrollIntoView === 'function') {
+        anchor.scrollIntoView({ behavior: 'instant', block: 'center' })
+      } else if (typeof dom.window.scrollTo === 'function') {
+        dom.window.scrollTo(0, Math.round(docHeight * stepFraction))
+      }
+    } else if (typeof dom.window.scrollTo === 'function') {
+      dom.window.scrollTo(0, Math.round(docHeight * stepFraction))
     }
-    if (typeof dom.window.scrollTo === 'function' && dom.document.body) {
-      dom.window.scrollTo(0, dom.document.body.scrollHeight ?? 0)
+    if (typeof dom.Event === 'function' && typeof dom.window.dispatchEvent === 'function') {
+      try {
+        dom.window.dispatchEvent(new dom.Event('scroll'))
+      } catch {
+        // ignore synthetic event errors
+      }
     }
-  }).catch(() => undefined)
+  }, fraction).catch(() => undefined)
 }
 
-function hasDetectedCommentSurface(inspection: CommentPageInspection): boolean {
+interface ChildFrameEvalOutcome {
+  readonly captchaDetected?: boolean
+  readonly commentsClosedPhrase?: string
+  readonly hasEditor?: boolean
+  readonly hasTrigger?: boolean
+  readonly loginRequired?: boolean
+  readonly snippet?: string
+}
+
+async function evaluateFrameWithTimeout(frame: Frame, timeoutMs: number): Promise<ChildFrameEvalOutcome | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      frame.evaluate<ChildFrameEvalOutcome>(INSPECT_CHILD_FRAME_SCRIPT).catch(() => null),
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), timeoutMs)
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
+async function inspectChildFrames(page: Page): Promise<ChildFramesInspection> {
+  if (typeof page.frames !== 'function') {
+    return {
+      frames: [],
+      hasActionableCommentFrame: false,
+      hasUnknownInteractiveFrame: false,
+      captchaDetected: false,
+    }
+  }
+
+  const mainFrame = typeof page.mainFrame === 'function' ? page.mainFrame() : undefined
+  const frameSummaries: string[] = []
+  let hasActionableCommentFrame = false
+  let hasUnknownInteractiveFrame = false
+  let captchaDetected = false
+  let commentsClosedPhrase: string | undefined
+  let inspectedCount = 0
+
+  for (const frame of page.frames()) {
+    if (frame === mainFrame) continue
+    if (typeof frame.isDetached === 'function' && frame.isDetached()) continue
+    const frameUrl = typeof frame.url === 'function' ? frame.url() : ''
+    if (AD_OR_MEDIA_FRAME_PATTERN.test(frameUrl)) continue
+
+    if (CAPTCHA_FRAME_URL_PATTERN.test(frameUrl)) {
+      captchaDetected = true
+      frameSummaries.push(`${frameUrl.slice(0, 90)} [captcha]`)
+      continue
+    }
+
+    const knownComment = KNOWN_COMMENT_FRAME_URL_PATTERN.test(frameUrl)
+    if (knownComment) {
+      hasActionableCommentFrame = true
+    }
+
+    let detail: ChildFrameEvalOutcome | null = null
+    if (inspectedCount < 6 && typeof frame.evaluate === 'function') {
+      inspectedCount++
+      detail = await evaluateFrameWithTimeout(frame, FRAME_INSPECT_TIMEOUT_MS)
+    }
+
+    const tags: string[] = []
+    if (detail?.captchaDetected) {
+      captchaDetected = true
+      tags.push('captcha')
+    }
+    if (detail?.commentsClosedPhrase) {
+      commentsClosedPhrase ??= detail.commentsClosedPhrase
+      tags.push('closed')
+    }
+    if (detail?.hasEditor) {
+      hasActionableCommentFrame = true
+      tags.push('editor')
+    }
+    if (detail?.hasTrigger) {
+      hasActionableCommentFrame = true
+      tags.push('trigger')
+    }
+    if (detail?.loginRequired) {
+      hasActionableCommentFrame = true
+      tags.push('login')
+    }
+    if (!knownComment && tags.length === 0) {
+      hasUnknownInteractiveFrame = true
+      if (detail?.snippet) tags.push(`text:${detail.snippet.slice(0, 50)}`)
+      else tags.push('cross-origin')
+    }
+    frameSummaries.push(`${frameUrl.slice(0, 90)}${tags.length > 0 ? ` [${tags.join(',')}]` : ''}`)
+  }
+
+  return {
+    frames: frameSummaries,
+    hasActionableCommentFrame,
+    hasUnknownInteractiveFrame,
+    captchaDetected,
+    ...(commentsClosedPhrase === undefined ? {} : { commentsClosedPhrase }),
+  }
+}
+
+function hasActionableCommentSurface(inspection: CommentPageInspection): boolean {
   return (
     inspection.wordpress.found
     || inspection.commentsClosed.matched
-    || inspection.wix.hasCommentSection
-    || inspection.wix.hasGuestEditor
-    || inspection.wix.loginRequired
     || inspection.wix.captchaDetected
+    || inspection.wix.loginRequired
+    || inspection.wix.hasGuestEditor
+    || inspection.wix.triggerSelector !== undefined
+    || Boolean(inspection.childFrames?.captchaDetected)
+    || Boolean(inspection.childFrames?.hasActionableCommentFrame)
   )
 }
 
-async function inspectCommentPage(page: Page): Promise<CommentPageInspection> {
-  return await page.evaluate<CommentPageInspection>(INSPECT_COMMENT_PAGE_SCRIPT)
+async function inspectCommentPageWithFrames(page: Page): Promise<CommentPageInspection> {
+  const base = await page.evaluate<CommentPageInspection>(INSPECT_COMMENT_PAGE_SCRIPT)
+  const childFrames = await inspectChildFrames(page)
+  const hasChildSignals =
+    childFrames.frames.length > 0
+    || childFrames.captchaDetected
+    || childFrames.hasActionableCommentFrame
+    || childFrames.hasUnknownInteractiveFrame
+    || childFrames.commentsClosedPhrase !== undefined
+  if (!hasChildSignals) {
+    return base
+  }
+
+  const extraFramesLine = childFrames.frames.length > 0
+    ? `[child-frames] ${childFrames.frames.slice(0, 4).join(' ; ')}`
+    : ''
+  const combinedBottom = [base.bottomSnapshot, extraFramesLine]
+    .filter((part): part is string => Boolean(part && part.length > 0))
+    .join('\n')
+    .slice(0, BOTTOM_SNAPSHOT_MAX_CHARS)
+
+  return {
+    ...base,
+    commentsClosed: base.commentsClosed.matched || !childFrames.commentsClosedPhrase
+      ? base.commentsClosed
+      : { matched: true, phrase: childFrames.commentsClosedPhrase },
+    wix: {
+      ...base.wix,
+      captchaDetected: base.wix.captchaDetected || (base.isWix && childFrames.captchaDetected),
+    },
+    childFrames,
+    ...(combinedBottom.length > 0 ? { bottomSnapshot: combinedBottom } : {}),
+    formSummary: {
+      ...base.formSummary,
+      iframes: Math.max(base.formSummary.iframes, childFrames.frames.length),
+      ...(childFrames.frames.length > 0 ? { childFrames: childFrames.frames.slice(0, 6) } : {}),
+    },
+  }
 }
 
 async function verifyResult(
@@ -626,6 +1025,45 @@ function inferSiteType(inspection: CommentPageInspection): CommentPublishSiteTyp
   return 'other'
 }
 
+function buildFallbackResult(
+  ref: string,
+  siteType: CommentPublishSiteType,
+  inspection: CommentPageInspection,
+  evidence?: string,
+): BrowserCommentPublishResult {
+  return {
+    kind: 'comment_publish',
+    page: ref,
+    outcome: 'needs_llm_fallback',
+    siteType,
+    title: inspection.title,
+    finalUrl: inspection.finalUrl,
+    ...(evidence === undefined ? {} : { evidence }),
+    submitTriggered: false,
+    formSummary: inspection.formSummary,
+    ...(inspection.bottomSnapshot === undefined ? {} : { bottomSnapshot: inspection.bottomSnapshot }),
+  }
+}
+
+function buildWixNoFormDiagnosis(inspection: CommentPageInspection): string {
+  if (inspection.wix.isBlogListPage) {
+    return '当前页面为 Wix 博客列表/索引页（非单篇文章 /post/），需要挑选近期文章进入后再探测评论框（安全护栏拒判 no_form，未触发提交）'
+  }
+  if (inspection.wix.hasLazyPlaceholder || inspection.wix.hasCommentCountOnly) {
+    return 'Wix 博客仍处于 comments-section-placeholder/comment-count 懒加载阶段且未完成挂载，需 LLM 滚动复核（安全护栏拒判 no_form，未触发提交）'
+  }
+  if (inspection.childFrames?.hasActionableCommentFrame || inspection.childFrames?.hasUnknownInteractiveFrame) {
+    return 'Wix 页面存在可疑子 iframe，可能承载延迟/第三方评论组件，转交 LLM 核查（安全护栏拒判 no_form，未触发提交）'
+  }
+  if (inspection.wix.hasCommentSection || inspection.wix.triggerSelector) {
+    return '检测到 Wix 评论容器/触发器但未确认访客输入框或登录模态框，转交 LLM 接管（安全护栏拒判 no_form，未触发提交）'
+  }
+  if (inspection.wix.hasBlogPostStructure || inspection.wix.isComplexWixLayout) {
+    return '复杂 Wix 博客文章/Thunderbolt 布局在等待窗口内未暴露确定性评论表单，附带底部快照转交 LLM 二次确认（安全护栏拒判 no_form，未触发提交）'
+  }
+  return 'Wix 页面未定位到确定性评论入口，附带底部快照转交 LLM 二次确认（未触发提交）'
+}
+
 export async function executeCommentPublish(
   page: Page,
   ref: string,
@@ -635,33 +1073,52 @@ export async function executeCommentPublish(
   const timeoutMs = command.timeoutMs ?? options.defaultTimeoutMs
   const verifyReload = command.verifyReload !== false
   const probeOnly = command.probeOnly === true
-  const lazyWaitMaxMs = Math.min(options.lazyWaitMaxMs ?? DEFAULT_LAZY_WAIT_MAX_MS, timeoutMs)
+  const baseLazyWaitMaxMs = Math.min(options.lazyWaitMaxMs ?? DEFAULT_LAZY_WAIT_MAX_MS, timeoutMs)
+  const wixLazyWaitMaxMs = Math.min(
+    options.wixLazyWaitMaxMs ?? options.lazyWaitMaxMs ?? DEFAULT_WIX_LAZY_WAIT_MAX_MS,
+    timeoutMs,
+  )
+  const wixExpandWaitMaxMs = Math.min(options.wixExpandWaitMaxMs ?? DEFAULT_WIX_EXPAND_WAIT_MAX_MS, timeoutMs)
   const sleep = options.sleepImpl ?? defaultSleep
 
   throwIfAborted(options.signal)
   await page.goto(command.url, { timeout: timeoutMs, waitUntil: 'domcontentloaded' })
   throwIfAborted(options.signal)
 
-  let inspection = await inspectCommentPage(page)
+  let inspection = await inspectCommentPageWithFrames(page)
 
-  // Scroll to bottom / comment area and wait briefly for lazy-mounted comments (max 2.5s).
-  if (!hasDetectedCommentSurface(inspection)) {
-    await scrollToCommentsArea(page)
-    const deadline = Date.now() + lazyWaitMaxMs
-    while (Date.now() < deadline) {
+  // Progressive multi-step scroll + lazy-load polling until an actionable surface mounts.
+  if (!hasActionableCommentSurface(inspection)) {
+    let activeWaitMaxMs = inspection.isWix ? wixLazyWaitMaxMs : baseLazyWaitMaxMs
+    const startAt = Date.now()
+    let deadline = startAt + activeWaitMaxMs
+    let maxPolls = activeWaitMaxMs > 0 ? Math.max(1, Math.ceil(activeWaitMaxMs / LAZY_POLL_INTERVAL_MS)) : 0
+
+    for (let poll = 0; poll < maxPolls && Date.now() < deadline; poll++) {
       throwIfAborted(options.signal)
+      const steps = inspection.isWix ? WIX_PROGRESSIVE_SCROLL_STEPS : DEFAULT_PROGRESSIVE_SCROLL_STEPS
+      const fraction = steps[Math.min(poll, steps.length - 1)]!
+      await scrollPageStep(page, fraction)
+
       const remaining = deadline - Date.now()
       if (remaining <= 0) break
       await sleep(Math.min(LAZY_POLL_INTERVAL_MS, remaining), options.signal)
-      inspection = await inspectCommentPage(page)
-      if (hasDetectedCommentSurface(inspection)) break
+
+      const prevIsWix = inspection.isWix
+      inspection = await inspectCommentPageWithFrames(page)
+      if (!prevIsWix && inspection.isWix && options.lazyWaitMaxMs === undefined) {
+        activeWaitMaxMs = wixLazyWaitMaxMs
+        deadline = startAt + activeWaitMaxMs
+        maxPolls = activeWaitMaxMs > 0 ? Math.max(1, Math.ceil(activeWaitMaxMs / LAZY_POLL_INTERVAL_MS)) : 0
+      }
+      if (hasActionableCommentSurface(inspection)) break
     }
   }
 
   // 1. WordPress standard comment form branch.
   if (inspection.wordpress.found) {
     const wp = inspection.wordpress
-    if (wp.captcha?.detected) {
+    if (wp.captcha?.detected || inspection.childFrames?.captchaDetected) {
       return {
         kind: 'comment_publish',
         page: ref,
@@ -669,8 +1126,8 @@ export async function executeCommentPublish(
         siteType: 'wordpress',
         title: inspection.title,
         finalUrl: inspection.finalUrl,
-        ...(wp.captcha.templateSignature === undefined ? {} : { templateSignature: wp.captcha.templateSignature }),
-        evidence: `WordPress 评论区存在 ${wp.captcha.kind ?? 'captcha'} 人机验证，未尝试绕过`,
+        ...(wp.captcha?.templateSignature === undefined ? {} : { templateSignature: wp.captcha.templateSignature }),
+        evidence: `WordPress 评论区存在 ${wp.captcha?.kind ?? 'captcha'} 人机验证，未尝试绕过`,
         suggestedTags: ['has_captcha'],
         submitTriggered: false,
       }
@@ -687,21 +1144,17 @@ export async function executeCommentPublish(
         probeOnly: true,
         submitTriggered: false,
         formSummary: inspection.formSummary,
+        ...(inspection.bottomSnapshot === undefined ? {} : { bottomSnapshot: inspection.bottomSnapshot }),
       }
     }
 
     if ((wp.authorRequired && !command.authorName?.trim()) || (wp.emailRequired && !command.authorEmail?.trim())) {
-      return {
-        kind: 'comment_publish',
-        page: ref,
-        outcome: 'needs_llm_fallback',
-        siteType: 'wordpress',
-        title: inspection.title,
-        finalUrl: inspection.finalUrl,
-        evidence: 'WordPress 评论表单缺少必填的 authorName 或 authorEmail 参数，转交常规流程处理',
-        submitTriggered: false,
-        formSummary: inspection.formSummary,
-      }
+      return buildFallbackResult(
+        ref,
+        'wordpress',
+        inspection,
+        'WordPress 评论表单缺少必填的 authorName 或 authorEmail 参数，转交常规流程处理',
+      )
     }
 
     const hasUrlField = wp.urlSelector !== undefined
@@ -719,17 +1172,12 @@ export async function executeCommentPublish(
     }
 
     if (wp.submitSelector === undefined) {
-      return {
-        kind: 'comment_publish',
-        page: ref,
-        outcome: 'needs_llm_fallback',
-        siteType: 'wordpress',
-        title: inspection.title,
-        finalUrl: inspection.finalUrl,
-        evidence: 'WordPress 评论框已填充但未定位到明确 Submit 按钮，转交 LLM 接管（未触发提交）',
-        submitTriggered: false,
-        formSummary: inspection.formSummary,
-      }
+      return buildFallbackResult(
+        ref,
+        'wordpress',
+        inspection,
+        'WordPress 评论框已填充但未定位到明确 Submit 按钮，转交 LLM 接管（未触发提交）',
+      )
     }
 
     // Point of no return: clicking submit marks submitTriggered=true (idempotent: never retry on uncertainty).
@@ -768,7 +1216,7 @@ export async function executeCommentPublish(
     let finalUrl = cleanPublicUrl
     if (verifyReload) {
       await page.goto(cleanPublicUrl, { timeout: timeoutMs, waitUntil: 'domcontentloaded' })
-      await scrollToCommentsArea(page)
+      await scrollPageStep(page, 1.0)
       finalUrl = page.url()
       finalVerify = await verifyResult(page, command)
     }
@@ -844,9 +1292,9 @@ export async function executeCommentPublish(
     }
   }
 
-  // 3. Wix blog comment branch.
+  // 3. Wix blog comment branch (with child-frame awareness & anti-false-no_form guardrail).
   if (inspection.isWix) {
-    if (inspection.wix.loginRequired || inspection.wix.captchaDetected) {
+    if (inspection.wix.captchaDetected || inspection.childFrames?.captchaDetected) {
       return {
         kind: 'comment_publish',
         page: ref,
@@ -855,31 +1303,90 @@ export async function executeCommentPublish(
         title: inspection.title,
         finalUrl: inspection.finalUrl,
         templateSignature: 'wix:signup_recaptcha',
-        evidence: 'Wix 博客评论区要求会员登录或存在 reCAPTCHA 人机验证，未尝试绕过',
+        evidence: 'Wix 博客评论区检测到 reCAPTCHA 人机验证，未尝试绕过',
         suggestedTags: ['has_captcha'],
         submitTriggered: false,
       }
     }
 
-    if (!inspection.wix.hasCommentSection) {
-      return {
-        kind: 'comment_publish',
-        page: ref,
-        outcome: 'no_form',
-        siteType: 'wix',
-        title: inspection.title,
-        finalUrl: inspection.finalUrl,
-        skipReason: 'Wix 博客评论区滚动探测后仍不存在',
-        suggestedTags: ['no_form'],
-        submitTriggered: false,
-      }
+    if (inspection.wix.loginRequired) {
+      return buildFallbackResult(
+        ref,
+        'wix',
+        inspection,
+        'Wix 评论区提示需要登录发表（如 Log in to publish as a member），当前未检测到 CAPTCHA；转交 LLM 走登录决策树（interactive snapshot 核查 Google SSO 或邮箱注册，未触发提交）',
+      )
     }
 
     if (!inspection.wix.hasGuestEditor && inspection.wix.triggerSelector) {
-      await page.locator(inspection.wix.triggerSelector).first().click({ timeout: timeoutMs })
-      await sleep(400, options.signal)
-      inspection = await inspectCommentPage(page)
-      if (inspection.wix.loginRequired || inspection.wix.captchaDetected) {
+      const triggerLocator = page.locator(inspection.wix.triggerSelector).first()
+      let clickError: unknown
+      try {
+        const scrollableTrigger = triggerLocator as unknown as {
+          scrollIntoViewIfNeeded?: (opts?: { timeout?: number }) => Promise<void>
+        }
+        if (typeof scrollableTrigger.scrollIntoViewIfNeeded === 'function') {
+          await scrollableTrigger.scrollIntoViewIfNeeded({ timeout: Math.min(3_000, timeoutMs) }).catch(() => undefined)
+        }
+        await triggerLocator.click({ timeout: timeoutMs })
+      } catch (error) {
+        clickError = error
+      }
+
+      if (clickError !== undefined) {
+        return buildFallbackResult(
+          ref,
+          'wix',
+          inspection,
+          `点击 Wix 评论展开触发器失败 (${clickError instanceof Error ? clickError.message : String(clickError)})，转交 LLM 接管（未触发提交）`,
+        )
+      }
+
+      const expandDeadline = Date.now() + wixExpandWaitMaxMs
+      const expandMaxPolls = wixExpandWaitMaxMs > 0
+        ? Math.max(1, Math.ceil(wixExpandWaitMaxMs / LAZY_POLL_INTERVAL_MS))
+        : 1
+      let sawLoginWithoutCaptcha = false
+
+      for (let poll = 0; poll < expandMaxPolls && Date.now() < expandDeadline; poll++) {
+        throwIfAborted(options.signal)
+        const remaining = expandDeadline - Date.now()
+        if (remaining <= 0) break
+        await sleep(Math.min(LAZY_POLL_INTERVAL_MS, remaining), options.signal)
+
+        inspection = await inspectCommentPageWithFrames(page)
+        if (inspection.wix.captchaDetected || inspection.childFrames?.captchaDetected) {
+          return {
+            kind: 'comment_publish',
+            page: ref,
+            outcome: 'blocked_captcha',
+            siteType: 'wix',
+            title: inspection.title,
+            finalUrl: inspection.finalUrl,
+            templateSignature: 'wix:signup_recaptcha',
+            evidence: '展开 Wix 评论区后触发 reCAPTCHA 人机验证，未尝试绕过',
+            suggestedTags: ['has_captcha'],
+            submitTriggered: false,
+          }
+        }
+        if (inspection.wix.loginRequired) {
+          if (!sawLoginWithoutCaptcha && poll + 1 < expandMaxPolls) {
+            sawLoginWithoutCaptcha = true
+            continue
+          }
+          return buildFallbackResult(
+            ref,
+            'wix',
+            inspection,
+            '展开 Wix 评论区后显示需登录发表（Log in to publish as a member），未检测到 CAPTCHA，转交 LLM 核查 Google SSO/邮箱登录（未触发提交）',
+          )
+        }
+        if (inspection.wix.hasGuestEditor && inspection.wix.editorSelector) {
+          break
+        }
+      }
+
+      if (inspection.wix.captchaDetected || inspection.childFrames?.captchaDetected) {
         return {
           kind: 'comment_publish',
           page: ref,
@@ -888,25 +1395,58 @@ export async function executeCommentPublish(
           title: inspection.title,
           finalUrl: inspection.finalUrl,
           templateSignature: 'wix:signup_recaptcha',
-          evidence: '展开 Wix 评论区后触发会员登录/reCAPTCHA 验证，未尝试绕过',
+          evidence: '展开 Wix 评论区后检测到 reCAPTCHA 人机验证，未尝试绕过',
           suggestedTags: ['has_captcha'],
           submitTriggered: false,
         }
       }
+      if (inspection.wix.loginRequired) {
+        return buildFallbackResult(
+          ref,
+          'wix',
+          inspection,
+          '展开 Wix 评论区后显示需登录发表（Log in to publish as a member），未检测到 CAPTCHA，转交 LLM 核查 Google SSO/邮箱登录（未触发提交）',
+        )
+      }
+    }
+
+    if (inspection.childFrames?.hasActionableCommentFrame && (!inspection.wix.hasGuestEditor || !inspection.wix.editorSelector)) {
+      return buildFallbackResult(
+        ref,
+        'wix',
+        inspection,
+        '在子 iframe 中检测到疑似评论/登录组件，转交 LLM 使用 frame()>> 进一步确认（未触发提交）',
+      )
     }
 
     if (!inspection.wix.hasGuestEditor || !inspection.wix.editorSelector) {
-      return {
-        kind: 'comment_publish',
-        page: ref,
-        outcome: 'no_form',
-        siteType: 'wix',
-        title: inspection.title,
-        finalUrl: inspection.finalUrl,
-        skipReason: 'Wix 博客未发现免登录访客评论框',
-        suggestedTags: ['no_form'],
-        submitTriggered: false,
+      const canSafelyDeclareWixNoForm =
+        !inspection.wix.hasCommentSection
+        && !inspection.wix.hasLazyPlaceholder
+        && !inspection.wix.hasCommentCountOnly
+        && !inspection.wix.triggerSelector
+        && !inspection.wix.hasBlogPostStructure
+        && !inspection.wix.isBlogListPage
+        && !inspection.wix.isComplexWixLayout
+        && !(inspection.childFrames?.hasActionableCommentFrame)
+        && !(inspection.childFrames?.hasUnknownInteractiveFrame)
+        && (inspection.readyState === undefined || inspection.readyState !== 'loading')
+
+      if (canSafelyDeclareWixNoForm) {
+        return {
+          kind: 'comment_publish',
+          page: ref,
+          outcome: 'no_form',
+          siteType: 'wix',
+          title: inspection.title,
+          finalUrl: inspection.finalUrl,
+          skipReason: 'Wix 静态页面经渐进滚动、懒加载等待与 iframe 检查后确认无评论模块',
+          suggestedTags: ['no_form'],
+          submitTriggered: false,
+        }
       }
+
+      return buildFallbackResult(ref, 'wix', inspection, buildWixNoFormDiagnosis(inspection))
     }
 
     if (probeOnly) {
@@ -920,6 +1460,7 @@ export async function executeCommentPublish(
         probeOnly: true,
         submitTriggered: false,
         formSummary: inspection.formSummary,
+        ...(inspection.bottomSnapshot === undefined ? {} : { bottomSnapshot: inspection.bottomSnapshot }),
       }
     }
 
@@ -929,17 +1470,12 @@ export async function executeCommentPublish(
     if (wix.editorIsContentEditable) {
       const stripped = stripHtmlLinkForRichEditor(command.commentText, command.anchorText, command.websiteUrl)
       if (stripped.websiteUrl && !hasWebsiteField && !wix.linkButtonSelector) {
-        return {
-          kind: 'comment_publish',
-          page: ref,
-          outcome: 'needs_llm_fallback',
-          siteType: 'wix',
-          title: inspection.title,
-          finalUrl: inspection.finalUrl,
-          evidence: 'Wix 富文本评论框未定位到链接工具按钮且无 Website 字段（避免把 <a> 原样转义，未触发提交）',
-          submitTriggered: false,
-          formSummary: inspection.formSummary,
-        }
+        return buildFallbackResult(
+          ref,
+          'wix',
+          inspection,
+          'Wix 富文本评论框未定位到链接工具按钮且无 Website 字段（避免把 <a> 原样转义，未触发提交）',
+        )
       }
 
       const editorLocator = page.locator(editorSelector).first()
@@ -974,34 +1510,24 @@ export async function executeCommentPublish(
         }, { selector: editorSelector, anchor: anchorToSelect })
 
         if (!selectedOk) {
-          return {
-            kind: 'comment_publish',
-            page: ref,
-            outcome: 'needs_llm_fallback',
-            siteType: 'wix',
-            title: inspection.title,
-            finalUrl: inspection.finalUrl,
-            evidence: 'Wix 富文本编辑器内未匹配到待加链锚文本片段，转交 LLM 处理（未触发提交）',
-            submitTriggered: false,
-            formSummary: inspection.formSummary,
-          }
+          return buildFallbackResult(
+            ref,
+            'wix',
+            inspection,
+            'Wix 富文本编辑器内未匹配到待加链锚文本片段，转交 LLM 处理（未触发提交）',
+          )
         }
 
         await page.locator(wix.linkButtonSelector).first().click({ timeout: timeoutMs })
         const urlInputSelector = 'input[type="url"], input[placeholder*="http" i], input[placeholder*="url" i], input[placeholder*="link" i], input[aria-label*="url" i], input[aria-label*="link" i]'
         const urlInputCount = await page.locator(urlInputSelector).count().catch(() => 0)
         if (urlInputCount <= 0) {
-          return {
-            kind: 'comment_publish',
-            page: ref,
-            outcome: 'needs_llm_fallback',
-            siteType: 'wix',
-            title: inspection.title,
-            finalUrl: inspection.finalUrl,
-            evidence: '点击 Wix 链接按钮后未检测到链接 URL 输入框，转交 LLM 处理（未触发提交）',
-            submitTriggered: false,
-            formSummary: inspection.formSummary,
-          }
+          return buildFallbackResult(
+            ref,
+            'wix',
+            inspection,
+            '点击 Wix 链接按钮后未检测到链接 URL 输入框，转交 LLM 处理（未触发提交）',
+          )
         }
         const urlInput = page.locator(urlInputSelector).first()
         await urlInput.fill(stripped.websiteUrl, { timeout: timeoutMs })
@@ -1029,17 +1555,12 @@ export async function executeCommentPublish(
     }
 
     if (!wix.submitSelector) {
-      return {
-        kind: 'comment_publish',
-        page: ref,
-        outcome: 'needs_llm_fallback',
-        siteType: 'wix',
-        title: inspection.title,
-        finalUrl: inspection.finalUrl,
-        evidence: 'Wix 评论框已填充但未定位到 Publish/Submit 按钮，转交 LLM 接管（未触发提交）',
-        submitTriggered: false,
-        formSummary: inspection.formSummary,
-      }
+      return buildFallbackResult(
+        ref,
+        'wix',
+        inspection,
+        'Wix 评论框已填充但未定位到 Publish/Submit 按钮，转交 LLM 接管（未触发提交）',
+      )
     }
 
     // Point of no return: click Publish.
@@ -1053,10 +1574,24 @@ export async function executeCommentPublish(
 
     if (verifyReload) {
       await page.goto(command.url, { timeout: timeoutMs, waitUntil: 'domcontentloaded' })
-      await scrollToCommentsArea(page)
-      await sleep(Math.min(800, timeoutMs), options.signal)
-      finalUrl = page.url()
+      const reloadWaitMaxMs = Math.min(options.wixLazyWaitMaxMs ?? options.lazyWaitMaxMs ?? 3_500, timeoutMs)
+      const reloadDeadline = Date.now() + reloadWaitMaxMs
+      const reloadMaxPolls = reloadWaitMaxMs > 0 ? Math.max(1, Math.ceil(reloadWaitMaxMs / LAZY_POLL_INTERVAL_MS)) : 1
+      await scrollPageStep(page, 1.0)
       finalVerify = await verifyResult(page, command)
+      for (
+        let poll = 0;
+        poll < reloadMaxPolls && Date.now() < reloadDeadline
+        && !finalVerify.liveLinkFound && !finalVerify.moderationNotice && !finalVerify.escapedHtmlDetected;
+        poll++
+      ) {
+        const remaining = reloadDeadline - Date.now()
+        if (remaining <= 0) break
+        await sleep(Math.min(LAZY_POLL_INTERVAL_MS, remaining), options.signal)
+        await scrollPageStep(page, 1.0)
+        finalVerify = await verifyResult(page, command)
+      }
+      finalUrl = page.url()
     }
 
     const finalTitle = await page.title().catch(() => inspection.title)
@@ -1112,15 +1647,20 @@ export async function executeCommentPublish(
     }
   }
 
-  // 4. Non-standard / unknown site: hand back to LLM on already-navigated tab.
-  return {
-    kind: 'comment_publish',
-    page: ref,
-    outcome: 'needs_llm_fallback',
-    siteType: 'other',
-    title: inspection.title,
-    finalUrl: inspection.finalUrl,
-    submitTriggered: false,
-    formSummary: inspection.formSummary,
+  // 4. Non-standard / unknown site: block immediately on child-frame CAPTCHA, otherwise hand back to LLM.
+  if (inspection.childFrames?.captchaDetected) {
+    return {
+      kind: 'comment_publish',
+      page: ref,
+      outcome: 'blocked_captcha',
+      siteType: 'other',
+      title: inspection.title,
+      finalUrl: inspection.finalUrl,
+      evidence: '在页面子 iframe 中检测到 CAPTCHA 人机验证，未尝试绕过',
+      suggestedTags: ['has_captcha'],
+      submitTriggered: false,
+    }
   }
+
+  return buildFallbackResult(ref, 'other', inspection)
 }

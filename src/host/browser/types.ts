@@ -121,6 +121,9 @@ export interface CommentPublishFormSummary {
   readonly iframes: number
   readonly hasLoginWall: boolean
   readonly snippet?: string
+  readonly bottomSnapshot?: string
+  readonly commentHooks?: readonly string[]
+  readonly childFrames?: readonly string[]
 }
 
 export interface BrowserCommentPublishCommand extends BrowserPageAddress {
@@ -189,6 +192,7 @@ export interface BrowserCommentPublishResult {
   readonly submitTriggered: boolean
   readonly probeOnly?: boolean
   readonly formSummary?: CommentPublishFormSummary
+  readonly bottomSnapshot?: string
 }
 
 export interface BrowserSession {
