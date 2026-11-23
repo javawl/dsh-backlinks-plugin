@@ -1,8 +1,8 @@
 /**
  * Vocabulary for the browser automation capability seam (`ctx.browser`).
  */
-import { HarnessError } from '@deepseek-ai/dsh-llm';
-export type BrowserCommand = BrowserNavigateCommand | BrowserSnapshotCommand | BrowserBringToFrontCommand | BrowserClickCommand | BrowserFillCommand | BrowserSelectCommand | BrowserPressCommand | BrowserUploadCommand | BrowserScreenshotCommand | BrowserWaitForCommand | BrowserClosePageCommand;
+import { CodedError } from '../../shared/errors.ts';
+export type BrowserCommand = BrowserNavigateCommand | BrowserSnapshotCommand | BrowserBringToFrontCommand | BrowserClickCommand | BrowserFillCommand | BrowserSelectCommand | BrowserCheckCommand | BrowserPressCommand | BrowserUploadCommand | BrowserScreenshotCommand | BrowserWaitForCommand | BrowserProbeCommand | BrowserClosePageCommand;
 export interface BrowserPageAddress {
     readonly page?: string;
 }
@@ -37,6 +37,10 @@ export interface BrowserSelectCommand extends BrowserPageAddress {
     readonly selector: string;
     readonly value: string;
 }
+export interface BrowserCheckCommand extends BrowserPageAddress {
+    readonly kind: 'check';
+    readonly selector: string;
+}
 export interface BrowserPressCommand extends BrowserPageAddress {
     readonly kind: 'press';
     readonly key: string;
@@ -55,10 +59,14 @@ export interface BrowserWaitForCommand extends BrowserPageAddress {
     readonly url?: string;
     readonly timeoutMs?: number;
 }
+export interface BrowserProbeCommand extends BrowserPageAddress {
+    readonly kind: 'probe';
+    readonly selector?: string;
+}
 export interface BrowserClosePageCommand extends BrowserPageAddress {
     readonly kind: 'closePage';
 }
-export type BrowserResult = BrowserPageResult | BrowserAckedResult | BrowserScreenshotResult;
+export type BrowserResult = BrowserPageResult | BrowserAckedResult | BrowserScreenshotResult | BrowserProbeResult;
 export interface BrowserPageResult {
     readonly kind: 'page';
     readonly page: string;
@@ -74,6 +82,13 @@ export interface BrowserScreenshotResult {
     readonly kind: 'screenshot';
     readonly pngBase64: string;
 }
+export interface BrowserProbeResult {
+    readonly kind: 'probe';
+    readonly page: string;
+    readonly url: string;
+    readonly title: string;
+    readonly selectorVisible?: boolean;
+}
 export interface BrowserSession {
     act(command: BrowserCommand, signal?: AbortSignal): Promise<BrowserResult>;
     close(): Promise<void>;
@@ -84,5 +99,5 @@ export interface BrowserAutomationProvider {
     open(signal?: AbortSignal): Promise<BrowserSession>;
 }
 export type BrowserErrorCode = 'BROWSER_DUPLICATE_PROVIDER' | 'BROWSER_PROVIDER_CONFIGURED_MISSING' | 'BROWSER_PROVIDER_CONFIGURED_UNAVAILABLE' | 'BROWSER_PROVIDER_UNAVAILABLE' | 'BROWSER_PROVIDER_AMBIGUOUS' | 'BROWSER_LAUNCH_FAILED' | 'BROWSER_ABORTED' | 'BROWSER_ACTION_FAILED';
-export declare class BrowserError extends HarnessError {
+export declare class BrowserError extends CodedError<BrowserErrorCode> {
 }

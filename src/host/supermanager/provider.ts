@@ -15,8 +15,8 @@ import type {
   BacklinkLeaseClaim,
   BacklinkTagResult,
   BacklinkWebsiteAnchor,
-} from '../backlinks/index.ts'
-import { BacklinksError } from '../backlinks/index.ts'
+} from '../backlinks/types.ts'
+import { BacklinksError } from '../backlinks/types.ts'
 
 export const SUPERMANAGER_BATCH_SOURCE_ID = 'supermanager'
 

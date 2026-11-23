@@ -10,6 +10,7 @@
 4. **外链业务与接码工具（`backlinks` 工具）**：批次拉取、租约认领与心跳、防重复发布核验、诚实状态回写、互换徽标入库、自动打标（`免徽章`/`要徽章`/`可复用`/`有盾`/`付费`）及邮箱自动接码。
 5. **随包内置完整作业技能（无工作目录依赖）**：内置 `/backlink-publish`（含 4 份规范与 6 大站点类型 Playbook）和 `/google-session`，在电脑任意项目目录下启动官方 Harness 均可直接使用。
 6. **专属「外链发布专员」预设（`backlink-operator`）**：控制台发起发布时自动使用外链专员人设，不影响日常编程使用的官方默认 `standard` 预设。
+7. **跨平台 Antigravity MCP 支持（Windows + macOS）**：提供零 `@deepseek-ai/*` 依赖的 Stdio MCP Server（`lib/mcp-server.mjs`）与双布局安装脚本（`pnpm run install:antigravity`），详情见 [docs/ANTIGRAVITY_SETUP.md](docs/ANTIGRAVITY_SETUP.md)。
 
 ---
 

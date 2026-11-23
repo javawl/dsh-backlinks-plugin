@@ -1,7 +1,7 @@
 /**
  * The cloud-mail implementation of the mailbox seam (`POST /public/addUser`, `POST /public/emailList`).
  */
-import type { MailboxAddress, MailboxProvider, MailPollOptions, VerificationMail } from '../backlinks/index.ts';
+import type { MailboxAddress, MailboxProvider, MailPollOptions, VerificationMail } from '../backlinks/types.ts';
 export declare const CLOUD_MAIL_MAILBOX_ID = "cloud-mail";
 export interface ResolvedCloudMailConfig {
     readonly baseUrl: string;

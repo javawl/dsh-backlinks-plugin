@@ -1,7 +1,7 @@
 /**
  * Playwright persistent-Chromium implementation of the browser automation seam.
  */
-import type { BrowserAutomationProvider, BrowserSession } from '../browser/index.ts';
+import type { BrowserAutomationProvider, BrowserSession } from '../browser/types.ts';
 export declare const PLAYWRIGHT_BROWSER_PROVIDER_ID = "playwright";
 export declare const DEFAULT_SNAPSHOT_MAX_CHARS = 60000;
 export interface ResolvedPlaywrightConfig {
@@ -12,6 +12,7 @@ export interface ResolvedPlaywrightConfig {
     readonly launchArgs: readonly string[];
     readonly ignoreDefaultArgs: readonly string[];
     readonly windowPosition: string | undefined;
+    readonly executablePath?: string;
 }
 export declare class PlaywrightBrowserProvider implements BrowserAutomationProvider {
     private readonly config;

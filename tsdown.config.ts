@@ -181,4 +181,31 @@ const clientConfig: UserConfig = {
   },
 }
 
-export default defineConfig([hostConfig, clientConfig])
+const isPlaywrightExternal = (specifier: string): boolean =>
+  /^playwright-core(\/|$)/u.test(specifier)
+
+const mcpServerConfig: UserConfig = {
+  name: `${PACKAGE_ID}/mcp-server`,
+  entry: {
+    'mcp-server': 'lib/types/mcp/server.js',
+  },
+  outDir: 'lib',
+  format: ['esm'],
+  platform: 'node',
+  target: 'es2024',
+  fixedExtension: false,
+  dts: false,
+  clean: false,
+  deps: {
+    onlyBundle: false,
+    neverBundle: (specifier: string) => isBuiltin(specifier) || isPlaywrightExternal(specifier),
+    alwaysBundle: (specifier: string) => !isBuiltin(specifier) && !isPlaywrightExternal(specifier),
+  },
+  outputOptions: {
+    entryFileNames: 'mcp-server.mjs',
+    codeSplitting: false,
+    banner: '#!/usr/bin/env node',
+  },
+}
+
+export default defineConfig([hostConfig, clientConfig, mcpServerConfig])

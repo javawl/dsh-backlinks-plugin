@@ -1,7 +1,7 @@
 /**
  * The supermanager implementation of the batch work-source seam (`/api/agent/*`).
  */
-import type { BacklinkBadgeInput, BacklinkBadgeResult, BacklinkBatchDetail, BacklinkBatchSourceProvider, BacklinkBatchSummary, BacklinkHeartbeat, BacklinkItemOutcome, BacklinkItemResult, BacklinkLeaseClaim, BacklinkTagResult } from '../backlinks/index.ts';
+import type { BacklinkBadgeInput, BacklinkBadgeResult, BacklinkBatchDetail, BacklinkBatchSourceProvider, BacklinkBatchSummary, BacklinkHeartbeat, BacklinkItemOutcome, BacklinkItemResult, BacklinkLeaseClaim, BacklinkTagResult } from '../backlinks/types.ts';
 export declare const SUPERMANAGER_BATCH_SOURCE_ID = "supermanager";
 export interface ResolvedSupermanagerConfig {
     readonly baseUrl: string;

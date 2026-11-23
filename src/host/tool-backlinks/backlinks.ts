@@ -8,6 +8,7 @@ import type { GenericCallView, GenericResultView, ToolResult } from '@deepseek-a
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import { assertNever, type JsonValue } from '../../shared/backlinks-types.ts'
 import type { BacklinkBadgeInput, BacklinkItemResult } from '../backlinks/index.ts'
+import { parseItemResult as parseValidatedItemResult } from '../backlinks/validation.ts'
 
 const ACTIONS = [
   'batch_list', 'batch_get', 'batch_claim', 'lease_heartbeat', 'lease_release',
@@ -46,43 +47,7 @@ function readOptionalString(args: Record<string, unknown>, field: string): strin
 }
 
 export function parseItemResult(args: Record<string, unknown>): BacklinkItemResult {
-  const evidence = readOptionalString(args, 'evidence')
-  switch (args.status) {
-    case 'live':
-      return {
-        status: 'live',
-        publicUrl: readNonEmpty(args, 'publicUrl'),
-        anchorText: readNonEmpty(args, 'anchorText'),
-        targetUrl: readNonEmpty(args, 'targetUrl'),
-        ...(evidence === undefined ? {} : { evidence }),
-      }
-    case 'submitted': {
-      const publicUrl = readOptionalString(args, 'publicUrl')
-      return {
-        status: 'submitted',
-        ...(publicUrl === undefined ? {} : { publicUrl }),
-        anchorText: readNonEmpty(args, 'anchorText'),
-        targetUrl: readNonEmpty(args, 'targetUrl'),
-        ...(evidence === undefined ? {} : { evidence }),
-      }
-    }
-    case 'failed': {
-      const failureMode = args.failureMode
-      if (failureMode !== 'retryable' && failureMode !== 'manual_required') {
-        throw new Error('backlinks failureMode must be retryable or manual_required.')
-      }
-      return {
-        status: 'failed',
-        failureMode,
-        failureReason: readNonEmpty(args, 'failureReason'),
-        ...(evidence === undefined ? {} : { evidence }),
-      }
-    }
-    case 'skipped':
-      return { status: 'skipped', skipReason: readNonEmpty(args, 'skipReason') }
-    default:
-      throw new Error('backlinks item_result requires status live, submitted, failed, or skipped.')
-  }
+  return parseValidatedItemResult(args)
 }
 
 export function renderBacklinksValue(value: unknown): string {

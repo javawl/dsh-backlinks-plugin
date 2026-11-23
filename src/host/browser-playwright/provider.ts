@@ -10,8 +10,8 @@ import type {
   BrowserCommand,
   BrowserResult,
   BrowserSession,
-} from '../browser/index.ts'
-import { BrowserError } from '../browser/index.ts'
+} from '../browser/types.ts'
+import { BrowserError } from '../browser/types.ts'
 import { parseControlReport, renderPageControls, VISIBLE_CONTROLS_SCRIPT } from './interactive.ts'
 
 export const PLAYWRIGHT_BROWSER_PROVIDER_ID = 'playwright'
@@ -25,6 +25,49 @@ export interface ResolvedPlaywrightConfig {
   readonly launchArgs: readonly string[]
   readonly ignoreDefaultArgs: readonly string[]
   readonly windowPosition: string | undefined
+  readonly executablePath?: string
+}
+
+async function bringPageWindowToFront(page: Page): Promise<void> {
+  // Restore minimized or offscreen (-32000,-32000) desktop Chrome windows across Windows and macOS.
+  try {
+    const client = await page.context().newCDPSession(page)
+    try {
+      const info = await client.send('Browser.getWindowForTarget')
+      const windowId = info?.windowId
+      const bounds = info?.bounds
+      if (windowId !== undefined && bounds !== undefined) {
+        if (bounds.windowState !== undefined && bounds.windowState !== 'normal') {
+          await client.send('Browser.setWindowBounds', {
+            windowId,
+            bounds: { windowState: 'normal' },
+          })
+        }
+        const offscreen = bounds.left === undefined
+          || bounds.top === undefined
+          || bounds.left < 0
+          || bounds.top < 0
+          || bounds.left > 4000
+          || bounds.top > 4000
+        if (offscreen) {
+          await client.send('Browser.setWindowBounds', {
+            windowId,
+            bounds: {
+              left: 80,
+              top: 80,
+              width: Math.max(bounds.width ?? 1280, 1024),
+              height: Math.max(bounds.height ?? 860, 720),
+            },
+          })
+        }
+      }
+    } finally {
+      await client.detach().catch(() => undefined)
+    }
+  } catch {
+    // Non-CDP browsers/tests still fall back cleanly to Playwright bringToFront().
+  }
+  await page.bringToFront()
 }
 
 function assertPositiveInteger(name: string, value: number): void {
@@ -214,6 +257,12 @@ class PlaywrightSession implements BrowserSession {
           await locator.selectOption(command.value, { timeout: this.defaultTimeoutMs })
           return { kind: 'acked' }
         }
+        case 'check': {
+          const { page } = await this.requirePage(command.page)
+          const locator = elementLocator(page, parseSelector(command.selector))
+          await locator.check({ timeout: this.defaultTimeoutMs })
+          return { kind: 'acked' }
+        }
         case 'press': {
           const { page } = await this.requirePage(command.page)
           await page.keyboard.press(command.key)
@@ -244,9 +293,24 @@ class PlaywrightSession implements BrowserSession {
           }
           return { kind: 'acked' }
         }
+        case 'probe': {
+          const { page, ref } = await this.requirePage(command.page)
+          const url = page.url()
+          const title = await page.title().catch(() => '')
+          const selectorVisible = command.selector === undefined
+            ? undefined
+            : await elementLocator(page, parseSelector(command.selector)).first().isVisible().catch(() => false)
+          return {
+            kind: 'probe',
+            page: ref,
+            url,
+            title,
+            ...(selectorVisible === undefined ? {} : { selectorVisible }),
+          }
+        }
         case 'bringToFront': {
           const { page } = await this.requirePage(command.page)
-          await page.bringToFront()
+          await bringPageWindowToFront(page)
           return { kind: 'acked' }
         }
         case 'closePage': {
@@ -362,6 +426,9 @@ export class PlaywrightBrowserProvider implements BrowserAutomationProvider {
         headless: this.config.headless,
         timeout: this.config.defaultTimeoutMs,
         ...(this.config.channel.length > 0 ? { channel: this.config.channel } : {}),
+        ...(this.config.executablePath !== undefined && this.config.executablePath.length > 0
+          ? { executablePath: this.config.executablePath }
+          : {}),
         ...(this.config.ignoreDefaultArgs.length > 0
           ? { ignoreDefaultArgs: [...this.config.ignoreDefaultArgs] }
           : {}),

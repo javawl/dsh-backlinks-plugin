@@ -7,8 +7,8 @@ import type {
   MailboxProvider,
   MailPollOptions,
   VerificationMail,
-} from '../backlinks/index.ts'
-import { BacklinksError } from '../backlinks/index.ts'
+} from '../backlinks/types.ts'
+import { BacklinksError } from '../backlinks/types.ts'
 
 export const CLOUD_MAIL_MAILBOX_ID = 'cloud-mail'
 

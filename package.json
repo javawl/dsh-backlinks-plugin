@@ -12,7 +12,8 @@
   "main": "lib/index.js",
   "types": "lib/types/host/index.d.ts",
   "bin": {
-    "dsh-backlinks-init-models": "./scripts/ensure-profile-settings.mjs"
+    "dsh-backlinks-init-models": "./scripts/ensure-profile-settings.mjs",
+    "backlinks-mcp-server": "./lib/mcp-server.mjs"
   },
   "engines": {
     "node": "^22.19.0 || >=24.0.0",
@@ -75,6 +76,7 @@
       "default": "./lib/skill-backlinks.js"
     },
     "./skill-backlinks/locale/*.json": "./locale/skill-backlinks/*.json",
+    "./mcp-server": "./lib/mcp-server.mjs",
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg",
@@ -83,7 +85,10 @@
   "files": [
     "lib",
     "skills",
+    "antigravity-plugin",
     "scripts/ensure-profile-settings.mjs",
+    "scripts/install-antigravity.mjs",
+    "docs/ANTIGRAVITY_SETUP.md",
     "profile-settings.yml",
     "cordis.patch.yml",
     "locale",
@@ -115,9 +120,11 @@
     "build:bundle": "tsdown --config tsdown.config.ts",
     "build": "pnpm run clean && pnpm run build:types && pnpm run build:bundle",
     "test": "vitest run",
-    "init-models": "node ./scripts/ensure-profile-settings.mjs"
+    "init-models": "node ./scripts/ensure-profile-settings.mjs",
+    "install:antigravity": "node ./scripts/install-antigravity.mjs"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "playwright-core": "^1.50.0",
     "zod": "^4.4.3"
   },
@@ -155,37 +162,99 @@
     "@deepseek-ai/schemastery": "*"
   },
   "peerDependenciesMeta": {
-    "@deepseek-ai/cordis": { "optional": true },
-    "@deepseek-ai/dsh-agent-preset": { "optional": true },
-    "@deepseek-ai/dsh-command-compact": { "optional": true },
-    "@deepseek-ai/dsh-compaction-basic": { "optional": true },
-    "@deepseek-ai/dsh-compaction-tool-result-pruner": { "optional": true },
-    "@deepseek-ai/dsh-home-paths": { "optional": true },
-    "@deepseek-ai/dsh-launch-environment": { "optional": true },
-    "@deepseek-ai/dsh-llm": { "optional": true },
-    "@deepseek-ai/dsh-persona": { "optional": true },
-    "@deepseek-ai/dsh-skill": { "optional": true },
-    "@deepseek-ai/dsh-skill-filesystem": { "optional": true },
-    "@deepseek-ai/dsh-system-prompt": { "optional": true },
-    "@deepseek-ai/dsh-time-context": { "optional": true },
-    "@deepseek-ai/dsh-tool-ask-user": { "optional": true },
-    "@deepseek-ai/dsh-tool-bash": { "optional": true },
-    "@deepseek-ai/dsh-tool-fs": { "optional": true },
-    "@deepseek-ai/dsh-tool-fs-search": { "optional": true },
-    "@deepseek-ai/dsh-tool-jobs": { "optional": true },
-    "@deepseek-ai/dsh-tool-present": { "optional": true },
-    "@deepseek-ai/dsh-tool-pwsh": { "optional": true },
-    "@deepseek-ai/dsh-tool-schedule": { "optional": true },
-    "@deepseek-ai/dsh-tool-skill": { "optional": true },
-    "@deepseek-ai/dsh-tool-subagent": { "optional": true },
-    "@deepseek-ai/dsh-tool-subagent-control": { "optional": true },
-    "@deepseek-ai/dsh-tool-todo": { "optional": true },
-    "@deepseek-ai/dsh-tool-web": { "optional": true },
-    "@deepseek-ai/dsh-tool-workflow": { "optional": true },
-    "@deepseek-ai/dsh-tools": { "optional": true },
-    "@deepseek-ai/dsh-typert-protocol": { "optional": true },
-    "@deepseek-ai/dsh-workflow-ptc": { "optional": true },
-    "@deepseek-ai/schemastery": { "optional": true }
+    "@deepseek-ai/cordis": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-agent-preset": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-command-compact": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-compaction-basic": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-compaction-tool-result-pruner": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-home-paths": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-launch-environment": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-llm": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-persona": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-skill": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-skill-filesystem": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-system-prompt": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-time-context": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tool-ask-user": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tool-bash": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tool-fs": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tool-fs-search": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tool-jobs": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tool-present": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tool-pwsh": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tool-schedule": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tool-skill": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tool-subagent": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tool-subagent-control": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tool-todo": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tool-web": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tool-workflow": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tools": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-typert-protocol": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-workflow-ptc": {
+      "optional": true
+    },
+    "@deepseek-ai/schemastery": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.5",

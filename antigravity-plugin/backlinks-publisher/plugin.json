@@ -1,0 +1,9 @@
+{
+  "name": "backlinks-publisher",
+  "description": "Cross-platform backlink publishing workflow: Stdio MCP server (Supermanager + Cloud-mail + persistent Chrome), Antigravity rules, and publishing skills.",
+  "version": "1.0.1",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/javawl/dsh-backlinks-plugin.git"
+  }
+}

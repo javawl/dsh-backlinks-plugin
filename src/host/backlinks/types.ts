@@ -2,7 +2,7 @@
  * Host-side provider interfaces and error class for `ctx.backlinks`.
  */
 
-import { HarnessError } from '@deepseek-ai/dsh-llm'
+import { CodedError } from '../../shared/errors.ts'
 import type {
   BacklinkBadgeInput,
   BacklinkBadgeResult,
@@ -55,7 +55,7 @@ export type BacklinksErrorCode =
   | 'BACKLINKS_TIMEOUT'
   | 'BACKLINKS_ABORTED'
 
-export class BacklinksError extends HarnessError {
+export class BacklinksError extends CodedError<BacklinksErrorCode> {
   readonly retryAfterSeconds: number | null
 
   constructor(message: string, code: BacklinksErrorCode, retryAfterSeconds: number | null = null, options?: ErrorOptions) {

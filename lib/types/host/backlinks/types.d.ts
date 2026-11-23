@@ -1,7 +1,7 @@
 /**
  * Host-side provider interfaces and error class for `ctx.backlinks`.
  */
-import { HarnessError } from '@deepseek-ai/dsh-llm';
+import { CodedError } from '../../shared/errors.ts';
 import type { BacklinkBadgeInput, BacklinkBadgeResult, BacklinkBatchDetail, BacklinkBatchSummary, BacklinkHeartbeat, BacklinkItemOutcome, BacklinkItemResult, BacklinkLeaseClaim, BacklinkTagResult, MailboxAddress, MailPollOptions, VerificationMail } from '../../shared/backlinks-types.ts';
 export type * from '../../shared/backlinks-types.ts';
 export interface BacklinkBatchSourceProvider {
@@ -26,7 +26,7 @@ export interface MailboxProvider {
     pollMail(address: MailboxAddress, options: MailPollOptions, signal?: AbortSignal): Promise<VerificationMail | null>;
 }
 export type BacklinksErrorCode = 'BACKLINKS_DUPLICATE_PROVIDER' | 'BACKLINKS_PROVIDER_CONFIGURED_MISSING' | 'BACKLINKS_PROVIDER_CONFIGURED_UNAVAILABLE' | 'BACKLINKS_PROVIDER_UNAVAILABLE' | 'BACKLINKS_PROVIDER_AMBIGUOUS' | 'BACKLINKS_UNAUTHORIZED' | 'BACKLINKS_NOT_FOUND' | 'BACKLINKS_CONFLICT' | 'BACKLINKS_INVALID_REQUEST' | 'BACKLINKS_API_ERROR' | 'BACKLINKS_TRANSPORT' | 'BACKLINKS_TIMEOUT' | 'BACKLINKS_ABORTED';
-export declare class BacklinksError extends HarnessError {
+export declare class BacklinksError extends CodedError<BacklinksErrorCode> {
     readonly retryAfterSeconds: number | null;
     constructor(message: string, code: BacklinksErrorCode, retryAfterSeconds?: number | null, options?: ErrorOptions);
 }

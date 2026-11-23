@@ -7,6 +7,7 @@
   },
   "include": [
     "src/shared/**/*.ts",
-    "src/host/**/*.ts"
+    "src/host/**/*.ts",
+    "src/mcp/**/*.ts"
   ]
 }

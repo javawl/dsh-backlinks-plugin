@@ -2,7 +2,7 @@
  * Vocabulary for the browser automation capability seam (`ctx.browser`).
  */
 
-import { HarnessError } from '@deepseek-ai/dsh-llm'
+import { CodedError } from '../../shared/errors.ts'
 
 export type BrowserCommand =
   | BrowserNavigateCommand
@@ -11,10 +11,12 @@ export type BrowserCommand =
   | BrowserClickCommand
   | BrowserFillCommand
   | BrowserSelectCommand
+  | BrowserCheckCommand
   | BrowserPressCommand
   | BrowserUploadCommand
   | BrowserScreenshotCommand
   | BrowserWaitForCommand
+  | BrowserProbeCommand
   | BrowserClosePageCommand
 
 export interface BrowserPageAddress {
@@ -58,6 +60,11 @@ export interface BrowserSelectCommand extends BrowserPageAddress {
   readonly value: string
 }
 
+export interface BrowserCheckCommand extends BrowserPageAddress {
+  readonly kind: 'check'
+  readonly selector: string
+}
+
 export interface BrowserPressCommand extends BrowserPageAddress {
   readonly kind: 'press'
   readonly key: string
@@ -80,6 +87,11 @@ export interface BrowserWaitForCommand extends BrowserPageAddress {
   readonly timeoutMs?: number
 }
 
+export interface BrowserProbeCommand extends BrowserPageAddress {
+  readonly kind: 'probe'
+  readonly selector?: string
+}
+
 export interface BrowserClosePageCommand extends BrowserPageAddress {
   readonly kind: 'closePage'
 }
@@ -88,6 +100,7 @@ export type BrowserResult =
   | BrowserPageResult
   | BrowserAckedResult
   | BrowserScreenshotResult
+  | BrowserProbeResult
 
 export interface BrowserPageResult {
   readonly kind: 'page'
@@ -105,6 +118,14 @@ export interface BrowserAckedResult {
 export interface BrowserScreenshotResult {
   readonly kind: 'screenshot'
   readonly pngBase64: string
+}
+
+export interface BrowserProbeResult {
+  readonly kind: 'probe'
+  readonly page: string
+  readonly url: string
+  readonly title: string
+  readonly selectorVisible?: boolean
 }
 
 export interface BrowserSession {
@@ -128,4 +149,4 @@ export type BrowserErrorCode =
   | 'BROWSER_ABORTED'
   | 'BROWSER_ACTION_FAILED'
 
-export class BrowserError extends HarnessError {}
+export class BrowserError extends CodedError<BrowserErrorCode> {}
