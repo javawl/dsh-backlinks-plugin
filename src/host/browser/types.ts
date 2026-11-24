@@ -29,7 +29,7 @@ export interface BrowserPageAddress {
 export interface BrowserNavigateCommand extends BrowserPageAddress {
   readonly kind: 'navigate'
   readonly url: string
-  readonly waitUntil?: 'load' | 'domcontentloaded' | 'networkidle'
+  readonly waitUntil?: 'load' | 'domcontentloaded' | 'networkidle' | 'commit'
   readonly maxChars?: number
   readonly timeoutMs?: number
   readonly siteHint?: string
@@ -270,6 +270,7 @@ export interface BrowserDirectoryAutofillResult {
   readonly url: string
   readonly title: string
   readonly autofillTriggered: boolean
+  readonly autofillConfirmClicked?: boolean
   readonly autofilledFields: readonly string[]
   readonly filledFields: readonly string[]
   readonly remainingRequired: readonly string[]

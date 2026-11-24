@@ -93,6 +93,7 @@ export type PreflightDeadReason =
   | 'invalid_url'
   | 'http_404'
   | 'http_410'
+  | 'http_507'
   | 'http_5xx_persistent'
   | 'dns_error'
   | 'tls_error'
@@ -454,6 +455,21 @@ function extractTitleAndH1(html: string): string {
     if (match[1]) parts.push(match[1])
   }
   return parts.join(' ').replace(/<[^>]+>/gu, ' ').replace(/\s+/gu, ' ').trim()
+}
+
+function detectInsufficientStorageBody(body: string): string | undefined {
+  const headingText = extractTitleAndH1(body)
+  const headingMatch = /\b507\b[^\n]*\binsufficient\s+storage\b|\binsufficient\s+storage\b/iu.exec(headingText)
+  if (headingMatch) {
+    return headingMatch[0]
+  }
+  if (body.length < 8_000) {
+    const shortMatch = /\b507\s+insufficient\s+storage\b/iu.exec(body.replace(/<[^>]+>/gu, ' '))
+    if (shortMatch) {
+      return shortMatch[0]
+    }
+  }
+  return undefined
 }
 
 function detectParkedOrSuspended(finalUrl: string, headers: Headers, body: string): string | undefined {
@@ -850,6 +866,23 @@ async function probeItemUrl(
     if (response.status === 410) {
       return { kind: 'dead', reason: 'http_410', httpStatus: 410 }
     }
+    if (response.status === 507) {
+      return {
+        kind: 'dead',
+        reason: 'http_507',
+        httpStatus: 507,
+        detail: 'Insufficient Storage',
+      }
+    }
+    const soft507Reason = detectInsufficientStorageBody(body)
+    if (soft507Reason !== undefined) {
+      return {
+        kind: 'dead',
+        reason: 'http_507',
+        httpStatus: response.status,
+        detail: soft507Reason,
+      }
+    }
     if (response.status >= 500 && response.status <= 599) {
       if (attempt < retry5xx) {
         await sleepImpl(RETRY_5XX_DELAY_MS, signal)
@@ -1244,7 +1277,7 @@ async function applyAutoFailWaf(
 
 function formatDeadSkipReason(dead: PreflightDeadItem): string {
   const details = [dead.reason, ...(dead.httpStatus === undefined ? [] : [`HTTP ${dead.httpStatus}`])]
-  if (dead.detail !== undefined && dead.detail.length > 0 && dead.reason === 'parked_or_suspended') {
+  if (dead.detail !== undefined && dead.detail.length > 0 && (dead.reason === 'parked_or_suspended' || dead.reason === 'http_507')) {
     details.push(dead.detail.slice(0, 60))
   }
   return `预检不可用(${details.join(', ')})`

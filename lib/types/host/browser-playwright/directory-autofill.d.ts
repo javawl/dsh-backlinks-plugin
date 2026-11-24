@@ -21,7 +21,9 @@ export interface DirectoryPageInspection {
     readonly title: string;
     readonly captchaDetected: boolean;
     readonly loginRequired: boolean;
+    readonly loginReason?: string;
     readonly autofillButtonSelector?: string;
+    readonly autofillButtonDisabled?: boolean;
     readonly autofillButtonBusy?: boolean;
     readonly submitSelector?: string;
     readonly fields: readonly RawDirectoryField[];
@@ -29,7 +31,19 @@ export interface DirectoryPageInspection {
     readonly fileInputs: readonly string[];
     readonly extraRequiredEmpty: readonly string[];
 }
+export interface DirectoryConfirmDialogInspection {
+    readonly detected: boolean;
+    readonly buttonSelector?: string;
+    readonly buttonLabel?: string;
+    readonly urlInputSelector?: string;
+    readonly urlInputValue?: string;
+}
 export declare const INSPECT_DIRECTORY_AUTOFILL_SCRIPT: string;
+/**
+ * Inspect visible confirmation dialogs triggered after clicking `AI Autofill` / `Auto Fill`
+ * (e.g. MkDirs confirmation popup containing an `Analyze` / `Confirm` / `Continue` button).
+ */
+export declare const INSPECT_AUTOFILL_CONFIRM_DIALOG_SCRIPT: string;
 export interface ExecuteDirectoryAutofillOptions {
     readonly defaultTimeoutMs: number;
     readonly waitAfterFetchMs?: number;

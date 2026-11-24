@@ -18,7 +18,9 @@ import type { BrowserCommentPublishCommand, BrowserCommentPublishResult, Comment
 import type { SleepLike } from '../../mcp/backlinks-tool.ts';
 export declare const DEFAULT_LAZY_WAIT_MAX_MS = 2500;
 export declare const DEFAULT_WIX_LAZY_WAIT_MAX_MS = 15000;
-export declare const DEFAULT_WIX_NAV_TIMEOUT_MS = 15000;
+export declare const DEFAULT_WIX_NAV_TIMEOUT_MS = 20000;
+export declare const DEFAULT_WIX_DOM_READY_WAIT_MS = 6000;
+export declare const DEFAULT_WIX_RELOAD_VERIFY_WAIT_MS = 10000;
 export declare const DEFAULT_WIX_EXPAND_WAIT_MAX_MS = 4000;
 export declare const DEFAULT_WIX_POST_SUBMIT_WAIT_MS = 2500;
 export interface WordPressInspection {
@@ -169,6 +171,8 @@ export interface ExecuteCommentPublishOptions {
     readonly defaultTimeoutMs: number;
     readonly lazyWaitMaxMs?: number;
     readonly wixLazyWaitMaxMs?: number;
+    readonly wixDomReadyWaitMs?: number;
+    readonly wixReloadVerifyWaitMs?: number;
     readonly wixExpandWaitMaxMs?: number;
     readonly wixPostSubmitWaitMs?: number;
     readonly sleepImpl?: SleepLike;
@@ -195,5 +199,18 @@ export interface PostSubmitWafDetection {
 /** Detect HTTP 403 or 406/429 WAF-fingerprinted blocks returned after comment submission. */
 export declare function detectPostSubmitWafBlock(input: PostSubmitWafDetectionInput): PostSubmitWafDetection;
 export declare function isNavigationContextError(error: unknown): boolean;
+export declare function isBrowserErrorPageUrl(rawUrl: string): boolean;
+/**
+ * Commit-first navigation for slow/weak-network Wix sites (`siteHint === 'wix_blog'`):
+ * enters as soon as response headers commit (20s timeout), waits best-effort for
+ * `domcontentloaded` / visible body content without failing when SSR DOM is already
+ * usable, and still throws cleanly on `commit` timeout, `chrome-error://`, or empty docs.
+ */
+export declare function navigateWixWithCommit(page: Page, url: string, options: {
+    readonly timeoutMs: number;
+    readonly domReadyWaitMs?: number;
+    readonly sleep?: SleepLike;
+    readonly signal?: AbortSignal;
+}): Promise<void>;
 export declare function inspectChildFrames(page: Page): Promise<ChildFramesInspection>;
 export declare function executeCommentPublish(page: Page, ref: string, command: BrowserCommentPublishCommand, options: ExecuteCommentPublishOptions): Promise<BrowserCommentPublishResult>;

@@ -140,10 +140,10 @@ function readUrl(value: unknown): string | undefined {
   }
 }
 
-function readWaitUntil(value: unknown): 'load' | 'domcontentloaded' | 'networkidle' | undefined {
+function readWaitUntil(value: unknown): 'load' | 'domcontentloaded' | 'networkidle' | 'commit' | undefined {
   if (value === undefined || value === null || value === '') return undefined
-  if (value === 'load' || value === 'domcontentloaded' || value === 'networkidle') return value
-  throw new Error('browser waitUntil must be load, domcontentloaded, or networkidle.')
+  if (value === 'load' || value === 'domcontentloaded' || value === 'networkidle' || value === 'commit') return value
+  throw new Error('browser waitUntil must be load, domcontentloaded, networkidle, or commit.')
 }
 
 function readPositiveInt(value: unknown, field: string): number | undefined {

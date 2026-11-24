@@ -16,7 +16,7 @@ import type {
   BrowserSubmitFeedbackResponse,
 } from '../browser/types.ts'
 import { BrowserError } from '../browser/types.ts'
-import { DEFAULT_WIX_NAV_TIMEOUT_MS, executeCommentPublish, isNavigationContextError } from './comment-publish.ts'
+import { DEFAULT_WIX_NAV_TIMEOUT_MS, executeCommentPublish, isNavigationContextError, navigateWixWithCommit } from './comment-publish.ts'
 import {
   COMPACT_TEXT_SCRIPT,
   compactAriaSnapshot,
@@ -476,17 +476,23 @@ export class PlaywrightSession implements BrowserSession {
         case 'navigate': {
           const { page, ref } = await this.resolveForNavigate(command.page)
           const baseTimeout = command.timeoutMs ?? this.defaultTimeoutMs
-          const timeout = command.siteHint === 'wix_blog'
+          const isWixHint = command.siteHint === 'wix_blog'
+          const timeout = isWixHint
             ? Math.max(baseTimeout, DEFAULT_WIX_NAV_TIMEOUT_MS)
             : baseTimeout
           const requestedWaitUntil = command.waitUntil
-          if (requestedWaitUntil === undefined) {
+          if (requestedWaitUntil === undefined && isWixHint) {
+            await navigateWixWithCommit(page, command.url, {
+              timeoutMs: timeout,
+              ...(signal === undefined ? {} : { signal }),
+            })
+          } else if (requestedWaitUntil === undefined) {
             await page.goto(command.url, { timeout, waitUntil: 'domcontentloaded' })
           } else {
             try {
               await page.goto(command.url, { timeout, waitUntil: requestedWaitUntil })
             } catch (error) {
-              if (requestedWaitUntil !== 'domcontentloaded' && NAVIGATE_TIMEOUT_PATTERN.test(String(error instanceof Error ? error.message : error))) {
+              if (requestedWaitUntil !== 'domcontentloaded' && requestedWaitUntil !== 'commit' && NAVIGATE_TIMEOUT_PATTERN.test(String(error instanceof Error ? error.message : error))) {
                 const readyState = typeof page.evaluate === 'function'
                   ? await page.evaluate(() => (globalThis as { document?: { readyState?: string } }).document?.readyState ?? '').catch(() => '')
                   : ''

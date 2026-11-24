@@ -28,7 +28,9 @@ import { dismissBlockingOverlays } from './overlay.ts'
 
 export const DEFAULT_LAZY_WAIT_MAX_MS = 2_500
 export const DEFAULT_WIX_LAZY_WAIT_MAX_MS = 15_000
-export const DEFAULT_WIX_NAV_TIMEOUT_MS = 15_000
+export const DEFAULT_WIX_NAV_TIMEOUT_MS = 20_000
+export const DEFAULT_WIX_DOM_READY_WAIT_MS = 6_000
+export const DEFAULT_WIX_RELOAD_VERIFY_WAIT_MS = 10_000
 export const DEFAULT_WIX_EXPAND_WAIT_MAX_MS = 4_000
 export const DEFAULT_WIX_POST_SUBMIT_WAIT_MS = 2_500
 const LAZY_POLL_INTERVAL_MS = 400
@@ -370,7 +372,7 @@ export const INSPECT_COMMENT_PAGE_SCRIPT = String.raw`(() => {
     }
     const anchorSel = nearestAnchor ? scopeSelectorFor(nearestAnchor) : '';
     let path = '';
-    for (let node = el, depth = 0; node && node.nodeType === 1 && depth < 16; node = node.parentElement, depth++) {
+    for (let node = el, depth = 0; node && node.nodeType === 1 && depth < 36; node = node.parentElement, depth++) {
       const tag = node.localName;
       const parent = node.parentNode;
       if (!parent) break;
@@ -384,6 +386,21 @@ export const INSPECT_COMMENT_PAGE_SCRIPT = String.raw`(() => {
       }
     }
     return '';
+  };
+
+  const safeFallbackSelectorFor = (el) => {
+    if (!el || el.nodeType !== 1) return '';
+    const hookAttr = el.getAttribute('data-hook');
+    if (hookAttr) return el.localName + '[data-hook="' + hookAttr.replace(/"/g, '\\"') + '"]';
+    const testIdAttr = el.getAttribute('data-testid');
+    if (testIdAttr) return el.localName + '[data-testid="' + testIdAttr.replace(/"/g, '\\"') + '"]';
+    const aria = el.getAttribute('aria-label');
+    if (aria) return el.localName + '[aria-label="' + aria.replace(/"/g, '\\"') + '"]';
+    const ph = el.getAttribute('placeholder');
+    if (ph) return el.localName + '[placeholder="' + ph.replace(/"/g, '\\"') + '"]';
+    if (el.getAttribute('role') === 'textbox') return el.localName + '[role="textbox"]';
+    if (el.getAttribute('contenteditable') === 'true') return el.localName + '[contenteditable="true"]';
+    return el.localName || '';
   };
 
   const docHtmlPrefix = (document.documentElement ? document.documentElement.innerHTML : '').slice(0, 65536);
@@ -934,28 +951,31 @@ export const INSPECT_COMMENT_PAGE_SCRIPT = String.raw`(() => {
       const submitEl = submitInBox || findSubmitBtn(outerScope);
       const submitScope = submitInBox ? boxScope : outerScope;
 
+      const resolvedEditorSelector = selectorFor(editorEl, boxScope) || safeFallbackSelectorFor(editorEl);
+      const resolvedSubmitSelector = submitEl ? (selectorFor(submitEl, submitScope) || safeFallbackSelectorFor(submitEl)) : '';
       wix = {
         ...wix,
         hasCommentSection: true,
         loginRequired: false,
         hasGuestEditor: true,
         hasCommentCountOnly: false,
-        editorSelector: selectorFor(editorEl, boxScope),
+        editorSelector: resolvedEditorSelector,
         editorIsContentEditable: isContentEditableEl(editorEl) || editorEl.getAttribute('role') === 'textbox',
-        ...(nameEl ? { nameSelector: selectorFor(nameEl, boxScope) } : {}),
-        ...(emailEl ? { emailSelector: selectorFor(emailEl, boxScope) } : {}),
-        ...(websiteEl ? { websiteSelector: selectorFor(websiteEl, boxScope) } : {}),
-        ...(linkBtn ? { linkButtonSelector: selectorFor(linkBtn, linkBtnScope) } : {}),
-        ...(submitEl ? { submitSelector: selectorFor(submitEl, submitScope) } : {}),
+        ...(nameEl ? { nameSelector: selectorFor(nameEl, boxScope) || safeFallbackSelectorFor(nameEl) } : {}),
+        ...(emailEl ? { emailSelector: selectorFor(emailEl, boxScope) || safeFallbackSelectorFor(emailEl) } : {}),
+        ...(websiteEl ? { websiteSelector: selectorFor(websiteEl, boxScope) || safeFallbackSelectorFor(websiteEl) } : {}),
+        ...(linkBtn ? { linkButtonSelector: selectorFor(linkBtn, linkBtnScope) || safeFallbackSelectorFor(linkBtn) } : {}),
+        ...(resolvedSubmitSelector ? { submitSelector: resolvedSubmitSelector } : {}),
       };
     } else if (triggerEl) {
+      const resolvedTriggerSelector = selectorFor(triggerEl) || safeFallbackSelectorFor(triggerEl);
       wix = {
         ...wix,
         hasCommentSection: true,
         loginRequired: false,
         hasGuestEditor: false,
         hasCommentCountOnly: false,
-        triggerSelector: selectorFor(triggerEl),
+        ...(resolvedTriggerSelector ? { triggerSelector: resolvedTriggerSelector } : {}),
       };
     }
   }
@@ -1522,7 +1542,7 @@ export function verifyCommentResultInDom(params: {
 
   // Strictly require a clickable `<a href>` link outside nav/header/footer (preferring comment containers).
   if (matchedHref === undefined) {
-    const scopeContainers = Array.from(dom.document.querySelectorAll('#comments, .comment-list, .comments-area, [data-hook*="comment"], main, article'))
+    const scopeContainers = Array.from(dom.document.querySelectorAll('#comments, .comment-list, .comments-area, [data-hook*="comment"], [data-testid*="comment"], main, article'))
     const candidateLinks: BrowserDomElementLike[] = []
     const seenLinks = new Set<BrowserDomElementLike>()
     const pushLinks = (root: { querySelectorAll(selector: string): Iterable<BrowserDomElementLike> }) => {
@@ -1535,7 +1555,6 @@ export function verifyCommentResultInDom(params: {
       }
     }
     for (const container of scopeContainers) pushLinks(container)
-    if (candidateLinks.length === 0) pushLinks(dom.document)
 
     for (const link of candidateLinks) {
       const hit = matchesTargetLink(link)
@@ -1543,6 +1562,20 @@ export function verifyCommentResultInDom(params: {
         matchedHref = hit.href
         matchedAnchor = hit.text
         break
+      }
+    }
+
+    // Fallback scan for remaining body links outside header/nav/footer (e.g. Wix comment widget mounted outside <article>).
+    if (matchedHref === undefined) {
+      for (const anchor of dom.document.querySelectorAll('a[href]')) {
+        if (seenLinks.has(anchor)) continue
+        if (anchor.closest('header, nav, footer, [role="banner"], [role="navigation"], [role="contentinfo"]')) continue
+        const hit = matchesTargetLink(anchor)
+        if (hit) {
+          matchedHref = hit.href
+          matchedAnchor = hit.text
+          break
+        }
       }
     }
   }
@@ -1568,6 +1601,8 @@ export interface ExecuteCommentPublishOptions {
   readonly defaultTimeoutMs: number
   readonly lazyWaitMaxMs?: number
   readonly wixLazyWaitMaxMs?: number
+  readonly wixDomReadyWaitMs?: number
+  readonly wixReloadVerifyWaitMs?: number
   readonly wixExpandWaitMaxMs?: number
   readonly wixPostSubmitWaitMs?: number
   readonly sleepImpl?: SleepLike
@@ -1859,8 +1894,254 @@ export function isNavigationContextError(error: unknown): boolean {
   return /execution context was destroyed|frame was detached|cannot find context with specified id|most likely because of a navigation/iu.test(msg)
 }
 
-async function scrollPageStep(page: Page, fraction: number): Promise<void> {
-  await page.evaluate((stepFraction: number) => {
+const ERROR_PAGE_URL_PATTERN = /^(?:chrome-error:|edge-error:|about:neterror|about:blank$)/iu
+
+export function isBrowserErrorPageUrl(rawUrl: string): boolean {
+  const trimmed = rawUrl.trim()
+  if (trimmed.length === 0) return true
+  return ERROR_PAGE_URL_PATTERN.test(trimmed)
+}
+
+/**
+ * Commit-first navigation for slow/weak-network Wix sites (`siteHint === 'wix_blog'`):
+ * enters as soon as response headers commit (20s timeout), waits best-effort for
+ * `domcontentloaded` / visible body content without failing when SSR DOM is already
+ * usable, and still throws cleanly on `commit` timeout, `chrome-error://`, or empty docs.
+ */
+export async function navigateWixWithCommit(
+  page: Page,
+  url: string,
+  options: {
+    readonly timeoutMs: number
+    readonly domReadyWaitMs?: number
+    readonly sleep?: SleepLike
+    readonly signal?: AbortSignal
+  },
+): Promise<void> {
+  const navTimeoutMs = Math.max(options.timeoutMs, DEFAULT_WIX_NAV_TIMEOUT_MS)
+  const domReadyWaitMs = Math.min(options.domReadyWaitMs ?? DEFAULT_WIX_DOM_READY_WAIT_MS, navTimeoutMs)
+  const sleep = options.sleep ?? defaultSleep
+
+  throwIfAborted(options.signal)
+  await page.goto(url, { timeout: navTimeoutMs, waitUntil: 'commit' })
+  throwIfAborted(options.signal)
+
+  const afterCommitUrl = typeof page.url === 'function' ? page.url() : ''
+  if (isBrowserErrorPageUrl(afterCommitUrl)) {
+    throw new BrowserError(
+      `navigation failed for ${url}: browser error page (${afterCommitUrl || 'empty'})`,
+      'BROWSER_ACTION_FAILED',
+    )
+  }
+
+  let domLoadTimedOut = false
+  let domLoadError: unknown
+  if (typeof page.waitForLoadState === 'function') {
+    try {
+      await page.waitForLoadState('domcontentloaded', { timeout: domReadyWaitMs })
+    } catch (error) {
+      throwIfAborted(options.signal)
+      domLoadTimedOut = true
+      domLoadError = error
+    }
+  }
+
+  const postWaitUrl = typeof page.url === 'function' ? page.url() : ''
+  if (isBrowserErrorPageUrl(postWaitUrl)) {
+    throw new BrowserError(
+      `navigation failed for ${url}: browser error page (${postWaitUrl || 'empty'})`,
+      'BROWSER_ACTION_FAILED',
+    )
+  }
+
+  const checkDomReady = async (): Promise<{
+    readonly hasContent: boolean
+    readonly emptyDocument: boolean
+    readonly urlError: boolean
+  }> => {
+    const liveUrl = typeof page.url === 'function' ? page.url() : ''
+    if (isBrowserErrorPageUrl(liveUrl)) {
+      return { hasContent: false, emptyDocument: true, urlError: true }
+    }
+    if (typeof page.evaluate !== 'function') {
+      if (typeof page.innerText === 'function') {
+        const txt = await page.innerText('body').catch(() => '')
+        const hasTxt = txt.trim().length > 0
+        return { hasContent: hasTxt, emptyDocument: !hasTxt, urlError: false }
+      }
+      return { hasContent: true, emptyDocument: false, urlError: false }
+    }
+    try {
+      const probe = await page.evaluate(() => {
+        const g = globalThis as unknown as {
+          document?: {
+            readyState?: string
+            title?: string
+            body?: { innerText?: string; textContent?: string; children?: { length: number } } | null
+            documentElement?: { innerHTML?: string } | null
+          }
+        }
+        const doc = g.document
+        const body = doc?.body
+        const text = String(body?.innerText || body?.textContent || '').replace(/\s+/gu, ' ').trim()
+        const childCount = body?.children ? body.children.length : 0
+        const htmlLen = doc?.documentElement?.innerHTML ? doc.documentElement.innerHTML.length : 0
+        const titleLen = String(doc?.title ?? '').trim().length
+        return {
+          textLength: text.length,
+          childCount,
+          htmlLen,
+          titleLen,
+        }
+      })
+      const hasContent = probe.textLength > 0 || probe.childCount > 0 || probe.htmlLen > 128
+      const emptyDocument = probe.textLength === 0 && probe.childCount === 0 && probe.titleLen === 0 && probe.htmlLen < 32
+      return { hasContent, emptyDocument, urlError: false }
+    } catch (error) {
+      if (isNavigationContextError(error)) {
+        return { hasContent: false, emptyDocument: false, urlError: false }
+      }
+      return { hasContent: false, emptyDocument: true, urlError: false }
+    }
+  }
+
+  let health = await checkDomReady()
+  if (health.urlError) {
+    throw new BrowserError(
+      `navigation failed for ${url}: browser error page (${typeof page.url === 'function' ? page.url() : 'unknown'})`,
+      'BROWSER_ACTION_FAILED',
+    )
+  }
+
+  if (!health.hasContent && domReadyWaitMs > 0) {
+    const pollCapMs = Math.min(2_400, domReadyWaitMs)
+    const pollDeadline = Date.now() + pollCapMs
+    const maxPolls = Math.max(1, Math.ceil(pollCapMs / 300))
+    for (let poll = 0; poll < maxPolls && Date.now() < pollDeadline && !health.hasContent; poll++) {
+      throwIfAborted(options.signal)
+      const rem = pollDeadline - Date.now()
+      if (rem <= 0) break
+      await sleep(Math.min(300, rem), options.signal)
+      health = await checkDomReady()
+      if (health.urlError) {
+        throw new BrowserError(
+          `navigation failed for ${url}: browser error page (${typeof page.url === 'function' ? page.url() : 'unknown'})`,
+          'BROWSER_ACTION_FAILED',
+        )
+      }
+    }
+  }
+
+  if (health.emptyDocument || (domLoadTimedOut && !health.hasContent)) {
+    const detail = domLoadError instanceof Error
+      ? domLoadError.message
+      : (domLoadTimedOut ? 'domcontentloaded timed out with empty document' : 'empty document after commit')
+    throw new BrowserError(
+      `navigation timed out for ${url}: ${detail}`,
+      'BROWSER_ACTION_FAILED',
+      ...(domLoadError === undefined ? [] : [{ cause: domLoadError }]),
+    )
+  }
+}
+
+/**
+ * Resolve a strict-mode-safe single locator, picking the first visible element
+ * when a selector matches multiple nodes (e.g. dual Wix `Write a comment...` buttons).
+ */
+async function resolveFirstVisibleLocator(page: Page, selector: string): Promise<ReturnType<Page['locator']>> {
+  const base = page.locator(selector)
+  const probe = base as unknown as {
+    count?: () => Promise<number>
+    nth?: (index: number) => ReturnType<Page['locator']> & { isVisible?: () => Promise<boolean> }
+    first: () => ReturnType<Page['locator']>
+  }
+  if (typeof probe.count === 'function' && typeof probe.nth === 'function') {
+    const total = await probe.count().catch(() => 0)
+    if (total > 1) {
+      const limit = Math.min(total, 10)
+      for (let i = 0; i < limit; i++) {
+        const candidate = probe.nth(i)
+        const visible = typeof candidate.isVisible === 'function'
+          ? await candidate.isVisible().catch(() => false)
+          : false
+        if (visible) return candidate
+      }
+    }
+  }
+  return base.first()
+}
+
+async function scrollPageStep(page: Page, fraction: number, scrollToBottom = false): Promise<number> {
+  if (scrollToBottom) {
+    return await page.evaluate((stepFraction: number): number => {
+      const dom = globalThis as unknown as BrowserDomGlobalLike & {
+        readonly document: BrowserDomGlobalLike['document'] & {
+          readonly documentElement?: { readonly scrollHeight?: number; readonly scrollTop?: number } | null
+          readonly body: (BrowserDomElementLike & { readonly scrollHeight?: number }) | null
+          readonly scrollingElement?: { scrollTop: number; readonly scrollHeight?: number } | null
+        }
+        readonly window: BrowserDomGlobalLike['window'] & {
+          readonly innerHeight?: number
+          readonly scrollY?: number
+          dispatchEvent?(ev: unknown): void
+        }
+        readonly Event?: new (type: string) => unknown
+      }
+      const getDocHeight = () => Math.max(
+        dom.document.documentElement?.scrollHeight ?? 0,
+        dom.document.body?.scrollHeight ?? 0,
+      )
+      const viewportH = dom.window.innerHeight ?? 0
+      const currentY = dom.window.scrollY ?? dom.document.documentElement?.scrollTop ?? 0
+      const beforeHeight = getDocHeight()
+      const wasAlreadyAtBottom = beforeHeight > viewportH && viewportH > 0 && (currentY + viewportH >= beforeHeight - 24)
+
+      const placeholder = dom.document.querySelector(
+        '[data-hook="comments-section-placeholder"], [data-hook="comment-box-placeholder"], [data-hook*="comment-box"], [data-hook="comments-section"]',
+      ) as (BrowserDomElementLike & { getBoundingClientRect?(): { bottom: number; top: number } }) | null
+      const anchor = dom.document.querySelector(
+        '#comments, #respond, form#commentform, [data-hook="top-level-comment-list"], iframe[src*="blogger.com/comment"]',
+      )
+
+      // Keep comment anchor scrolling intact while always pushing the viewport to document bottom.
+      if (placeholder && typeof placeholder.scrollIntoView === 'function') {
+        placeholder.scrollIntoView({ behavior: 'instant', block: 'center' })
+      } else if (stepFraction >= 0.65 && anchor && typeof anchor.scrollIntoView === 'function') {
+        anchor.scrollIntoView({ behavior: 'instant', block: 'center' })
+      }
+
+      const docHeight = getDocHeight()
+      if (typeof dom.window.scrollTo === 'function') {
+        dom.window.scrollTo(0, docHeight)
+      }
+      if (dom.document.scrollingElement) {
+        try {
+          dom.document.scrollingElement.scrollTop = docHeight
+        } catch {
+          // ignore readonly scrollTop in mocks
+        }
+      }
+
+      // If already parked at the same bottom and a tall footer pushed placeholder above viewport, center it.
+      if (wasAlreadyAtBottom && placeholder && typeof placeholder.getBoundingClientRect === 'function' && typeof placeholder.scrollIntoView === 'function') {
+        const rect = placeholder.getBoundingClientRect()
+        if (rect && rect.bottom < 0) {
+          placeholder.scrollIntoView({ behavior: 'instant', block: 'center' })
+        }
+      }
+
+      if (typeof dom.Event === 'function' && typeof dom.window.dispatchEvent === 'function') {
+        try {
+          dom.window.dispatchEvent(new dom.Event('scroll'))
+        } catch {
+          // ignore synthetic event errors
+        }
+      }
+      return getDocHeight()
+    }, fraction).catch(() => 0)
+  }
+
+  return await page.evaluate((stepFraction: number): number => {
     const dom = globalThis as unknown as BrowserDomGlobalLike & {
       readonly document: BrowserDomGlobalLike['document'] & {
         readonly documentElement?: { readonly scrollHeight?: number } | null
@@ -1880,12 +2161,18 @@ async function scrollPageStep(page: Page, fraction: number): Promise<void> {
     )
     if (placeholder && typeof placeholder.scrollIntoView === 'function') {
       placeholder.scrollIntoView({ behavior: 'instant', block: 'center' })
+      if (stepFraction >= 1.0 && typeof dom.window.scrollTo === 'function') {
+        dom.window.scrollTo(0, docHeight)
+      }
     } else if (stepFraction >= 0.65) {
       const anchor = dom.document.querySelector(
         '#comments, #respond, form#commentform, [data-hook="top-level-comment-list"], iframe[src*="blogger.com/comment"]',
       )
       if (anchor && typeof anchor.scrollIntoView === 'function') {
         anchor.scrollIntoView({ behavior: 'instant', block: 'center' })
+        if (stepFraction >= 1.0 && typeof dom.window.scrollTo === 'function') {
+          dom.window.scrollTo(0, docHeight)
+        }
       } else if (typeof dom.window.scrollTo === 'function') {
         dom.window.scrollTo(0, Math.round(docHeight * stepFraction))
       }
@@ -1899,7 +2186,8 @@ async function scrollPageStep(page: Page, fraction: number): Promise<void> {
         // ignore synthetic event errors
       }
     }
-  }, fraction).catch(() => undefined)
+    return docHeight
+  }, fraction).catch(() => 0)
 }
 
 interface ChildFrameEvalOutcome {
@@ -2025,7 +2313,7 @@ function hasActionableCommentSurface(inspection: CommentPageInspection): boolean
     || inspection.wix.captchaDetected
     || inspection.wix.loginRequired
     || inspection.wix.hasGuestEditor
-    || inspection.wix.triggerSelector !== undefined
+    || Boolean(inspection.wix.triggerSelector)
     || Boolean(inspection.hasBloggerCommentIframe)
     || Boolean(inspection.childFrames?.bloggerFrameUrl)
     || Boolean(inspection.childFrames?.captchaDetected)
@@ -2978,25 +3266,43 @@ export async function executeCommentPublish(
   const sleep = options.sleepImpl ?? defaultSleep
 
   throwIfAborted(options.signal)
-  await page.goto(command.url, { timeout: navTimeoutMs, waitUntil: 'domcontentloaded' })
+  if (isWixHint) {
+    await navigateWixWithCommit(page, command.url, {
+      timeoutMs: navTimeoutMs,
+      ...(options.wixDomReadyWaitMs === undefined ? {} : { domReadyWaitMs: options.wixDomReadyWaitMs }),
+      sleep,
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    })
+  } else {
+    await page.goto(command.url, { timeout: navTimeoutMs, waitUntil: 'domcontentloaded' })
+  }
   throwIfAborted(options.signal)
 
   let inspection = await inspectCommentPageWithFrames(page)
   let completedFullLazyWait = false
 
-  // Progressive multi-step scroll + anchor scrollIntoView + up to 15s Wix lazy-load polling (immediate early exit once actionable).
+  // Progressive multi-step scroll + explicit bottom/End scroll (chasing dynamic scrollHeight growth) + up to 15s Wix lazy-load polling (immediate early exit once actionable).
   if (!hasActionableCommentSurface(inspection)) {
     let activeWaitMaxMs = (inspection.isWix || isWixHint) ? wixLazyWaitMaxMs : baseLazyWaitMaxMs
     const startAt = Date.now()
     let deadline = startAt + activeWaitMaxMs
     let maxPolls = activeWaitMaxMs > 0 ? Math.max(1, Math.ceil(activeWaitMaxMs / LAZY_POLL_INTERVAL_MS)) : 0
     let exitedEarly = false
+    let lastScrollHeight = inspection.scrollHeight ?? 0
 
     for (let poll = 0; poll < maxPolls && Date.now() < deadline; poll++) {
       throwIfAborted(options.signal)
-      const steps = (inspection.isWix || isWixHint) ? WIX_PROGRESSIVE_SCROLL_STEPS : DEFAULT_PROGRESSIVE_SCROLL_STEPS
+      const isWixFlow = inspection.isWix || isWixHint
+      const steps = isWixFlow ? WIX_PROGRESSIVE_SCROLL_STEPS : DEFAULT_PROGRESSIVE_SCROLL_STEPS
       const fraction = steps[Math.min(poll, steps.length - 1)]!
-      await scrollPageStep(page, fraction)
+      const observedHeight = await scrollPageStep(page, fraction, isWixFlow)
+      const heightGrew = observedHeight > lastScrollHeight
+      if (observedHeight > 0) lastScrollHeight = observedHeight
+      if (isWixFlow && (poll === 0 || heightGrew || poll === steps.length - 1)) {
+        if (typeof page.keyboard?.press === 'function') {
+          await page.keyboard.press('End').catch(() => undefined)
+        }
+      }
 
       const remaining = deadline - Date.now()
       if (remaining <= 0) break
@@ -3132,7 +3438,7 @@ export async function executeCommentPublish(
     if (!inspection.wix.hasGuestEditor && inspection.wix.triggerSelector) {
       await dismissBlockingOverlays(page, timeoutMs)
 
-      const triggerLocator = page.locator(inspection.wix.triggerSelector).first()
+      const triggerLocator = await resolveFirstVisibleLocator(page, inspection.wix.triggerSelector)
       let clickError: unknown
       try {
         const scrollableTrigger = triggerLocator as unknown as {
@@ -3304,7 +3610,7 @@ export async function executeCommentPublish(
     if (wix.editorIsContentEditable) {
       const stripped = stripHtmlLinkForRichEditor(command.commentText, command.anchorText, command.websiteUrl)
       await dismissBlockingOverlays(page, timeoutMs)
-      const editorLocator = page.locator(editorSelector).first()
+      const editorLocator = await resolveFirstVisibleLocator(page, editorSelector)
 
       if (stripped.websiteUrl && !hasWebsiteField && wix.linkButtonSelector) {
         await editorLocator.click({ timeout: timeoutMs })
@@ -3395,7 +3701,8 @@ export async function executeCommentPublish(
       }
     } else {
       const body = buildWpCommentContent(command.commentText, command.websiteUrl, command.anchorText, hasWebsiteField)
-      await page.locator(editorSelector).first().fill(body, { timeout: timeoutMs })
+      const editorLocator = await resolveFirstVisibleLocator(page, editorSelector)
+      await editorLocator.fill(body, { timeout: timeoutMs })
     }
 
     if (wix.nameSelector && command.authorName?.trim()) {
@@ -3420,7 +3727,7 @@ export async function executeCommentPublish(
     await dismissBlockingOverlays(page, timeoutMs)
 
     // Guard against disabled submit buttons (e.g. migrated React comment boxes requiring login without login UI).
-    const wixSubmitLocator = page.locator(wix.submitSelector).first()
+    const wixSubmitLocator = await resolveFirstVisibleLocator(page, wix.submitSelector)
     if (await isLocatorDisabled(wixSubmitLocator)) {
       const loginProbe = await inspectDisabledSubmitLoginPrompt(page)
       if (loginProbe.hasLoginPrompt) {
@@ -3543,11 +3850,24 @@ export async function executeCommentPublish(
 
     if (verifyReload) {
       const cleanReloadUrl = stripWpModerationParams(command.url)
-      await page.goto(cleanReloadUrl, { timeout: timeoutMs, waitUntil: 'domcontentloaded' })
-      const reloadWaitMaxMs = Math.min(options.wixLazyWaitMaxMs ?? options.lazyWaitMaxMs ?? 5_000, timeoutMs)
+      const reloadNavTimeoutMs = Math.max(timeoutMs, DEFAULT_WIX_NAV_TIMEOUT_MS)
+      await navigateWixWithCommit(page, cleanReloadUrl, {
+        timeoutMs: reloadNavTimeoutMs,
+        ...(options.wixDomReadyWaitMs === undefined ? {} : { domReadyWaitMs: options.wixDomReadyWaitMs }),
+        sleep,
+        ...(options.signal === undefined ? {} : { signal: options.signal }),
+      })
+      const reloadWaitCeiling = Math.max(timeoutMs, DEFAULT_WIX_RELOAD_VERIFY_WAIT_MS)
+      const reloadWaitMaxMs = Math.min(
+        options.wixReloadVerifyWaitMs ?? options.wixLazyWaitMaxMs ?? options.lazyWaitMaxMs ?? DEFAULT_WIX_RELOAD_VERIFY_WAIT_MS,
+        reloadWaitCeiling,
+      )
       const reloadDeadline = Date.now() + reloadWaitMaxMs
       const reloadMaxPolls = reloadWaitMaxMs > 0 ? Math.max(1, Math.ceil(reloadWaitMaxMs / LAZY_POLL_INTERVAL_MS)) : 1
-      await scrollPageStep(page, 1.0)
+      let lastReloadScrollHeight = await scrollPageStep(page, 1.0, true)
+      if (typeof page.keyboard?.press === 'function') {
+        await page.keyboard.press('End').catch(() => undefined)
+      }
       finalVerify = (await safeVerifyResult(page, command, timeoutMs, sleep, options.signal)).verify
       for (
         let poll = 0;
@@ -3555,10 +3875,16 @@ export async function executeCommentPublish(
         && !finalVerify.liveLinkFound && !finalVerify.moderationNotice && !finalVerify.escapedHtmlDetected;
         poll++
       ) {
+        throwIfAborted(options.signal)
         const remaining = reloadDeadline - Date.now()
         if (remaining <= 0) break
         await sleep(Math.min(LAZY_POLL_INTERVAL_MS, remaining), options.signal)
-        await scrollPageStep(page, 1.0)
+        const nextReloadHeight = await scrollPageStep(page, 1.0, true)
+        const heightGrew = nextReloadHeight > lastReloadScrollHeight
+        if (nextReloadHeight > 0) lastReloadScrollHeight = nextReloadHeight
+        if ((heightGrew || poll === 0 || poll % 3 === 0) && typeof page.keyboard?.press === 'function') {
+          await page.keyboard.press('End').catch(() => undefined)
+        }
         finalVerify = (await safeVerifyResult(page, command, timeoutMs, sleep, options.signal)).verify
       }
       finalUrl = page.url()

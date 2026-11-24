@@ -325,7 +325,7 @@ describe('v2.2.1 Fix 1: Wix slow lazy-load, logged-in RCE, empty placeholder no_
   it('waits up to 14-15s for 11-13s slow Wix comments, early-exits immediately once ready, and relaxes initial goto to 15000ms for siteHint=wix_blog', async () => {
     expect(DEFAULT_WIX_LAZY_WAIT_MAX_MS).toBeGreaterThanOrEqual(14_000)
     expect(DEFAULT_WIX_LAZY_WAIT_MAX_MS).toBeLessThanOrEqual(15_000)
-    expect(DEFAULT_WIX_NAV_TIMEOUT_MS).toBe(15_000)
+    expect(DEFAULT_WIX_NAV_TIMEOUT_MS).toBe(20_000)
 
     const slowUrl = 'https://slow-freecreate-wix.example.com/post/guide-2026'
     let simulatedElapsedMs = 0
@@ -393,8 +393,8 @@ describe('v2.2.1 Fix 1: Wix slow lazy-load, logged-in RCE, empty placeholder no_
       },
     )
 
-    // Initial domcontentloaded timeout relaxed to 15000ms for siteHint === 'wix_blog'.
-    expect(gotoCalls[0]).toMatchObject({ url: slowUrl, timeout: 15_000, waitUntil: 'domcontentloaded' })
+    // Initial Wix navigation upgraded in v2.2.2 to waitUntil='commit' with 20000ms timeout for siteHint === 'wix_blog'.
+    expect(gotoCalls[0]).toMatchObject({ url: slowUrl, timeout: 20_000, waitUntil: 'commit' })
     // Waited past the old 9s cap (~12s) and exited immediately on poll #30 without running all 38 polls.
     expect(pollsBeforeReady).toBe(30)
     expect(simulatedElapsedMs).toBeGreaterThanOrEqual(11_600)
@@ -446,7 +446,7 @@ describe('v2.2.1 Fix 1: Wix slow lazy-load, logged-in RCE, empty placeholder no_
     })
     const handle = createBrowserToolHandler({ sessionManager: mgr, config: resolveMcpConfig({}) })
     await handle({ action: 'navigate', url: slowUrl, siteHint: 'wix_blog' })
-    expect(capturedCmds[0]).toMatchObject({ kind: 'navigate', siteHint: 'wix_blog', timeoutMs: 15_000 })
+    expect(capturedCmds[0]).toMatchObject({ kind: 'navigate', siteHint: 'wix_blog', timeoutMs: 20_000 })
   })
 
   it('prioritizes visible logged-in Wix comment-box-rce-wrapper + Publish without being blocked by leftover comment-count or placeholder', async () => {
@@ -1271,7 +1271,7 @@ describe('v2.2.1 Fix 4: Blogger #comment-editor role="button" Publish & WP Jetpa
     } as never, 10_000, 4_500)
 
     await session.act({ kind: 'navigate', url: 'https://slow.wixsite.com/blog/post/1', siteHint: 'wix_blog' })
-    expect(recordedOpts[0]).toMatchObject({ timeout: 15_000, waitUntil: 'domcontentloaded' })
+    expect(recordedOpts[0]).toMatchObject({ timeout: 20_000, waitUntil: 'commit' })
   })
 
   it('INSPECT_COMMENT_PAGE_SCRIPT exposes Wix empty placeholder & logged-in RCE fields cleanly', () => {
