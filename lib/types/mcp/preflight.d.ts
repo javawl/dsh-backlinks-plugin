@@ -18,6 +18,7 @@ export interface PreflightRunnableItem {
     readonly siteHint: PreflightSiteHint;
     readonly redirectedFromGo?: boolean;
     readonly rootSubmitHint?: string;
+    readonly wixSignupRecaptchaAlways?: boolean;
 }
 export interface PreflightTimeoutCluster {
     readonly pattern: string;
@@ -154,6 +155,8 @@ export declare function readBoundedBodyText(response: Response, options?: {
     readonly fullReadCapBytes?: number;
     readonly streamScanCapBytes?: number;
 }): Promise<string>;
+/** Non-destructive sniff for Wix `"signupRecaptchaOption": "ALWAYS"` (never auto-fails in cookieless HTTP preflight). */
+export declare function detectWixSignupRecaptchaAlways(body: string): boolean;
 /** Extract a lightweight site-type hint from a single HTTP preflight response (0 Chrome cost). */
 export declare function detectSiteHint(finalUrl: string, headers: Headers, body: string): PreflightSiteHint;
 /**

@@ -27,7 +27,7 @@ import type { SleepLike } from '../../mcp/backlinks-tool.ts'
 import { dismissBlockingOverlays } from './overlay.ts'
 
 export const DEFAULT_LAZY_WAIT_MAX_MS = 2_500
-export const DEFAULT_WIX_LAZY_WAIT_MAX_MS = 15_000
+export const DEFAULT_WIX_LAZY_WAIT_MAX_MS = 20_000
 export const DEFAULT_WIX_NAV_TIMEOUT_MS = 20_000
 export const DEFAULT_WIX_DOM_READY_WAIT_MS = 6_000
 export const DEFAULT_WIX_RELOAD_VERIFY_WAIT_MS = 10_000
@@ -80,6 +80,7 @@ export interface WixInspection {
   readonly hasCommentSection: boolean
   readonly loginRequired: boolean
   readonly captchaDetected: boolean
+  readonly signupRecaptchaAlways?: boolean
   readonly hasGuestEditor: boolean
   readonly hasLazyPlaceholder: boolean
   readonly hasEmptyCommentPlaceholder?: boolean
@@ -147,10 +148,19 @@ export interface CommentVerifyOutcome {
 export interface WixPostSubmitInspection {
   readonly hasCaptcha: boolean
   readonly hasLoginDialog: boolean
+  readonly signupRecaptchaAlways?: boolean
   readonly moderationNotice?: string
   readonly ackButtonSelector?: string
   readonly dialogText?: string
   readonly loginInfo?: CommentPublishLoginInfo
+}
+
+/** Matches Wix warmupData / viewerModel `"signupRecaptchaOption": "ALWAYS"` in plain or escaped JSON (case-insensitive). */
+export const WIX_SIGNUP_RECAPTCHA_ALWAYS_PATTERN =
+  /(?:\\{0,4}["']|&quot;)?signupRecaptchaOption(?:\\{0,4}["']|&quot;)?\s*:\s*(?:\\{0,4}["']|&quot;)ALWAYS(?:\\{0,4}["']|&quot;)/iu
+
+export function hasWixSignupRecaptchaAlways(raw: string): boolean {
+  return /signupRecaptchaOption/iu.test(raw) && WIX_SIGNUP_RECAPTCHA_ALWAYS_PATTERN.test(raw)
 }
 
 interface BloggerFrameInspection {
@@ -405,7 +415,7 @@ export const INSPECT_COMMENT_PAGE_SCRIPT = String.raw`(() => {
 
   const docHtmlPrefix = (document.documentElement ? document.documentElement.innerHTML : '').slice(0, 65536);
   const isWix = !!(
-    document.querySelector('[data-hook*="comment"], [id*="SITE_CONTAINER"], meta[name="generator"][content*="Wix" i], script[src*="wixstatic.com"], script[src*="parastorage.com"]')
+    document.querySelector('[data-hook*="comment"], [id*="SITE_CONTAINER"], meta[name="generator"][content*="Wix" i], script[src*="wixstatic.com"], script[src*="parastorage.com"], script#wix-warmup-data, script#wix-viewer-model')
     || /wixstatic\.com|static\.parastorage\.com|_wixCIDX|wix-warmup-data|communities-blog-ooi/i.test(docHtmlPrefix)
   );
   const isWordPress = !!(
@@ -883,10 +893,29 @@ export const INSPECT_COMMENT_PAGE_SCRIPT = String.raw`(() => {
       }
     : undefined;
 
+  const signupRecaptchaAlwaysRegex = /(?:\\{0,4}["']|&quot;)?signupRecaptchaOption(?:\\{0,4}["']|&quot;)?\s*:\s*(?:\\{0,4}["']|&quot;)ALWAYS(?:\\{0,4}["']|&quot;)/i;
+  let wixSignupRecaptchaAlways = false;
+  if (isWix) {
+    for (const scriptEl of document.querySelectorAll('script')) {
+      const scriptText = scriptEl.textContent || '';
+      if (scriptText.length > 0 && /signupRecaptchaOption/i.test(scriptText) && signupRecaptchaAlwaysRegex.test(scriptText)) {
+        wixSignupRecaptchaAlways = true;
+        break;
+      }
+    }
+    if (!wixSignupRecaptchaAlways && document.documentElement) {
+      const fullHtml = document.documentElement.innerHTML || '';
+      if (/signupRecaptchaOption/i.test(fullHtml) && signupRecaptchaAlwaysRegex.test(fullHtml)) {
+        wixSignupRecaptchaAlways = true;
+      }
+    }
+  }
+
   let wix = {
     hasCommentSection: wixHasCommentSection,
     loginRequired: wixLoginRequired,
     captchaDetected: isWix && pageVisibleCaptcha,
+    ...(wixSignupRecaptchaAlways ? { signupRecaptchaAlways: true } : {}),
     hasGuestEditor: false,
     hasLazyPlaceholder: isWix && hasLazyPlaceholder,
     hasEmptyCommentPlaceholder,
@@ -1193,9 +1222,26 @@ export const INSPECT_WIX_POST_SUBMIT_SCRIPT = String.raw`(() => {
     }
   }
 
+  const signupRecaptchaAlwaysRegex = /(?:\\{0,4}["']|&quot;)?signupRecaptchaOption(?:\\{0,4}["']|&quot;)?\s*:\s*(?:\\{0,4}["']|&quot;)ALWAYS(?:\\{0,4}["']|&quot;)/i;
+  let signupRecaptchaAlways = false;
+  for (const scriptEl of document.querySelectorAll('script')) {
+    const scriptText = scriptEl.textContent || '';
+    if (scriptText.length > 0 && /signupRecaptchaOption/i.test(scriptText) && signupRecaptchaAlwaysRegex.test(scriptText)) {
+      signupRecaptchaAlways = true;
+      break;
+    }
+  }
+  if (!signupRecaptchaAlways && document.documentElement) {
+    const fullHtml = document.documentElement.innerHTML || '';
+    if (/signupRecaptchaOption/i.test(fullHtml) && signupRecaptchaAlwaysRegex.test(fullHtml)) {
+      signupRecaptchaAlways = true;
+    }
+  }
+
   return {
     hasCaptcha,
     hasLoginDialog,
+    ...(signupRecaptchaAlways ? { signupRecaptchaAlways: true } : {}),
     ...(moderationNotice ? { moderationNotice } : {}),
     ...(ackButtonSelector ? { ackButtonSelector } : {}),
     ...(dialogText ? { dialogText } : {}),
@@ -1894,6 +1940,13 @@ export function isNavigationContextError(error: unknown): boolean {
   return /execution context was destroyed|frame was detached|cannot find context with specified id|most likely because of a navigation/iu.test(msg)
 }
 
+export function isTimeoutError(error: unknown): boolean {
+  if (error instanceof Error && error.name === 'TimeoutError') return true
+  const msg = String(error instanceof Error ? error.message : error)
+  if (/session is closed|has been closed|target closed/iu.test(msg)) return false
+  return /\btimeout\b|\btimed\s*out\b|timeout\s+\d+\s*ms\s+exceeded/iu.test(msg)
+}
+
 const ERROR_PAGE_URL_PATTERN = /^(?:chrome-error:|edge-error:|about:neterror|about:blank$)/iu
 
 export function isBrowserErrorPageUrl(rawUrl: string): boolean {
@@ -2495,6 +2548,27 @@ function buildNeedsLoginResult(
   }
 }
 
+function buildWixSignupRecaptchaBlockedResult(
+  ref: string,
+  inspection: CommentPageInspection,
+  evidence: string,
+  overrides?: { readonly finalUrl?: string; readonly title?: string },
+): BrowserCommentPublishResult {
+  return {
+    kind: 'comment_publish',
+    page: ref,
+    outcome: 'blocked_captcha',
+    siteType: 'wix',
+    title: overrides?.title ?? inspection.title,
+    finalUrl: overrides?.finalUrl ?? inspection.finalUrl,
+    reason: 'wix_signup_recaptcha_always',
+    templateSignature: 'wix:signup_recaptcha',
+    evidence,
+    suggestedTags: ['has_captcha'],
+    submitTriggered: false,
+  }
+}
+
 function buildWixNoFormDiagnosis(inspection: CommentPageInspection): string {
   if (inspection.wix.isBlogListPage) {
     return '当前页面为 Wix 博客列表/索引页（非单篇文章 /post/），需要挑选近期文章进入后再探测评论框（安全护栏拒判 no_form，未触发提交）'
@@ -2716,6 +2790,7 @@ async function submitAndVerifyStandardForm(
     readonly headers: Readonly<Record<string, string>>
     readonly bodySnippet?: string
     readonly isWpEndpoint: boolean
+    readonly isPost: boolean
     readonly isPostOrDoc: boolean
   }
   const capturedResponses: CapturedPostResponse[] = []
@@ -2735,7 +2810,8 @@ async function submitAndVerifyStandardForm(
     const method = (typeof req?.method === 'function' ? req.method() : '').toUpperCase()
     const resourceType = (typeof req?.resourceType === 'function' ? req.resourceType() : '').toLowerCase()
     const isWpEndpoint = /wp-comments-post\.php/iu.test(url)
-    const isPostOrDoc = method === 'POST' || resourceType === 'document' || resourceType === 'xhr' || resourceType === 'fetch'
+    const isPost = method === 'POST'
+    const isPostOrDoc = isPost || resourceType === 'document' || resourceType === 'xhr' || resourceType === 'fetch'
     if (!isWpEndpoint && !isPostOrDoc) return
     const headers = typeof r.headers === 'function' ? r.headers() : {}
     const entry: {
@@ -2744,8 +2820,9 @@ async function submitAndVerifyStandardForm(
       headers: Readonly<Record<string, string>>
       bodySnippet?: string
       isWpEndpoint: boolean
+      isPost: boolean
       isPostOrDoc: boolean
-    } = { url, status, headers, isWpEndpoint, isPostOrDoc }
+    } = { url, status, headers, isWpEndpoint, isPost, isPostOrDoc }
     capturedResponses.push(entry)
     if ((status === 403 || status === 406 || status === 429) && typeof r.text === 'function') {
       pendingBodyReads.push(
@@ -2768,8 +2845,12 @@ async function submitAndVerifyStandardForm(
   }
 
   // Point of no return: clicking submit marks submitTriggered=true (idempotent: never retry on uncertainty).
+  // Tolerate both navigation-context destruction and click navigation TimeoutError so slow WP 302 redirects
+  // that already landed on `#comment-<id>` / `?unapproved=` recover seamlessly into post-submit verification.
+  const preSubmitUrl = page.url()
   const navWaitTimeout = Math.min(10_000, timeoutMs)
   let navResponse: unknown = null
+  let clickTimeoutError: unknown
   try {
     const navPromise = typeof page.waitForNavigation === 'function'
       ? page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: navWaitTimeout }).catch(() => null)
@@ -2781,10 +2862,21 @@ async function submitAndVerifyStandardForm(
       navPromise,
       submitLocator.click({ timeout: timeoutMs }).catch((error: unknown) => {
         if (isNavigationContextError(error)) return null
+        if (isTimeoutError(error)) {
+          clickTimeoutError = error
+          return null
+        }
         throw error
       }),
     ])
     navResponse = navRes
+    if (clickTimeoutError !== undefined) {
+      throwIfAborted(signal)
+      if (typeof page.waitForLoadState === 'function') {
+        await page.waitForLoadState('domcontentloaded', { timeout: Math.min(2_000, timeoutMs) }).catch(() => undefined)
+      }
+      await sleep(Math.min(500, timeoutMs), signal)
+    }
     if (pendingBodyReads.length > 0) {
       await Promise.all(pendingBodyReads)
     }
@@ -2809,6 +2901,7 @@ async function submitAndVerifyStandardForm(
         status: navStatus,
         headers: typeof nr.headers === 'function' ? nr.headers() : {},
         isWpEndpoint: /wp-comments-post\.php/iu.test(navUrl),
+        isPost: false,
         isPostOrDoc: true,
       })
     }
@@ -2835,6 +2928,33 @@ async function submitAndVerifyStandardForm(
     ...(postSubmitSnippet === undefined ? {} : { postSubmitSnippet }),
     title: postTitle,
   })
+
+  if (clickTimeoutError !== undefined) {
+    const hasCommentUrlSignal = /#comment-\d+\b|[?&](?:unapproved|moderation-hash)=/iu.test(postSubmitUrl)
+    const urlChanged = postSubmitUrl !== preSubmitUrl
+    const hasSubmitResponseTrace = capturedResponses.some(
+      c => c.isWpEndpoint || c.isPost || c.status === 403 || c.status === 406 || c.status === 429,
+    )
+    const hasPostSubmitDomTrace = Boolean(
+      wafBlock.blocked
+      || postVerify.wpErrorMessage
+      || postVerify.moderationNotice
+      || postVerify.liveLinkFound
+      || postVerify.commentNodeLinkFound
+      || postVerify.escapedHtmlDetected,
+    )
+    if (!hasCommentUrlSignal && !urlChanged && !hasSubmitResponseTrace && !hasPostSubmitDomTrace) {
+      const detail = clickTimeoutError instanceof Error ? clickTimeoutError.message : String(clickTimeoutError)
+      const refreshedInspection = await inspectCommentPageWithFrames(page).catch(() => activeInspection)
+      return buildFallbackResult(
+        ref,
+        siteType,
+        refreshedInspection,
+        `点击 ${siteLabel} 提交按钮超时 (${detail.slice(0, 140)})，且页面无导航变化、无 #comment-ID 或提交痕迹，确认未完成提交，转交 LLM 核查 (submit_click_timeout)`,
+        'submit_click_timeout',
+      )
+    }
+  }
   if (wafBlock.blocked) {
     const statusCode = wafBlock.httpStatus ?? 403
     const provider = wafBlock.provider ?? 'waf'
@@ -2905,11 +3025,29 @@ async function submitAndVerifyStandardForm(
   let finalVerify = postVerify
   let finalUrl = cleanPublicUrl
   if (verifyReload) {
-    await page.goto(cleanPublicUrl, { timeout: timeoutMs, waitUntil: 'domcontentloaded' })
-    await scrollPageStep(page, 1.0)
-    const reloadCheck = await safeVerifyResult(page, command, timeoutMs, sleep, signal)
-    finalUrl = reloadCheck.currentUrl
-    finalVerify = reloadCheck.verify
+    let reloadTimedOut = false
+    try {
+      await page.goto(cleanPublicUrl, { timeout: timeoutMs, waitUntil: 'domcontentloaded' })
+    } catch (error) {
+      throwIfAborted(signal)
+      if (!isTimeoutError(error)) throw error
+      reloadTimedOut = true
+    }
+    if (!reloadTimedOut) {
+      await scrollPageStep(page, 1.0)
+      const reloadCheck = await safeVerifyResult(page, command, timeoutMs, sleep, signal)
+      finalUrl = reloadCheck.currentUrl
+      finalVerify = reloadCheck.verify
+    } else {
+      finalVerify = {
+        liveLinkFound: false,
+        escapedHtmlDetected: postVerify.escapedHtmlDetected,
+        ...(postVerify.moderationNotice === undefined ? {} : { moderationNotice: postVerify.moderationNotice }),
+        ...(postVerify.wpErrorMessage === undefined ? {} : { wpErrorMessage: postVerify.wpErrorMessage }),
+        ...(postVerify.captchaDetected === undefined ? {} : { captchaDetected: postVerify.captchaDetected }),
+        ...(postVerify.snippet === undefined ? {} : { snippet: postVerify.snippet }),
+      }
+    }
   }
   const finalTitle = await page.title().catch(() => inspection.title)
 
@@ -3281,7 +3419,7 @@ export async function executeCommentPublish(
   let inspection = await inspectCommentPageWithFrames(page)
   let completedFullLazyWait = false
 
-  // Progressive multi-step scroll + explicit bottom/End scroll (chasing dynamic scrollHeight growth) + up to 15s Wix lazy-load polling (immediate early exit once actionable).
+  // Progressive multi-step scroll + explicit bottom/End scroll (chasing dynamic scrollHeight growth) + up to 20s Wix lazy-load polling (immediate early exit once actionable).
   if (!hasActionableCommentSurface(inspection)) {
     let activeWaitMaxMs = (inspection.isWix || isWixHint) ? wixLazyWaitMaxMs : baseLazyWaitMaxMs
     const startAt = Date.now()
@@ -3427,6 +3565,13 @@ export async function executeCommentPublish(
     }
 
     if (inspection.wix.loginRequired) {
+      if (inspection.wix.signupRecaptchaAlways) {
+        return buildWixSignupRecaptchaBlockedResult(
+          ref,
+          inspection,
+          'Wix 评论区为会员登录模板且页面源码启用 signupRecaptchaOption="ALWAYS" (wix_signup_recaptcha_always)，未登录注册/Google SSO 必遇人机验证，未尝试绕过',
+        )
+      }
       return buildNeedsLoginResult(
         ref,
         'wix',
@@ -3490,6 +3635,13 @@ export async function executeCommentPublish(
           }
         }
         if (inspection.wix.loginRequired) {
+          if (inspection.wix.signupRecaptchaAlways) {
+            return buildWixSignupRecaptchaBlockedResult(
+              ref,
+              inspection,
+              '展开 Wix 评论区后触发会员登录且页面源码启用 signupRecaptchaOption="ALWAYS" (wix_signup_recaptcha_always)，未登录注册/Google SSO 必遇人机验证，未尝试绕过',
+            )
+          }
           if (!sawLoginWithoutCaptcha && poll + 1 < expandMaxPolls) {
             sawLoginWithoutCaptcha = true
             continue
@@ -3521,6 +3673,13 @@ export async function executeCommentPublish(
         }
       }
       if (inspection.wix.loginRequired) {
+        if (inspection.wix.signupRecaptchaAlways) {
+          return buildWixSignupRecaptchaBlockedResult(
+            ref,
+            inspection,
+            '展开 Wix 评论区后触发会员登录且页面源码启用 signupRecaptchaOption="ALWAYS" (wix_signup_recaptcha_always)，未登录注册/Google SSO 必遇人机验证，未尝试绕过',
+          )
+        }
         return buildNeedsLoginResult(
           ref,
           'wix',
@@ -3584,6 +3743,14 @@ export async function executeCommentPublish(
           suggestedTags: ['no_form'],
           submitTriggered: false,
         }
+      }
+
+      if (inspection.wix.signupRecaptchaAlways && !inspection.wix.isBlogListPage) {
+        return buildWixSignupRecaptchaBlockedResult(
+          ref,
+          inspection,
+          'Wix 博客文章页未挂载已登录评论编辑器且页面源码启用 signupRecaptchaOption="ALWAYS" (wix_signup_recaptcha_always)，未登录注册/Google SSO 必遇人机验证，未尝试绕过',
+        )
       }
 
       return buildFallbackResult(ref, 'wix', inspection, buildWixNoFormDiagnosis(inspection))
@@ -3731,6 +3898,13 @@ export async function executeCommentPublish(
     if (await isLocatorDisabled(wixSubmitLocator)) {
       const loginProbe = await inspectDisabledSubmitLoginPrompt(page)
       if (loginProbe.hasLoginPrompt) {
+        if (inspection.wix.signupRecaptchaAlways) {
+          return buildWixSignupRecaptchaBlockedResult(
+            ref,
+            inspection,
+            `Wix 评论提交按钮处于 disabled 状态、页面提示需要登录 (${loginProbe.matchedText ?? 'login required'}) 且启用 signupRecaptchaOption="ALWAYS" (wix_signup_recaptcha_always)，未尝试绕过`,
+          )
+        }
         return buildNeedsLoginResult(
           ref,
           'wix',
@@ -3787,6 +3961,17 @@ export async function executeCommentPublish(
       }
 
       if (postDialog.hasLoginDialog) {
+        if (inspection.wix.signupRecaptchaAlways || postDialog.signupRecaptchaAlways) {
+          return buildWixSignupRecaptchaBlockedResult(
+            ref,
+            inspection,
+            '点击 Wix Publish 后弹出 Sign Up / Log in 登录窗口且页面启用 signupRecaptchaOption="ALWAYS" (wix_signup_recaptcha_always)，未登录注册/Google SSO 必遇人机验证，未尝试绕过',
+            {
+              finalUrl: page.url(),
+              title: await page.title().catch(() => inspection.title),
+            },
+          )
+        }
         return buildNeedsLoginResult(
           ref,
           'wix',

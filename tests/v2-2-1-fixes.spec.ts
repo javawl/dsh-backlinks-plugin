@@ -322,9 +322,9 @@ function createV221MockPage(routes: Record<string, MockPageRoute>) {
 }
 
 describe('v2.2.1 Fix 1: Wix slow lazy-load, logged-in RCE, empty placeholder no_form, disabled button & Thai moderation dialog', () => {
-  it('waits up to 14-15s for 11-13s slow Wix comments, early-exits immediately once ready, and relaxes initial goto to 15000ms for siteHint=wix_blog', async () => {
+  it('waits up to 14-20s for 11-13s slow Wix comments, early-exits immediately once ready, and relaxes initial goto to 20000ms for siteHint=wix_blog', async () => {
     expect(DEFAULT_WIX_LAZY_WAIT_MAX_MS).toBeGreaterThanOrEqual(14_000)
-    expect(DEFAULT_WIX_LAZY_WAIT_MAX_MS).toBeLessThanOrEqual(15_000)
+    expect(DEFAULT_WIX_LAZY_WAIT_MAX_MS).toBeLessThanOrEqual(20_000)
     expect(DEFAULT_WIX_NAV_TIMEOUT_MS).toBe(20_000)
 
     const slowUrl = 'https://slow-freecreate-wix.example.com/post/guide-2026'

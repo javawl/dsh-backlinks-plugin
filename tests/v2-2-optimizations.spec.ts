@@ -271,9 +271,9 @@ function createRichDomMockPage(routes: Record<string, MockPageRoute>, opts?: { f
 }
 
 describe('Pillar 1: Wix comment_publish full deterministic pipeline', () => {
-  it('defaults Wix lazy wait to 14-15s, scrolls placeholder into view, supports multilingual triggers, and dismisses marketing overlays before clicking', async () => {
+  it('defaults Wix lazy wait to 14-20s, scrolls placeholder into view, supports multilingual triggers, and dismisses marketing overlays before clicking', async () => {
     expect(DEFAULT_WIX_LAZY_WAIT_MAX_MS).toBeGreaterThanOrEqual(14_000)
-    expect(DEFAULT_WIX_LAZY_WAIT_MAX_MS).toBeLessThanOrEqual(15_000)
+    expect(DEFAULT_WIX_LAZY_WAIT_MAX_MS).toBeLessThanOrEqual(20_000)
 
     const postUrl = 'https://fi.wixsite.com/blog/post/finnish-post'
     let popupDismissed = false

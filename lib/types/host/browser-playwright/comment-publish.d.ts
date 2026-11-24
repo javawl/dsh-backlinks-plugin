@@ -17,7 +17,7 @@ import type { Page } from 'playwright-core';
 import type { BrowserCommentPublishCommand, BrowserCommentPublishResult, CommentPublishFormSummary, CommentPublishLoginInfo } from '../browser/types.ts';
 import type { SleepLike } from '../../mcp/backlinks-tool.ts';
 export declare const DEFAULT_LAZY_WAIT_MAX_MS = 2500;
-export declare const DEFAULT_WIX_LAZY_WAIT_MAX_MS = 15000;
+export declare const DEFAULT_WIX_LAZY_WAIT_MAX_MS = 20000;
 export declare const DEFAULT_WIX_NAV_TIMEOUT_MS = 20000;
 export declare const DEFAULT_WIX_DOM_READY_WAIT_MS = 6000;
 export declare const DEFAULT_WIX_RELOAD_VERIFY_WAIT_MS = 10000;
@@ -63,6 +63,7 @@ export interface WixInspection {
     readonly hasCommentSection: boolean;
     readonly loginRequired: boolean;
     readonly captchaDetected: boolean;
+    readonly signupRecaptchaAlways?: boolean;
     readonly hasGuestEditor: boolean;
     readonly hasLazyPlaceholder: boolean;
     readonly hasEmptyCommentPlaceholder?: boolean;
@@ -126,11 +127,15 @@ export interface CommentVerifyOutcome {
 export interface WixPostSubmitInspection {
     readonly hasCaptcha: boolean;
     readonly hasLoginDialog: boolean;
+    readonly signupRecaptchaAlways?: boolean;
     readonly moderationNotice?: string;
     readonly ackButtonSelector?: string;
     readonly dialogText?: string;
     readonly loginInfo?: CommentPublishLoginInfo;
 }
+/** Matches Wix warmupData / viewerModel `"signupRecaptchaOption": "ALWAYS"` in plain or escaped JSON (case-insensitive). */
+export declare const WIX_SIGNUP_RECAPTCHA_ALWAYS_PATTERN: RegExp;
+export declare function hasWixSignupRecaptchaAlways(raw: string): boolean;
 /** Strip unapproved/moderation query parameters before public reload verification (preserving `#comment-ID`). */
 export declare function stripWpModerationParams(rawUrl: string): string;
 /** Build plain/HTML comment body: plain text when `url` field exists, HTML `<a>` otherwise. */
@@ -199,6 +204,7 @@ export interface PostSubmitWafDetection {
 /** Detect HTTP 403 or 406/429 WAF-fingerprinted blocks returned after comment submission. */
 export declare function detectPostSubmitWafBlock(input: PostSubmitWafDetectionInput): PostSubmitWafDetection;
 export declare function isNavigationContextError(error: unknown): boolean;
+export declare function isTimeoutError(error: unknown): boolean;
 export declare function isBrowserErrorPageUrl(rawUrl: string): boolean;
 /**
  * Commit-first navigation for slow/weak-network Wix sites (`siteHint === 'wix_blog'`):

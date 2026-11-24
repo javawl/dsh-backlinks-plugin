@@ -118,6 +118,7 @@ export interface PreflightRunnableItem {
   readonly siteHint: PreflightSiteHint
   readonly redirectedFromGo?: boolean
   readonly rootSubmitHint?: string
+  readonly wixSignupRecaptchaAlways?: boolean
 }
 
 export interface PreflightTimeoutCluster {
@@ -259,6 +260,7 @@ type ProbeOutcome =
       readonly siteHint: PreflightSiteHint
       readonly redirectedFromGo?: boolean
       readonly rootSubmitHint?: string
+      readonly wixSignupRecaptchaAlways?: boolean
     }
   | { readonly kind: 'dead'; readonly reason: PreflightDeadReason; readonly httpStatus?: number; readonly detail?: string }
   | { readonly kind: 'waf_403'; readonly provider: WafProvider }
@@ -516,6 +518,13 @@ const COMMENTS_CLOSED_HINT_PATTERN =
 const DIRECTORY_URL_PATTERN =
   /\/(submit|add-site|add-tool|add-listing|submit-site|submit-tool|suggest)(?:[/?#]|$)/iu
 const SUBMIT_LINK_PATTERN = /<a\b[^>]*href\s*=\s*["'][^"']*\/submit(?:[/?#"']|$)/iu
+const WIX_SIGNUP_RECAPTCHA_ALWAYS_PATTERN =
+  /(?:\\{0,4}["']|&quot;)?signupRecaptchaOption(?:\\{0,4}["']|&quot;)?\s*:\s*(?:\\{0,4}["']|&quot;)ALWAYS(?:\\{0,4}["']|&quot;)/iu
+
+/** Non-destructive sniff for Wix `"signupRecaptchaOption": "ALWAYS"` (never auto-fails in cookieless HTTP preflight). */
+export function detectWixSignupRecaptchaAlways(body: string): boolean {
+  return /signupRecaptchaOption/iu.test(body) && WIX_SIGNUP_RECAPTCHA_ALWAYS_PATTERN.test(body)
+}
 
 function hasNonSearchForm(body: string): boolean {
   const formRegex = /<form\b([^>]*)>/giu
@@ -906,12 +915,15 @@ async function probeItemUrl(
     if (response.status === 429) {
       return { kind: 'retryable', reason: 'http_429', httpStatus: 429 }
     }
+    const siteHint = detectSiteHint(finalUrl, response.headers, body)
+    const wixSignupRecaptchaAlways = siteHint === 'wix_blog' && detectWixSignupRecaptchaAlways(body)
     return {
       kind: 'alive',
       httpStatus: response.status,
-      siteHint: detectSiteHint(finalUrl, response.headers, body),
+      siteHint,
       ...(goHint.redirectedFromGo ? { redirectedFromGo: true } : {}),
       ...(goHint.rootSubmitHint === undefined ? {} : { rootSubmitHint: goHint.rootSubmitHint }),
+      ...(wixSignupRecaptchaAlways ? { wixSignupRecaptchaAlways: true } : {}),
     }
   }
 
@@ -1397,6 +1409,7 @@ export async function runBatchPreflight(
           siteHint: outcome.siteHint,
           ...(outcome.redirectedFromGo ? { redirectedFromGo: true } : {}),
           ...(outcome.rootSubmitHint === undefined ? {} : { rootSubmitHint: outcome.rootSubmitHint }),
+          ...(outcome.wixSignupRecaptchaAlways ? { wixSignupRecaptchaAlways: true } : {}),
         })
         if (softTags.length > 0) {
           cautionItems.push({
