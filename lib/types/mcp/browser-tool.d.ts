@@ -14,7 +14,7 @@ import type { CallToolResult, Tool } from '@modelcontextprotocol/sdk/types.js';
 import type { BrowserAutomationProvider, BrowserCommand, BrowserResult } from '../host/browser/types.ts';
 import { type McpConfig } from './config.ts';
 import type { SleepLike } from './backlinks-tool.ts';
-export declare const BROWSER_ACTIONS: readonly ["navigate", "snapshot", "click", "fill", "select", "press", "upload", "screenshot", "waitFor", "closePage", "bringToFront", "closeBrowser", "batch_fill", "wait_for_login", "comment_publish"];
+export declare const BROWSER_ACTIONS: readonly ["navigate", "snapshot", "click", "fill", "select", "press", "upload", "screenshot", "waitFor", "listPages", "closePage", "bringToFront", "closeBrowser", "batch_fill", "wait_for_login", "comment_publish", "directory_autofill"];
 export type BrowserAction = typeof BROWSER_ACTIONS[number];
 export type BatchFillOp = 'fill' | 'select' | 'click' | 'check';
 export type McpBrowserToolResult = CallToolResult;
@@ -29,6 +29,7 @@ export declare class BrowserSessionManager {
     private readonly provider;
     private session;
     private opening;
+    private closing;
     constructor(provider: BrowserAutomationProvider);
     static fromConfig(config: McpConfig): BrowserSessionManager;
     act(command: BrowserCommand, signal?: AbortSignal): Promise<BrowserResult>;

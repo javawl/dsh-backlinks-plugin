@@ -700,7 +700,7 @@ describe('MCP browser tool handler', () => {
       { kind: 'waitFor', selector: 'text:Done', nth: 3 },
       { kind: 'fill', page: 'p3', selector: 'label:Name', value: 'Tool', nth: 1 },
       { kind: 'check', page: 'p3', selector: 'label:Agree', nth: 0 },
-      { kind: 'click', page: 'p3', selector: 'role:button|Submit', nth: 2 },
+      { kind: 'click', page: 'p3', selector: 'role:button|Submit', nth: 2, captureSubmitFeedback: true },
     ])
 
     const badNth = await handle({ action: 'click', selector: 'text:Submit', nth: -1 })
@@ -738,7 +738,7 @@ describe('MCP browser tool handler', () => {
       { kind: 'fill', page: 'p2', selector: 'label:Title', value: 'Demo Tool' },
       { kind: 'select', page: 'p2', selector: 'label:Pricing', value: 'free' },
       { kind: 'check', page: 'p2', selector: 'label:Terms' },
-      { kind: 'click', page: 'p2', selector: 'role:button|Submit' },
+      { kind: 'click', page: 'p2', selector: 'role:button|Submit', captureSubmitFeedback: true },
     ])
     expect(parseToolPayload(okRes as never).data).toMatchObject({
       total: 3,

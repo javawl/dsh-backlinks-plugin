@@ -64,6 +64,11 @@ const AUTH_OR_ACTION_PATTERN =
 const COMMENT_OR_FORM_HINT_PATTERN =
   /comment|respond|reply|review|submit|form|author|email|website|url|captcha|recaptcha|moderation|awaiting|login|sign\s*in|评论|回复|提交|审核|验证码|登录/iu
 
+export const STATUS_FEEDBACK_PATTERN =
+  /\b(?:thank\s+you|thanks\s+for\s+submitting|submitted|successfully|success|pending\s+review|under\s+review|pending\s+approval|awaiting\s+moderation|already\s+submitted|already\s+exists|duplicate|error|failed|invalid|required|please\s+enter|please\s+fill)\b|提交成功|已提交|审核中|等待审核|待审核|已存在|重复提交|必填|错误|失败/iu
+
+export const SELECT_OPTION_COLLAPSE_THRESHOLD = 15
+
 interface ParsedAriaLine {
   readonly indent: number
   readonly rawTrimmed: string
@@ -73,6 +78,7 @@ interface ParsedAriaLine {
   readonly isDecorative: boolean
   readonly isInteractive: boolean
   readonly isPriority: boolean
+  readonly isStatusNotice: boolean
   readonly isWrapperOnly: boolean
   readonly formatted: string
 }
@@ -100,6 +106,7 @@ function parseAriaLine(line: string): ParsedAriaLine | undefined {
 
   if (!trimmed.startsWith('- ')) {
     const clean = truncateInline(trimmed, 140)
+    const isStatusNotice = STATUS_FEEDBACK_PATTERN.test(trimmed)
     return {
       indent,
       rawTrimmed: trimmed,
@@ -108,7 +115,8 @@ function parseAriaLine(line: string): ParsedAriaLine | undefined {
       isBoilerplate: false,
       isDecorative: false,
       isInteractive: false,
-      isPriority: false,
+      isPriority: isStatusNotice,
+      isStatusNotice,
       isWrapperOnly: false,
       formatted: `${' '.repeat(indent)}${clean}`,
     }
@@ -126,6 +134,7 @@ function parseAriaLine(line: string): ParsedAriaLine | undefined {
       isDecorative: false,
       isInteractive: false,
       isPriority: false,
+      isStatusNotice: false,
       isWrapperOnly: false,
       formatted: `${' '.repeat(indent)}- ${clean}`,
     }
@@ -135,7 +144,6 @@ function parseAriaLine(line: string): ParsedAriaLine | undefined {
     ?? /^([a-zA-Z0-9_-]+)(?:\s+"([^"]*)")?(.*)$/u.exec(body)
   const role = (roleMatch?.[1] ?? 'text').toLowerCase()
   const quotedName = roleMatch?.[2] ?? ''
-  const trailingText = (roleMatch?.[3] ?? '').trim()
 
   const isPropertyLine = role === 'text'
   const isBoilerplate = BOILERPLATE_ROLES.has(role)
@@ -143,8 +151,9 @@ function parseAriaLine(line: string): ParsedAriaLine | undefined {
     || (role === 'img' && quotedName.length === 0 && !AUTH_OR_ACTION_PATTERN.test(body))
   const isFormControl = FORM_CONTROL_ROLES.has(role)
   const isAuthOrAction = AUTH_OR_ACTION_PATTERN.test(body)
+  const isStatusNotice = role === 'alert' || role === 'alertdialog' || role === 'status' || STATUS_FEEDBACK_PATTERN.test(body)
   const isInteractive = isFormControl || ((role === 'link' || role === 'menuitem') && isAuthOrAction)
-  const isPriority = isFormControl || isAuthOrAction || COMMENT_OR_FORM_HINT_PATTERN.test(body)
+  const isPriority = isFormControl || isAuthOrAction || isStatusNotice || COMMENT_OR_FORM_HINT_PATTERN.test(body)
 
   const colonIdx = body.indexOf(':')
   const isWrapperOnly = WRAPPER_ROLES.has(role) && colonIdx >= 0 && body.slice(colonIdx + 1).trim().length === 0
@@ -173,6 +182,7 @@ function parseAriaLine(line: string): ParsedAriaLine | undefined {
     isDecorative,
     isInteractive,
     isPriority,
+    isStatusNotice,
     isWrapperOnly,
     formatted: `${' '.repeat(indent)}- ${compactBody}`,
   }
@@ -240,10 +250,74 @@ function collapseSiblingLinks(
         isDecorative: false,
         isInteractive: false,
         isPriority: false,
+        isStatusNotice: false,
         isWrapperOnly: false,
         keepPriority: false,
         formatted: `${' '.repeat(current.indent)}- ... (+${omitted} links)`,
       })
+    }
+    i = j
+  }
+
+  return { entries: out, collapsedCount }
+}
+
+/**
+ * Collapse long `<select>` / `combobox` / `listbox` option lists (> 15 options)
+ * into first 3 + `... (共 N 项)` + last 2 so a single country/state dropdown
+ * never blows the 4,500-char compact snapshot budget.
+ */
+function collapseLongOptionLists(
+  entries: readonly (ParsedAriaLine & { readonly keepPriority: boolean })[],
+): { entries: Array<ParsedAriaLine & { readonly keepPriority: boolean }>; collapsedCount: number } {
+  const out: Array<ParsedAriaLine & { readonly keepPriority: boolean }> = []
+  let collapsedCount = 0
+  let i = 0
+
+  while (i < entries.length) {
+    const current = entries[i]!
+    if (current.role !== 'option') {
+      out.push(current)
+      i++
+      continue
+    }
+
+    const optionStarts: number[] = []
+    let j = i
+    while (j < entries.length) {
+      const head = entries[j]!
+      if (head.indent !== current.indent || head.role !== 'option') break
+      optionStarts.push(j)
+      j++
+      while (j < entries.length && entries[j]!.indent > current.indent) {
+        j++
+      }
+    }
+
+    const total = optionStarts.length
+    if (total <= SELECT_OPTION_COLLAPSE_THRESHOLD) {
+      for (let k = i; k < j; k++) out.push(entries[k]!)
+    } else {
+      const headEnd = optionStarts[3]!
+      const tailStart = optionStarts[total - 2]!
+      for (let k = i; k < headEnd; k++) out.push(entries[k]!)
+      const omitted = total - 5
+      collapsedCount += omitted
+      out.push({
+        indent: current.indent,
+        rawTrimmed: `- ... (共 ${total} 项)`,
+        role: 'meta',
+        isPropertyLine: true,
+        isBoilerplate: false,
+        isDecorative: false,
+        isInteractive: false,
+        isPriority: current.keepPriority,
+        isStatusNotice: false,
+        isWrapperOnly: false,
+        keepPriority: current.keepPriority,
+        formatted: `${' '.repeat(current.indent)}- ... (共 ${total} 项)`,
+      })
+      for (let k = tailStart; k < j; k++) out.push(entries[k]!)
     }
     i = j
   }
@@ -260,30 +334,28 @@ function budgetAriaLines(
     return { text: allText, truncated: false }
   }
 
-  // Reserve budget for priority (forms, inputs, buttons, comments, alerts, auth) lines first.
   const selected = new Array<boolean>(entries.length).fill(false)
   let usedChars = 0
 
-  for (let i = 0; i < entries.length; i++) {
-    const entry = entries[i]!
-    if (!entry.keepPriority) continue
-    const cost = entry.formatted.length + (usedChars > 0 ? 1 : 0)
-    if (usedChars + cost <= maxChars) {
-      selected[i] = true
-      usedChars += cost
+  const tryPick = (predicate: (entry: ParsedAriaLine & { readonly keepPriority: boolean }) => boolean) => {
+    for (let i = 0; i < entries.length; i++) {
+      if (selected[i]) continue
+      const entry = entries[i]!
+      if (!predicate(entry)) continue
+      const cost = entry.formatted.length + (usedChars > 0 ? 1 : 0)
+      if (usedChars + cost <= maxChars) {
+        selected[i] = true
+        usedChars += cost
+      }
     }
   }
 
-  // Fill remaining budget in document order (headings and leading content first).
-  for (let i = 0; i < entries.length; i++) {
-    if (selected[i]) continue
-    const entry = entries[i]!
-    const cost = entry.formatted.length + (usedChars > 0 ? 1 : 0)
-    if (usedChars + cost <= maxChars) {
-      selected[i] = true
-      usedChars += cost
-    }
-  }
+  // Tier 1: Explicit status/success/error/alert feedback lines (exempt from truncation).
+  tryPick(entry => entry.isStatusNotice)
+  // Tier 2: Priority forms, inputs, buttons, comments, auth gates.
+  tryPick(entry => entry.keepPriority)
+  // Tier 3: Remaining headings & leading content in document order.
+  tryPick(() => true)
 
   const lines: string[] = []
   for (let i = 0; i < entries.length; i++) {
@@ -330,7 +402,7 @@ export function compactAriaSnapshot(rawAria: string, maxChars: number): CompactS
     const inPrioritySubtree = (parent?.priority ?? false) || parsed.isPriority
 
     if (inBoilerplate) {
-      if (parsed.isInteractive) {
+      if (parsed.isInteractive || parsed.isStatusNotice) {
         kept.push({ ...parsed, keepPriority: true })
         lastKeptFormatted = parsed.formatted
         stack.push({ indent: parsed.indent, boilerplate: true, priority: true })
@@ -349,7 +421,7 @@ export function compactAriaSnapshot(rawAria: string, maxChars: number): CompactS
       continue
     }
 
-    if (parsed.formatted === lastKeptFormatted && !parsed.isInteractive) {
+    if (parsed.formatted === lastKeptFormatted && !parsed.isInteractive && !parsed.isStatusNotice) {
       prunedCount++
       continue
     }
@@ -360,8 +432,9 @@ export function compactAriaSnapshot(rawAria: string, maxChars: number): CompactS
   }
 
   const withoutEmpty = dropEmptyWrappers(kept)
-  const { entries: finalEntries, collapsedCount } = collapseSiblingLinks(withoutEmpty)
-  const totalPruned = prunedCount + collapsedCount + Math.max(0, kept.length - withoutEmpty.length)
+  const { entries: withCollapsedLinks, collapsedCount: collapsedLinks } = collapseSiblingLinks(withoutEmpty)
+  const { entries: finalEntries, collapsedCount: collapsedOptions } = collapseLongOptionLists(withCollapsedLinks)
+  const totalPruned = prunedCount + collapsedLinks + collapsedOptions + Math.max(0, kept.length - withoutEmpty.length)
 
   const compactedUnbounded = finalEntries.map(e => e.formatted).join('\n')
   const reductionPct = rawAria.length > 0
@@ -398,27 +471,58 @@ export const COMPACT_TEXT_SCRIPT = String.raw`(() => {
   const buttons = Array.from(document.querySelectorAll('button,input[type="submit"],input[type="button"]')).filter(b => !isHidden(b));
   const iframes = Array.from(document.querySelectorAll('iframe')).filter(f => !isHidden(f));
 
+  const formatSelectSummary = (selectEl) => {
+    const opts = Array.from(selectEl.options || []).map(o => clean(o.textContent || o.value)).filter(Boolean);
+    if (opts.length === 0) return '';
+    if (opts.length <= 15) return ' [' + opts.slice(0, 6).join(', ') + (opts.length > 6 ? ', ...' : '') + ']';
+    const head = opts.slice(0, 3);
+    const tail = opts.slice(-2);
+    return ' [' + head.join(', ') + ', ... (共 ' + opts.length + ' 项), ' + tail.join(', ') + ']';
+  };
+
   const formLines = forms.slice(0, 8).map((form, idx) => {
     const action = clean(form.getAttribute('action'));
     const idAttr = form.id ? '#' + form.id : '';
     const ctrls = Array.from(form.querySelectorAll('input:not([type="hidden"]),textarea,select,button'))
       .filter(c => !isHidden(c))
-      .slice(0, 12)
+      .slice(0, 14)
       .map(c => {
         const tag = c.localName;
-        const name = clean(c.getAttribute('name') || c.id || c.getAttribute('placeholder') || c.getAttribute('aria-label') || clean(c.textContent));
         const type = tag === 'input' ? ':' + (c.type || 'text') : '';
-        return name ? tag + type + '(' + name.slice(0, 32) + ')' : tag + type;
+        const idSel = c.id ? '#' + clean(c.id).slice(0, 32) : '';
+        const nameVal = clean(c.getAttribute('name'));
+        const nameSel = nameVal ? '[name="' + nameVal.slice(0, 32) + '"]' : '';
+        const hint = clean(c.getAttribute('placeholder') || c.getAttribute('aria-label') || (tag === 'button' ? clean(c.textContent) : ''));
+        const selPart = idSel + nameSel;
+        const labelPart = selPart
+          ? (tag === 'button' && hint ? '(' + hint.slice(0, 28) + ')' : '')
+          : (hint ? '(' + hint.slice(0, 32) + ')' : '');
+        const optsPart = tag === 'select' ? formatSelectSummary(c) : '';
+        return tag + type + selPart + labelPart + optsPart;
       });
     return 'form[' + idx + ']' + idAttr + (action ? ' action=' + action.slice(0, 60) : '') + ': ' + (ctrls.join(', ') || '(no visible fields)');
   });
 
+  const statusKeywordRegex = /\b(?:thank\s+you|thanks\s+for\s+submitting|submitted|successfully|pending\s+review|under\s+review|pending\s+approval|awaiting\s+moderation|already\s+submitted|already\s+exists|error|required|please\s+enter|please\s+fill)\b|提交成功|已提交|审核中|等待审核|待审核|已存在|必填|错误|失败/i;
   const alerts = [];
+  const pushAlert = (rawText) => {
+    const text = clean(rawText).slice(0, 200);
+    if (text && !alerts.includes(text) && alerts.length < 8) alerts.push(text);
+  };
   for (const el of document.querySelectorAll('[role="alert"],[role="alertdialog"],[role="status"],.comment-awaiting-moderation,.wp-die-message,#error-page')) {
     if (isHidden(el)) continue;
-    const text = clean(el.innerText || el.textContent).slice(0, 200);
-    if (text && !alerts.includes(text)) alerts.push(text);
-    if (alerts.length >= 5) break;
+    pushAlert(el.innerText || el.textContent);
+  }
+  if (alerts.length < 8) {
+    for (const el of document.querySelectorAll('p,span,div,li,strong,small,h1,h2,h3,label')) {
+      if (alerts.length >= 8) break;
+      if (isHidden(el) || el.closest('script,style,noscript,svg')) continue;
+      if (el.children && el.children.length > 3) continue;
+      const text = clean(el.innerText || el.textContent);
+      if (text.length >= 3 && text.length <= 220 && statusKeywordRegex.test(text)) {
+        pushAlert(text);
+      }
+    }
   }
 
   const rawBodyText = clean(document.body ? (document.body.innerText || document.body.textContent) : '');
@@ -529,8 +633,9 @@ export function compactPlainText(rawText: string, maxChars: number): CompactSnap
     prev = normalized
   }
 
-  const priority = cleaned.filter(line => COMMENT_OR_FORM_HINT_PATTERN.test(line))
-  const regular = cleaned.filter(line => !COMMENT_OR_FORM_HINT_PATTERN.test(line))
+  const statusLines = cleaned.filter(line => STATUS_FEEDBACK_PATTERN.test(line))
+  const priority = cleaned.filter(line => COMMENT_OR_FORM_HINT_PATTERN.test(line) || STATUS_FEEDBACK_PATTERN.test(line))
+  const regular = cleaned.filter(line => !COMMENT_OR_FORM_HINT_PATTERN.test(line) && !STATUS_FEEDBACK_PATTERN.test(line))
   const unbounded = cleaned.join('\n')
   const reductionPct = rawText.length > 0
     ? Math.max(0, Math.round((1 - unbounded.length / rawText.length) * 100))
@@ -541,21 +646,17 @@ export function compactPlainText(rawText: string, maxChars: number): CompactSnap
     return { text: unbounded, truncated: false, compactSummary }
   }
 
-  // Keep priority lines first, then fill with leading regular content in order.
+  // Keep status/error/thank-you lines first, then form/comment priority lines, then leading content.
   const selected = new Set<string>()
   let used = 0
-  for (const line of priority) {
-    const cost = line.length + (used > 0 ? 1 : 0)
-    if (used + cost <= maxChars) {
-      selected.add(line)
-      used += cost
-    }
-  }
-  for (const line of regular) {
-    const cost = line.length + (used > 0 ? 1 : 0)
-    if (used + cost <= maxChars) {
-      selected.add(line)
-      used += cost
+  for (const list of [statusLines, priority, regular]) {
+    for (const line of list) {
+      if (selected.has(line)) continue
+      const cost = line.length + (used > 0 ? 1 : 0)
+      if (used + cost <= maxChars) {
+        selected.add(line)
+        used += cost
+      }
     }
   }
   const ordered = cleaned.filter(line => selected.has(line))

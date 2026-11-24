@@ -36,12 +36,14 @@ export const BROWSER_ACTIONS = [
   'upload',
   'screenshot',
   'waitFor',
+  'listPages',
   'closePage',
   'bringToFront',
   'closeBrowser',
   'batch_fill',
   'wait_for_login',
   'comment_publish',
+  'directory_autofill',
 ] as const
 
 export type BrowserAction = typeof BROWSER_ACTIONS[number]
@@ -59,7 +61,7 @@ export interface BatchFillField {
 export const BROWSER_TOOL_DEFINITION: Tool = {
   name: 'browser',
   description:
-    'Drive one shared persistent real-Chrome session across tabs: comment_publish (deterministic 1-call WordPress/Wix comment probe, fill, submit & reload verification), navigate (compact summary), snapshot (compact by default at 4500 chars; full=true to expand), click/fill/select/press/upload/screenshot/waitFor, batch_fill, wait_for_login, bringToFront, closePage, and closeBrowser.',
+    'Drive one shared persistent real-Chrome session across tabs: comment_publish (deterministic WordPress/Wix/Typecho/Blogger comment probe, fill, submit & reload verification), directory_autofill (MkDirs / AI-Autofill URL fetch + backfill fast-path), navigate (domcontentloaded priority, compact summary), snapshot (compact by default at 4500 chars with >15-option select collapsing; full=true to expand), click/fill/select/press/upload/screenshot/waitFor, batch_fill (with post-submit dialog/XHR/toast submitFeedback), wait_for_login, listPages (active tabs & OAuth popups), bringToFront, closePage, and closeBrowser.',
   inputSchema: {
     type: 'object',
     additionalProperties: false,
@@ -72,11 +74,11 @@ export const BROWSER_TOOL_DEFINITION: Tool = {
       },
       page: {
         type: 'string',
-        description: 'Tab ref (e.g. p1, g1). Pass on every command for parallel tab isolation; omit for single-tab serial work.',
+        description: 'Tab ref (e.g. p1, g1, popup1). Pass on every command for parallel tab isolation; omit for single-tab serial work.',
       },
       url: {
         type: 'string',
-        description: 'Absolute http(s) URL for navigate / comment_publish; target URL pattern for waitFor.',
+        description: 'Absolute http(s) URL for navigate / comment_publish / optional directory_autofill submit page; target URL pattern for waitFor.',
       },
       selector: {
         type: 'string',
@@ -89,7 +91,7 @@ export const BROWSER_TOOL_DEFINITION: Tool = {
       format: {
         type: 'string',
         enum: ['text', 'aria', 'interactive'],
-        description: 'Snapshot format: text, aria, or interactive (reveals icon-only sign-in buttons, iframes, and sign-in candidates).',
+        description: 'Snapshot format: text, aria, or interactive (reveals icon-only sign-in buttons, input[type=url], iframes, and sign-in candidates).',
       },
       full: {
         type: 'boolean',
@@ -105,7 +107,7 @@ export const BROWSER_TOOL_DEFINITION: Tool = {
       waitUntil: {
         type: 'string',
         enum: ['load', 'domcontentloaded', 'networkidle'],
-        description: 'Navigation load condition for navigate.',
+        description: 'Navigation load condition for navigate (defaults to domcontentloaded; load timeout gracefully returns when DOM is ready).',
       },
       maxChars: {
         type: 'integer',
@@ -113,7 +115,7 @@ export const BROWSER_TOOL_DEFINITION: Tool = {
       },
       timeoutMs: {
         type: 'integer',
-        description: 'Timeout in ms for navigate (default 10000; overridable per call, recommend 8000-10000), comment_publish (default 10000), waitFor (default 10000), or wait_for_login (default 300000).',
+        description: 'Timeout in ms for navigate (default 10000; overridable per call, recommend 8000-10000), comment_publish (default 10000), directory_autofill (default 10000), waitFor (default 10000), or wait_for_login (default 300000).',
       },
       commentText: {
         type: 'string',
@@ -129,11 +131,31 @@ export const BROWSER_TOOL_DEFINITION: Tool = {
       },
       websiteUrl: {
         type: 'string',
-        description: 'For comment_publish: target promoted URL (filled into Website field or embedded as anchor link).',
+        description: 'For comment_publish / directory_autofill: target promoted URL (filled into Website/URL field or embedded as anchor link).',
       },
       anchorText: {
         type: 'string',
         description: 'For comment_publish: optional anchor text used when embedding link into comment body.',
+      },
+      name: {
+        type: 'string',
+        description: 'For directory_autofill: product/site name used to backfill if autofill leaves Name empty.',
+      },
+      tagline: {
+        type: 'string',
+        description: 'For directory_autofill: short tagline/summary used to backfill if autofill leaves Tagline empty.',
+      },
+      description: {
+        type: 'string',
+        description: 'For directory_autofill: long description used to backfill if autofill leaves Description empty.',
+      },
+      email: {
+        type: 'string',
+        description: 'For directory_autofill: submitter email used to backfill if Email input is empty.',
+      },
+      waitAfterFetchMs: {
+        type: 'integer',
+        description: 'For directory_autofill: max wait time in ms after clicking Fetch/Autofill (default 4000).',
       },
       verifyReload: {
         type: 'boolean',
@@ -167,11 +189,15 @@ export const BROWSER_TOOL_DEFINITION: Tool = {
       },
       submitTarget: {
         type: 'string',
-        description: 'For batch_fill: optional submit button selector clicked only when all fields succeed.',
+        description: 'For batch_fill: optional submit button selector clicked only when all fields succeed (automatically captures post-submit dialog/XHR/toast submitFeedback).',
       },
       submitNth: {
         type: 'integer',
         description: 'For batch_fill: optional 0-based element index for submitTarget when it matches multiple elements.',
+      },
+      feedbackWaitMs: {
+        type: 'integer',
+        description: 'For batch_fill with submitTarget: post-submit feedback capture wait in ms (default 2000, max 5000).',
       },
       stopOnError: {
         type: 'boolean',
@@ -200,6 +226,7 @@ export const BROWSER_TOOL_DEFINITION: Tool = {
 export class BrowserSessionManager {
   private session: BrowserSession | undefined
   private opening: Promise<BrowserSession> | undefined
+  private closing: Promise<void> | undefined
 
   constructor(private readonly provider: BrowserAutomationProvider) {}
 
@@ -219,7 +246,10 @@ export class BrowserSessionManager {
   }
 
   async act(command: BrowserCommand, signal?: AbortSignal): Promise<BrowserResult> {
-    const session = await this.ensureSession(signal)
+    if (signal?.aborted) {
+      throw new BrowserError('browser command aborted before dispatch', 'BROWSER_ABORTED')
+    }
+    let session = await this.ensureSession(signal)
     if (signal?.aborted) {
       throw new BrowserError('browser command aborted before dispatch', 'BROWSER_ABORTED')
     }
@@ -227,12 +257,21 @@ export class BrowserSessionManager {
       return await session.act(command, signal)
     } catch (error) {
       if (error instanceof BrowserError) {
+        const isPreDispatchClosed = error.message === 'browser session is closed'
+        if (isPreDispatchClosed) {
+          await this.discardSession(session)
+          session = await this.ensureSession(signal)
+          if (signal?.aborted) {
+            throw new BrowserError('browser command aborted before dispatch', 'BROWSER_ABORTED')
+          }
+          return await session.act(command, signal)
+        }
         if (error.message.includes('has been closed') || error.message.includes('session is closed')) {
-          await this.discardSession()
+          await this.discardSession(session)
         }
         throw error
       }
-      await this.discardSession()
+      await this.discardSession(session)
       throw new BrowserError(
         `browser command "${command.kind}" failed: ${error instanceof Error ? error.message : String(error)}`,
         'BROWSER_ACTION_FAILED',
@@ -246,30 +285,67 @@ export class BrowserSessionManager {
     await this.discardSession()
   }
 
-  private ensureSession(signal?: AbortSignal): Promise<BrowserSession> {
-    if (this.session) return Promise.resolve(this.session)
-    this.opening ??= this.launchSession(signal).then(
-      (session) => {
-        this.opening = undefined
-        return session
-      },
-      (error: unknown) => {
-        this.opening = undefined
-        throw error
-      },
-    )
-    return this.opening
+  private async ensureSession(signal?: AbortSignal): Promise<BrowserSession> {
+    while (true) {
+      if (signal?.aborted) {
+        throw new BrowserError('browser launch aborted', 'BROWSER_ABORTED')
+      }
+      if (this.closing) {
+        await this.closing.catch(() => undefined)
+        continue
+      }
+      if (this.session) {
+        if (this.session.isClosed?.() === true) {
+          await this.discardSession(this.session)
+          continue
+        }
+        return this.session
+      }
+      if (!this.opening) {
+        this.opening = this.launchSession().then(
+          (session) => {
+            this.opening = undefined
+            return session
+          },
+          (error: unknown) => {
+            this.opening = undefined
+            throw error
+          },
+        )
+      }
+      const pending = this.opening
+      if (!signal) {
+        return await pending
+      }
+      return await new Promise<BrowserSession>((resolve, reject) => {
+        if (signal.aborted) {
+          reject(new BrowserError('browser launch aborted', 'BROWSER_ABORTED'))
+          return
+        }
+        const onAbort = () => {
+          reject(new BrowserError('browser launch aborted', 'BROWSER_ABORTED'))
+        }
+        signal.addEventListener('abort', onAbort, { once: true })
+        pending.then(
+          (session) => {
+            signal.removeEventListener('abort', onAbort)
+            resolve(session)
+          },
+          (err: unknown) => {
+            signal.removeEventListener('abort', onAbort)
+            reject(err)
+          },
+        )
+      })
+    }
   }
 
-  private async launchSession(signal?: AbortSignal): Promise<BrowserSession> {
+  private async launchSession(): Promise<BrowserSession> {
     if (!this.provider.available()) {
       throw new BrowserError(`browser provider "${this.provider.id}" is unavailable`, 'BROWSER_PROVIDER_UNAVAILABLE')
     }
-    if (signal?.aborted) {
-      throw new BrowserError('browser launch aborted', 'BROWSER_ABORTED')
-    }
     try {
-      const session = await this.provider.open(signal)
+      const session = await this.provider.open()
       this.session = session
       return session
     } catch (error) {
@@ -282,14 +358,29 @@ export class BrowserSessionManager {
     }
   }
 
-  private async discardSession(): Promise<void> {
+  private async discardSession(expectedSession?: BrowserSession): Promise<void> {
+    if (this.closing) {
+      await this.closing.catch(() => undefined)
+      if (expectedSession === undefined || this.session !== expectedSession) {
+        return
+      }
+    }
+    if (expectedSession !== undefined && this.session !== expectedSession) {
+      return
+    }
     const session = this.session
     this.session = undefined
-    try {
-      await session?.close()
-    } catch {
-      // ignore close errors on dead browser
-    }
+    if (!session) return
+    const closePromise = Promise.resolve()
+      .then(() => session.close())
+      .catch(() => undefined)
+      .finally(() => {
+        if (this.closing === closePromise) {
+          this.closing = undefined
+        }
+      })
+    this.closing = closePromise
+    await closePromise
   }
 }
 
@@ -427,12 +518,47 @@ export function formatMcpBrowserOutput(result: BrowserResult, maxChars: number):
       const body = result.text.slice(0, maxChars) + (truncated ? '\n… (truncated)' : '')
       return `${header}\n\n${body}`
     }
-    case 'acked':
-      return 'ok'
+    case 'acked': {
+      const hasPopups = result.openedPages !== undefined && result.openedPages.length > 0
+      const hasFeedback = result.submitFeedback !== undefined
+      if (!hasPopups && !hasFeedback) return 'ok'
+      const payload = {
+        ok: true,
+        ...(result.popupPageRef === undefined ? {} : { popupPageRef: result.popupPageRef }),
+        ...(hasPopups ? { openedPages: result.openedPages } : {}),
+        ...(hasFeedback ? { submitFeedback: result.submitFeedback } : {}),
+      }
+      const header = hasPopups
+        ? `ok (opened popup ${result.popupPageRef})`
+        : 'ok (submitFeedback captured)'
+      return `${header}\n${JSON.stringify(payload)}`
+    }
     case 'screenshot':
       return `screenshot captured (${result.pngBase64.length} base64 characters)`
     case 'probe':
       return `[page ${result.page}] ${result.title}\n${result.url}`
+    case 'pages': {
+      const summary = `pages: ${result.pages.length} open (${result.pages.map(p => `${p.ref}${p.isPopup ? '[popup]' : ''}`).join(', ') || 'none'})`
+      return `${summary}\n${JSON.stringify({ pages: result.pages })}`
+    }
+    case 'directory_autofill': {
+      const payload = {
+        page: result.page,
+        outcome: result.outcome,
+        url: result.url,
+        title: result.title,
+        autofillTriggered: result.autofillTriggered,
+        autofilledFields: result.autofilledFields,
+        filledFields: result.filledFields,
+        remainingRequired: result.remainingRequired,
+        fields: result.fields,
+        ...(result.selects === undefined ? {} : { selects: result.selects }),
+        ...(result.fileInputs === undefined ? {} : { fileInputs: result.fileInputs }),
+        ...(result.submitSelector === undefined ? {} : { submitSelector: result.submitSelector }),
+        ...(result.evidence === undefined ? {} : { evidence: result.evidence }),
+      }
+      return `[page ${result.page}] directory_autofill: ${result.outcome} -> ${result.url}\n${JSON.stringify(payload)}`
+    }
     case 'comment_publish': {
       const targetDisplay = result.publicUrl ?? result.finalUrl
       const payload = {
@@ -443,11 +569,17 @@ export function formatMcpBrowserOutput(result: BrowserResult, maxChars: number):
         finalUrl: result.finalUrl,
         ...(result.publicUrl === undefined ? {} : { publicUrl: result.publicUrl }),
         ...(result.evidence === undefined ? {} : { evidence: result.evidence }),
+        ...(result.reason === undefined ? {} : { reason: result.reason }),
         ...(result.skipReason === undefined ? {} : { skipReason: result.skipReason }),
         ...(result.templateSignature === undefined ? {} : { templateSignature: result.templateSignature }),
         ...(result.suggestedTags === undefined ? {} : { suggestedTags: result.suggestedTags }),
         submitTriggered: result.submitTriggered,
         ...(result.probeOnly === undefined ? {} : { probeOnly: result.probeOnly }),
+        ...(result.loginInfo === undefined ? {} : { loginInfo: result.loginInfo }),
+        ...(result.postSubmitUrl === undefined ? {} : { postSubmitUrl: result.postSubmitUrl }),
+        ...(result.postSubmitSnippet === undefined ? {} : { postSubmitSnippet: result.postSubmitSnippet }),
+        ...(result.popupPageRef === undefined ? {} : { popupPageRef: result.popupPageRef }),
+        ...(result.openedPages === undefined ? {} : { openedPages: result.openedPages }),
         ...(result.formSummary === undefined ? {} : { formSummary: result.formSummary }),
         ...(result.bottomSnapshot === undefined ? {} : { bottomSnapshot: result.bottomSnapshot }),
       }
@@ -512,6 +644,7 @@ export function createBrowserToolHandler(deps: BrowserToolDependencies) {
         const fields = parseBatchFillFields(args.fields)
         const submitTarget = readSelector(args.submitTarget, 'submitTarget')
         const submitNth = readNonNegativeInt(args.submitNth, 'submitNth')
+        const feedbackWaitMs = readNonNegativeInt(args.feedbackWaitMs, 'feedbackWaitMs')
         if (args.stopOnError !== undefined && typeof args.stopOnError !== 'boolean') {
           throw new Error('browser stopOnError must be a boolean.')
         }
@@ -578,6 +711,9 @@ export function createBrowserToolHandler(deps: BrowserToolDependencies) {
               readonly skippedReason?: string
             }
           | undefined
+        let submitFeedback: unknown
+        let popupPageRef: string | undefined
+        let openedPages: unknown
 
         if (submitTarget !== undefined) {
           if (failed > 0) {
@@ -589,14 +725,25 @@ export function createBrowserToolHandler(deps: BrowserToolDependencies) {
             }
           } else {
             try {
-              await sessionManager.act(
+              const submitRes = await sessionManager.act(
                 addressed({
                   kind: 'click',
                   selector: submitTarget,
                   ...(submitNth === undefined ? {} : { nth: submitNth }),
+                  captureSubmitFeedback: true,
+                  ...(feedbackWaitMs === undefined ? {} : { feedbackWaitMs }),
                 }),
                 signal,
               )
+              if (submitRes.kind === 'acked') {
+                if (submitRes.submitFeedback !== undefined) {
+                  submitFeedback = submitRes.submitFeedback
+                }
+                if (submitRes.popupPageRef !== undefined) {
+                  popupPageRef = submitRes.popupPageRef
+                  openedPages = submitRes.openedPages
+                }
+              }
               submit = { target: submitTarget, attempted: true, ok: true }
             } catch (error) {
               if (signal?.aborted || (error instanceof BrowserError && error.code === 'BROWSER_ABORTED')) {
@@ -619,6 +766,8 @@ export function createBrowserToolHandler(deps: BrowserToolDependencies) {
           failed,
           results,
           ...(submit === undefined ? {} : { submit }),
+          ...(submitFeedback === undefined ? {} : { submitFeedback }),
+          ...(popupPageRef === undefined ? {} : { popupPageRef, openedPages }),
         }
         const submitSummary = submit === undefined
           ? ''
@@ -863,6 +1012,33 @@ export function createBrowserToolHandler(deps: BrowserToolDependencies) {
             ...(url === undefined ? {} : { url }),
             ...(timeoutMs === undefined ? {} : { timeoutMs }),
           })
+          break
+        case 'directory_autofill': {
+          const targetPageUrl = args.url === undefined ? undefined : readUrl(args.url, 'url')
+          const websiteUrl = readUrl(args.websiteUrl, 'websiteUrl')
+          if (websiteUrl === undefined) {
+            throw new Error('browser directory_autofill requires an http(s) websiteUrl.')
+          }
+          const siteName = readNonEmpty(args.name, 'name') ?? readNonEmpty(args.authorName, 'authorName')
+          const tagline = readNonEmpty(args.tagline, 'tagline')
+          const description = readNonEmpty(args.description, 'description')
+          const email = readNonEmpty(args.email, 'email') ?? readNonEmpty(args.authorEmail, 'authorEmail')
+          const waitAfterFetchMs = readPositiveInt(args.waitAfterFetchMs, 'waitAfterFetchMs')
+          command = addressed({
+            kind: 'directory_autofill',
+            ...(targetPageUrl === undefined ? {} : { url: targetPageUrl }),
+            websiteUrl,
+            ...(siteName === undefined ? {} : { name: siteName }),
+            ...(tagline === undefined ? {} : { tagline }),
+            ...(description === undefined ? {} : { description }),
+            ...(email === undefined ? {} : { email }),
+            ...(waitAfterFetchMs === undefined ? {} : { waitAfterFetchMs }),
+            timeoutMs: timeoutMs ?? config.browserTimeoutMs,
+          })
+          break
+        }
+        case 'listPages':
+          command = addressed({ kind: 'listPages' })
           break
         case 'closePage':
           command = addressed({ kind: 'closePage' })

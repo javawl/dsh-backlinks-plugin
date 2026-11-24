@@ -169,6 +169,10 @@ export function formatBrowserOutput(result: BrowserResult, maxChars: number): st
       return `screenshot captured (${result.pngBase64.length} base64 characters)`
     case 'probe':
       return `[page ${result.page}] ${result.title}\n${result.url}`
+    case 'pages':
+      return `pages: ${result.pages.length} open (${result.pages.map(p => p.ref).join(', ') || 'none'})`
+    case 'directory_autofill':
+      return `[page ${result.page}] directory_autofill: ${result.outcome} -> ${result.url}`
     case 'comment_publish':
       return `[page ${result.page}] comment_publish: ${result.outcome} (${result.siteType}) -> ${result.publicUrl ?? result.finalUrl}`
     default:
@@ -345,7 +349,12 @@ export function applyBrowserTool(ctx: Context, timeoutMs: number, maxOutputChars
         ? { ...command, maxChars: maxOutputChars }
         : command
       const result = await ctx.browser.act(bounded, exec.signal)
-      if (result.kind === 'probe' || result.kind === 'comment_publish') {
+      if (
+        result.kind === 'probe'
+        || result.kind === 'comment_publish'
+        || result.kind === 'directory_autofill'
+        || result.kind === 'pages'
+      ) {
         return { action: String(args.action), result: { kind: 'acked' as const } }
       }
       return { action: String(args.action), result }

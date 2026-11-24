@@ -18,6 +18,8 @@ export type BrowserCommand =
   | BrowserWaitForCommand
   | BrowserProbeCommand
   | BrowserCommentPublishCommand
+  | BrowserDirectoryAutofillCommand
+  | BrowserListPagesCommand
   | BrowserClosePageCommand
 
 export interface BrowserPageAddress {
@@ -50,6 +52,10 @@ export interface BrowserClickCommand extends BrowserPageAddress {
   readonly kind: 'click'
   readonly selector: string
   readonly nth?: number
+  /** When true, listens for native dialogs, XHR/fetch responses, and post-click DOM notices. */
+  readonly captureSubmitFeedback?: boolean
+  /** Optional wait duration (ms) for post-submit feedback capture (default ~2000ms). */
+  readonly feedbackWaitMs?: number
 }
 
 export interface BrowserFillCommand extends BrowserPageAddress {
@@ -101,7 +107,7 @@ export interface BrowserProbeCommand extends BrowserPageAddress {
   readonly selector?: string
 }
 
-export type CommentPublishSiteType = 'wordpress' | 'wix' | 'other'
+export type CommentPublishSiteType = 'wordpress' | 'wix' | 'typecho' | 'blogger' | 'other'
 
 export type CommentPublishOutcome =
   | 'live'
@@ -109,9 +115,17 @@ export type CommentPublishOutcome =
   | 'uncertain_after_submit'
   | 'comments_closed'
   | 'blocked_captcha'
+  | 'needs_login'
   | 'no_form'
   | 'needs_llm_fallback'
   | 'form_ready'
+
+export interface CommentPublishLoginInfo {
+  readonly loginButtons: readonly string[]
+  readonly ssoProviders: readonly string[]
+  readonly hasEmailForm?: boolean
+  readonly dialogText?: string
+}
 
 export interface CommentPublishFormSummary {
   readonly forms: number
@@ -139,8 +153,52 @@ export interface BrowserCommentPublishCommand extends BrowserPageAddress {
   readonly probeOnly?: boolean
 }
 
+export interface BrowserDirectoryAutofillCommand extends BrowserPageAddress {
+  readonly kind: 'directory_autofill'
+  readonly url?: string
+  readonly websiteUrl: string
+  readonly name?: string
+  readonly tagline?: string
+  readonly description?: string
+  readonly email?: string
+  readonly waitAfterFetchMs?: number
+  readonly timeoutMs?: number
+}
+
+export interface BrowserListPagesCommand extends BrowserPageAddress {
+  readonly kind: 'listPages'
+}
+
 export interface BrowserClosePageCommand extends BrowserPageAddress {
   readonly kind: 'closePage'
+}
+
+export interface BrowserPageInfo {
+  readonly ref: string
+  readonly url: string
+  readonly title: string
+  readonly isPopup?: boolean
+  readonly active?: boolean
+}
+
+export interface BrowserSubmitFeedbackDialog {
+  readonly type: string
+  readonly message: string
+}
+
+export interface BrowserSubmitFeedbackResponse {
+  readonly url: string
+  readonly status: number
+  readonly contentType?: string
+  readonly bodySnippet?: string
+}
+
+export interface BrowserSubmitFeedback {
+  readonly dialogs?: readonly BrowserSubmitFeedbackDialog[]
+  readonly networkResponses?: readonly BrowserSubmitFeedbackResponse[]
+  readonly domNotices?: readonly string[]
+  readonly finalUrl?: string
+  readonly title?: string
 }
 
 export type BrowserResult =
@@ -149,6 +207,8 @@ export type BrowserResult =
   | BrowserScreenshotResult
   | BrowserProbeResult
   | BrowserCommentPublishResult
+  | BrowserDirectoryAutofillResult
+  | BrowserPagesResult
 
 export interface BrowserPageResult {
   readonly kind: 'page'
@@ -162,6 +222,9 @@ export interface BrowserPageResult {
 
 export interface BrowserAckedResult {
   readonly kind: 'acked'
+  readonly popupPageRef?: string
+  readonly openedPages?: readonly BrowserPageInfo[]
+  readonly submitFeedback?: BrowserSubmitFeedback
 }
 
 export interface BrowserScreenshotResult {
@@ -177,6 +240,43 @@ export interface BrowserProbeResult {
   readonly selectorVisible?: boolean
 }
 
+export interface BrowserPagesResult {
+  readonly kind: 'pages'
+  readonly pages: readonly BrowserPageInfo[]
+}
+
+export interface DirectoryAutofillFieldState {
+  readonly role: string
+  readonly selector: string
+  readonly filled: boolean
+  readonly required: boolean
+  readonly valuePreview?: string
+}
+
+export type DirectoryAutofillOutcome =
+  | 'ready_to_submit'
+  | 'partial_filled'
+  | 'needs_login'
+  | 'blocked_captcha'
+  | 'no_form'
+
+export interface BrowserDirectoryAutofillResult {
+  readonly kind: 'directory_autofill'
+  readonly page: string
+  readonly outcome: DirectoryAutofillOutcome
+  readonly url: string
+  readonly title: string
+  readonly autofillTriggered: boolean
+  readonly autofilledFields: readonly string[]
+  readonly filledFields: readonly string[]
+  readonly remainingRequired: readonly string[]
+  readonly fields: readonly DirectoryAutofillFieldState[]
+  readonly selects?: readonly string[]
+  readonly fileInputs?: readonly string[]
+  readonly submitSelector?: string
+  readonly evidence?: string
+}
+
 export interface BrowserCommentPublishResult {
   readonly kind: 'comment_publish'
   readonly page: string
@@ -186,11 +286,17 @@ export interface BrowserCommentPublishResult {
   readonly finalUrl: string
   readonly publicUrl?: string
   readonly evidence?: string
+  readonly reason?: string
   readonly skipReason?: string
   readonly templateSignature?: string
   readonly suggestedTags?: readonly string[]
   readonly submitTriggered: boolean
   readonly probeOnly?: boolean
+  readonly loginInfo?: CommentPublishLoginInfo
+  readonly postSubmitUrl?: string
+  readonly postSubmitSnippet?: string
+  readonly popupPageRef?: string
+  readonly openedPages?: readonly BrowserPageInfo[]
   readonly formSummary?: CommentPublishFormSummary
   readonly bottomSnapshot?: string
 }
@@ -198,6 +304,7 @@ export interface BrowserCommentPublishResult {
 export interface BrowserSession {
   act(command: BrowserCommand, signal?: AbortSignal): Promise<BrowserResult>
   close(): Promise<void>
+  isClosed?(): boolean
 }
 
 export interface BrowserAutomationProvider {

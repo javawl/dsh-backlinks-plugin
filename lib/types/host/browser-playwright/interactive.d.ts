@@ -24,6 +24,8 @@ interface Control {
     hasImage: boolean;
     hasSvg: boolean;
     inBoilerplate?: boolean;
+    name?: string;
+    placeholder?: string;
 }
 interface PageControls {
     controls: Control[];

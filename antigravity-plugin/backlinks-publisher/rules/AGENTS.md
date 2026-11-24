@@ -2,29 +2,34 @@
 
 You operate the `backlinks` and `browser` MCP tools provided by `backlinks-publisher`.
 
-## One-Page High-Efficiency Execution Cheat Sheet (v2 Fast-Path)
+## One-Page High-Efficiency Execution Cheat Sheet (v2.2 Fast-Path)
 
 > **Zero-`read_file` Directive**: This cheat sheet + `SKILL.md` contain everything needed for standard blogs, directories, and forms. **Do NOT call `read_file` on `references/*` playbooks** for normal runs; inspect `references/*` only for unusual auth/edge failures.
 
 1. **Zero-LLM Preflight**: `backlinks action="batch_preflight"` (`batchId`, `autoSkip: true`, `autoSkipTagged: true`, `autoFailWaf: true`).
-   - `waf_403`-tagged items are held out by default (`heldForManual` / `skippedByTag.softItemIds`); `autoFailWaf: true` marks new + held `waf_403` items `failed(manual_required)` so pending queues never loop.
-   - Read `runnableItems: [{ itemId, domain, siteHint }]` (`wordpress_comment` / `wix_blog` / `comments_closed_hint` / `directory_or_form` / `other`).
-2. **Fetch Batch Once**: `backlinks action="batch_get"` (`batchId`, `compact: true`, `pendingOnly: true`) once per batch for `website` profile, `anchors`, and `publishedSourceIds`. Never re-fetch or re-read reference docs mid-session.
+   - Sniffs full page (≤128KB) or head 32KB + tail 64KB; detects `/go/` redirects (`rootSubmitHint`) and path-prefix timeout clusters (`timeoutClusters`).
+   - `waf_403`-tagged items are held out by default (`heldForManual` / `skippedByTag.softItemIds`); `autoFailWaf: true` marks new + held `waf_403` items `failed(manual_required)`.
+   - Read `runnableItems: [{ itemId, domain, siteHint, rootSubmitHint? }]` (`wordpress_comment` / `typecho_comment` / `wix_blog` / `comments_closed_hint` / `directory_or_form` / `other`).
+2. **Fetch Batch Once**: `backlinks action="batch_list"` supports `websiteId` filtering; `batch_get` (`batchId`, `compact: true`, `pendingOnly: true`) once per batch for `website` profile, `anchors`, and `publishedSourceIds`.
 3. **Sharded Claim**: `backlinks action="batch_claim"` ONLY from `runnableItemIds` (5–6 items/slice, serial per `sourceHost`; 10–12 items / 2 slices per session).
-4. **Deterministic Fast-Path (`comment_publish`)**:
-   - For `siteHint` in `["wordpress_comment", "wix_blog", "comments_closed_hint"]` (or any blog post), call **`browser action="comment_publish"`** directly in **1 call** (`url`, `commentText`, `authorName`, `authorEmail`, `websiteUrl`, `anchorText`, optional `page`).
+4. **Deterministic Fast-Paths (`comment_publish` & `directory_autofill`)**:
+   - Blogs (`wordpress_comment` / `typecho_comment` / `wix_blog` / `comments_closed_hint` / Blogger / custom blogs): call **`browser action="comment_publish"`** in **1 call** (`url`, `commentText`, `authorName`, `authorEmail`, `websiteUrl`, `anchorText`, optional `page`). Handles Wix 8–10s lazy scroll, marketing/cookie overlay dismissal, non-comment iframe filtering, `Space` autolink `<a href>` confirmation, post-submit `role=dialog` + reload verification, WP 302 recovery & collapsed comment triggers, Typecho, and Blogger iframes.
    - Map `comment_publish.outcome` directly:
      - `live` → `item_result(live, publicUrl)`
-     - `submitted` → `item_result(submitted, publicUrl)`
+     - `submitted` → `item_result(submitted, publicUrl)` (incl. `post_submit_comment_id_cached` & multilingual moderation)
      - `comments_closed` → `item_result(skipped, skipReason)` + `source_tags(["评论关闭"])`
      - `no_form` → `item_result(skipped, skipReason)` + `source_tags(["no_form"])`
      - `blocked_captcha` → `bringToFront`, `item_result(failed, manual_required, templateSignature)` + `source_tags(["has_captcha"])` (never bypass CAPTCHA!)
-     - `uncertain_after_submit` → **`item_result(failed, manual_required)` (IDEMPOTENT: NEVER retry submit!)**
-     - `needs_llm_fallback` → tab is already at `finalUrl` with `formSummary` and compact `bottomSnapshot` (Wix complex/list pages, unexpanded `comment-box-placeholder`, child-frame widgets, or `Log in to publish as a member` without CAPTCHA never auto-tag `no_form`); inspect `bottomSnapshot` first (open a recent `/post/` article if on a blog index, or run `snapshot format="interactive"` on login modal for Google SSO) and continue without re-navigating!
-5. **Fallback Form Flow & Compact Snapshots**:
-   - `snapshot` defaults to **compact mode (4,500 chars)** pruning nav/header/footer/SVG bloat while preserving forms/inputs/buttons/alerts. Pass `full: true` (up to 16,000 chars) only when essential controls are missing.
-   - Use `batch_fill` for multi-field forms and `wait_for_login` for manual logins.
-6. **Closeout**: `source_tags` maps `comments_closed` → `评论关闭` automatically for live Supermanager compatibility and degrades 5xx non-fatally (never blocks `item_result`). Heartbeat every 1–2 items and always `lease_release` when done.
+     - `needs_login` → Wix/Blogger member wall (never blind-published); inspect `loginInfo` + `snapshot format="interactive"` for Google SSO or mailbox signup.
+     - `uncertain_after_submit` → **`item_result(failed, manual_required)` (IDEMPOTENT: NEVER retry submit! Check `reason`/`postSubmitUrl`/`postSubmitSnippet`)**
+     - `needs_llm_fallback` → tab is already at `finalUrl` with `formSummary` + `bottomSnapshot`; continue without re-navigating!
+   - Directories (MkDirs / AI-Autofill submit pages): call **`browser action="directory_autofill"`** (`url`, `websiteUrl`, `name`, `tagline`, `description`, `email`) to auto-fetch + backfill missing fields in 1 call, then finish remaining required fields & submit via `batch_fill`.
+5. **Fallback Form Flow, OAuth Popups & Compact Snapshots**:
+   - `snapshot` defaults to **compact mode (4,500 chars)**: collapses `<select>` >15 options (first 3 + `... (共 N 项)` + last 2), exempts status/success/error keywords, and shows `input[type=url]` + distinct `#id`/`[name=]` selectors. Pass `full: true` (up to 16,000) only when needed.
+   - `batch_fill` with `submitTarget` automatically captures `submitFeedback` (native `alert` dialogs, XHR/fetch status+body, new toast/modal notices).
+   - OAuth / Firebase popups (`window.open`): `click` returns `popupPageRef` / `openedPages`; use `listPages` to inspect open tabs & popups. Closing a popup (`closePage`) never invalidates your original named tab ref, and closing the last tab preserves an internal `about:blank` keeper.
+   - `navigate` defaults to `domcontentloaded` (and gracefully returns ready DOM if explicit `load` times out). Use `wait_for_login` for manual logins.
+6. **Closeout**: `source_tags` maps `comments_closed` → `评论关闭` automatically and degrades 5xx non-fatally. Heartbeat every 1–2 items and always `lease_release` when done.
 
 ## Credential Isolation & Safety
 

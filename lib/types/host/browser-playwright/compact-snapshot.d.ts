@@ -3,6 +3,8 @@
  * and fallback plain text). Prunes decorative header/nav/footer/SVG bloat while
  * preserving interactive forms, inputs, buttons, comments, auth gates, and alerts.
  */
+export declare const STATUS_FEEDBACK_PATTERN: RegExp;
+export declare const SELECT_OPTION_COLLAPSE_THRESHOLD = 15;
 export interface CompactSnapshotOutput {
     readonly text: string;
     readonly truncated: boolean;

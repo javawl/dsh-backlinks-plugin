@@ -722,7 +722,7 @@ describe('comment_publish fast-path helpers, inspection & end-to-end flows', () 
       siteType: 'wix',
       submitTriggered: false,
     })
-    expect(noLinkBtnActions.some(a => a.kind === 'click')).toBe(false)
+    expect(noLinkBtnActions.some(a => a.kind === 'click' && a.selector?.includes('submit'))).toBe(false)
 
     // Wix guest comment returning awaiting moderation -> submitted.
     const wixModUrl = 'https://mod.wixsite.com/blog/post'
@@ -1008,7 +1008,7 @@ describe('comment_publish fast-path helpers, inspection & end-to-end flows', () 
       { defaultTimeoutMs: 10_000, sleepImpl: async () => {} },
     )
     expect(memberRes).toMatchObject({
-      outcome: 'needs_llm_fallback',
+      outcome: 'needs_login',
       siteType: 'wix',
       submitTriggered: false,
       formSummary: { hasLoginWall: true },

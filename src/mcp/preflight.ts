@@ -18,7 +18,10 @@ import {
 import { collectPublishedSourceIds, isPublishedItem } from '../host/backlinks/validation.ts'
 import type { FetchLike, SleepLike } from './backlinks-tool.ts'
 
-const MAX_PREFLIGHT_BODY_BYTES = 65_536
+export const PREFLIGHT_HEAD_BYTES = 32_768
+export const PREFLIGHT_TAIL_BYTES = 65_536
+export const PREFLIGHT_FULL_READ_CAP_BYTES = 131_072
+export const PREFLIGHT_STREAM_SCAN_CAP_BYTES = 524_288
 const RETRY_5XX_DELAY_MS = 200
 
 const PARKING_HOST_SUFFIXES = [
@@ -102,6 +105,7 @@ export type WafProvider = 'cloudfront' | 'cloudflare' | 'waf'
 
 export type PreflightSiteHint =
   | 'wordpress_comment'
+  | 'typecho_comment'
   | 'wix_blog'
   | 'comments_closed_hint'
   | 'directory_or_form'
@@ -111,6 +115,16 @@ export interface PreflightRunnableItem {
   readonly itemId: number
   readonly domain: string
   readonly siteHint: PreflightSiteHint
+  readonly redirectedFromGo?: boolean
+  readonly rootSubmitHint?: string
+}
+
+export interface PreflightTimeoutCluster {
+  readonly pattern: string
+  readonly count: number
+  readonly itemIds: readonly number[]
+  readonly hosts: readonly string[]
+  readonly hint: string
 }
 
 export interface PreflightHeldForManualItem {
@@ -219,6 +233,7 @@ export interface BatchPreflightResult {
     readonly deadItems?: readonly PreflightDeadItem[]
     readonly wafBlocked?: readonly PreflightWafItem[]
     readonly retryableItems?: readonly PreflightRetryableItem[]
+    readonly timeoutClusters?: readonly PreflightTimeoutCluster[]
     readonly alreadyPublishedItemIds?: readonly number[]
     readonly autoSkipResult?: {
       readonly mode: 'preflight_skip_api' | 'legacy_fallback'
@@ -237,7 +252,13 @@ export interface BatchPreflightResult {
 }
 
 type ProbeOutcome =
-  | { readonly kind: 'alive'; readonly httpStatus: number; readonly siteHint: PreflightSiteHint }
+  | {
+      readonly kind: 'alive'
+      readonly httpStatus: number
+      readonly siteHint: PreflightSiteHint
+      readonly redirectedFromGo?: boolean
+      readonly rootSubmitHint?: string
+    }
   | { readonly kind: 'dead'; readonly reason: PreflightDeadReason; readonly httpStatus?: number; readonly detail?: string }
   | { readonly kind: 'waf_403'; readonly provider: WafProvider }
   | { readonly kind: 'retryable'; readonly reason: PreflightRetryableReason; readonly httpStatus?: number; readonly detail?: string }
@@ -297,7 +318,37 @@ function classifyFetchError(error: unknown, timedOut: boolean): ProbeOutcome {
   return { kind: 'retryable', reason: 'network_error', detail: diag.slice(0, 140) || 'network error' }
 }
 
-async function readBoundedBodyText(response: Response, maxBytes = MAX_PREFLIGHT_BODY_BYTES): Promise<string> {
+function concatByteChunks(chunks: readonly Uint8Array[], totalBytes: number): Uint8Array {
+  const merged = new Uint8Array(totalBytes)
+  let offset = 0
+  for (const chunk of chunks) {
+    merged.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return merged
+}
+
+/**
+ * Read HTML body for preflight sniffing:
+ * - Pages <= 128KB are read in full.
+ * - Larger pages retain the first 32KB (head/meta/parked markers) + rolling
+ *   last 64KB (footer `#commentform`, `wp-comments-post.php`, Typecho forms)
+ *   up to a 512KB streaming scan cap.
+ */
+export async function readBoundedBodyText(
+  response: Response,
+  options?: {
+    readonly headBytes?: number
+    readonly tailBytes?: number
+    readonly fullReadCapBytes?: number
+    readonly streamScanCapBytes?: number
+  },
+): Promise<string> {
+  const headBytes = options?.headBytes ?? PREFLIGHT_HEAD_BYTES
+  const tailBytes = options?.tailBytes ?? PREFLIGHT_TAIL_BYTES
+  const fullReadCapBytes = options?.fullReadCapBytes ?? PREFLIGHT_FULL_READ_CAP_BYTES
+  const streamScanCapBytes = options?.streamScanCapBytes ?? PREFLIGHT_STREAM_SCAN_CAP_BYTES
+
   const contentType = response.headers.get('content-type') ?? ''
   if (
     contentType.length > 0
@@ -310,36 +361,79 @@ async function readBoundedBodyText(response: Response, maxBytes = MAX_PREFLIGHT_
   const body = response.body
   if (body && typeof body.getReader === 'function') {
     const reader = body.getReader()
-    const chunks: Uint8Array[] = []
+    let fullChunks: Uint8Array[] | undefined = []
+    let headBuf: Uint8Array | undefined
+    const tailChunks: Uint8Array[] = []
+    let tailTotal = 0
     let total = 0
+
+    const pushTail = (slice: Uint8Array) => {
+      if (slice.byteLength === 0) return
+      if (slice.byteLength >= tailBytes) {
+        tailChunks.length = 0
+        tailChunks.push(slice.subarray(slice.byteLength - tailBytes))
+        tailTotal = tailBytes
+        return
+      }
+      tailChunks.push(slice)
+      tailTotal += slice.byteLength
+      while (tailTotal > tailBytes && tailChunks.length > 0) {
+        const excess = tailTotal - tailBytes
+        const first = tailChunks[0]!
+        if (first.byteLength <= excess) {
+          tailChunks.shift()
+          tailTotal -= first.byteLength
+        } else {
+          tailChunks[0] = first.subarray(excess)
+          tailTotal -= excess
+        }
+      }
+    }
+
     try {
-      while (total < maxBytes) {
+      while (total < streamScanCapBytes) {
         const { done, value } = await reader.read()
         if (done || value === undefined) break
-        const remaining = maxBytes - total
+        const remaining = streamScanCapBytes - total
         const slice = value.byteLength <= remaining ? value : value.subarray(0, remaining)
-        chunks.push(slice)
         total += slice.byteLength
-        if (total >= maxBytes) {
+
+        if (fullChunks !== undefined) {
+          fullChunks.push(slice)
+          if (total > fullReadCapBytes) {
+            const mergedSoFar = concatByteChunks(fullChunks, total)
+            headBuf = mergedSoFar.slice(0, Math.min(headBytes, mergedSoFar.byteLength))
+            pushTail(mergedSoFar.slice(Math.max(0, mergedSoFar.byteLength - tailBytes)))
+            fullChunks = undefined
+          }
+        } else {
+          pushTail(slice)
+        }
+
+        if (total >= streamScanCapBytes) {
           await reader.cancel().catch(() => undefined)
           break
         }
       }
     } catch {
-      // Return whatever prefix was already decoded before stream interruption.
+      // Return whatever bytes were already buffered before stream interruption.
     }
-    const merged = new Uint8Array(total)
-    let offset = 0
-    for (const chunk of chunks) {
-      merged.set(chunk, offset)
-      offset += chunk.byteLength
+
+    const decoder = new TextDecoder('utf-8', { fatal: false })
+    if (fullChunks !== undefined) {
+      return decoder.decode(concatByteChunks(fullChunks, total))
     }
-    return new TextDecoder('utf-8', { fatal: false }).decode(merged)
+    const headText = decoder.decode(headBuf ?? new Uint8Array(0))
+    const tailText = decoder.decode(concatByteChunks(tailChunks, tailTotal))
+    return `${headText}\n${tailText}`
   }
 
   try {
     const text = await response.text()
-    return text.slice(0, maxBytes)
+    if (text.length <= fullReadCapBytes) {
+      return text
+    }
+    return `${text.slice(0, headBytes)}\n${text.slice(-tailBytes)}`
   } catch {
     return ''
   }
@@ -434,6 +528,14 @@ export function detectSiteHint(finalUrl: string, headers: Headers, body: string)
   }
 
   if (
+    /<meta\b[^>]*name\s*=\s*["']generator["'][^>]*content\s*=\s*["'][^"']*typecho/iu.test(body)
+    || (/<textarea\b[^>]*\bname\s*=\s*["']text["']/iu.test(body) && /<input\b[^>]*\bname\s*=\s*["']mail["']/iu.test(body))
+    || (/\bid\s*=\s*["']comment-form["']/iu.test(body) && /typecho|\bname\s*=\s*["']mail["']/iu.test(body))
+  ) {
+    return 'typecho_comment'
+  }
+
+  if (
     headers.has('x-wix-request-id')
     || /wixstatic\.com|wix-warmup-data|_wixCIDX|static\.parastorage\.com/iu.test(body)
   ) {
@@ -454,6 +556,122 @@ export function detectSiteHint(finalUrl: string, headers: Headers, body: string)
   }
 
   return 'other'
+}
+
+function normalizeHost(hostname: string): string {
+  return hostname.toLowerCase().replace(/^www\./u, '')
+}
+
+function detectGoRedirectHint(originalUrl: URL, finalUrl: string): {
+  readonly redirectedFromGo: boolean
+  readonly crossHost: boolean
+  readonly rootSubmitHint?: string
+} {
+  const isGoPath = /(?:^|\/)go(?:\/|$)/iu.test(originalUrl.pathname)
+  if (!isGoPath) {
+    return { redirectedFromGo: false, crossHost: false }
+  }
+  let finalHost = normalizeHost(originalUrl.hostname)
+  try {
+    finalHost = normalizeHost(new URL(finalUrl).hostname)
+  } catch {
+    // keep original host
+  }
+  const origHost = normalizeHost(originalUrl.hostname)
+  const crossHost = finalHost !== origHost
+  return {
+    redirectedFromGo: true,
+    crossHost,
+    rootSubmitHint: `${originalUrl.origin}/`,
+  }
+}
+
+/**
+ * Group timed-out items sharing a common URL path prefix pattern (e.g. >= 3 items
+ * matching `/nano-banana-pro-*` or `/blog/post/*`) into `timeoutClusters`.
+ */
+export function detectTimeoutClusters(
+  retryableItems: readonly PreflightRetryableItem[],
+  minClusterSize = 3,
+): readonly PreflightTimeoutCluster[] {
+  const timedOut = retryableItems.filter(item => item.reason === 'timeout')
+  if (timedOut.length < minClusterSize) return []
+
+  const groups = new Map<string, { readonly items: PreflightRetryableItem[]; readonly specificity: number }>()
+  const addPattern = (pattern: string, item: PreflightRetryableItem, specificity: number) => {
+    const existing = groups.get(pattern)
+    if (existing) {
+      if (!existing.items.some(i => i.id === item.id)) {
+        existing.items.push(item)
+      }
+    } else {
+      groups.set(pattern, { items: [item], specificity })
+    }
+  }
+
+  for (const item of timedOut) {
+    let pathname = ''
+    try {
+      pathname = new URL(item.url).pathname.toLowerCase().replace(/\/+$/u, '')
+    } catch {
+      continue
+    }
+    if (!pathname || pathname === '/') continue
+
+    const segments = pathname.split('/').filter(Boolean)
+    if (segments.length === 0) continue
+
+    const lastIdx = segments.length - 1
+    const lastSeg = segments[lastIdx]!
+    const dirPrefix = segments.length > 1 ? `/${segments.slice(0, lastIdx).join('/')}` : ''
+
+    // Hyphenated slug prefix patterns (e.g. `/nano-banana-pro-guide` -> `/nano-banana-pro-*`, `/nano-banana-*`).
+    const hyphenTokens = lastSeg.split('-').filter(Boolean)
+    if (hyphenTokens.length >= 3) {
+      for (let len = hyphenTokens.length - 1; len >= 2; len--) {
+        const prefix = hyphenTokens.slice(0, len).join('-')
+        const pattern = `${dirPrefix}/${prefix}-*`
+        addPattern(pattern, item, 100 + pattern.length)
+      }
+    } else if (hyphenTokens.length === 2) {
+      const pattern = `${dirPrefix}/${hyphenTokens[0]}-*`
+      addPattern(pattern, item, 80 + pattern.length)
+    }
+
+    // Multi-segment directory prefix patterns (e.g. `/tools/foo` -> `/tools/*`).
+    if (segments.length >= 2) {
+      const pattern = `/${segments.slice(0, -1).join('/')}/*`
+      addPattern(pattern, item, 50 + pattern.length)
+    }
+  }
+
+  const candidates = [...groups.entries()]
+    .filter(([, entry]) => entry.items.length >= minClusterSize)
+    .sort((a, b) => {
+      if (b[1].items.length !== a[1].items.length) return b[1].items.length - a[1].items.length
+      return b[1].specificity - a[1].specificity
+    })
+
+  const clusters: PreflightTimeoutCluster[] = []
+  const coveredSets: Set<number>[] = []
+
+  for (const [pattern, entry] of candidates) {
+    const ids = entry.items.map(i => i.id)
+    const alreadyCovered = coveredSets.some(set => ids.every(id => set.has(id)))
+    if (alreadyCovered) continue
+
+    coveredSets.push(new Set(ids))
+    const hosts = [...new Set(entry.items.map(i => i.host))]
+    clusters.push({
+      pattern,
+      count: ids.length,
+      itemIds: ids,
+      hosts,
+      hint: `${ids.length} 条超时条目共享路径前缀 ${pattern}，疑似同模板慢站/批量不可达，建议跳过或延后单独重试`,
+    })
+  }
+
+  return clusters
 }
 
 function detectWafProvider(headers: Headers, body: string): WafProvider {
@@ -510,7 +728,7 @@ async function singleHttpProbe(
       },
       signal: controller.signal,
     })
-    const body = await readBoundedBodyText(response, MAX_PREFLIGHT_BODY_BYTES)
+    const body = await readBoundedBodyText(response)
     return { response, body }
   } catch (error) {
     if (outerSignal?.aborted) {
@@ -550,6 +768,19 @@ async function probeItemUrl(
     const response = attemptResult.response as Response
     const body = attemptResult.body ?? ''
     const finalUrl = response.url || parsed.toString()
+    const goHint = detectGoRedirectHint(parsed, finalUrl)
+
+    // Outbound `/go/` redirect landed on a third-party host: do not misclassify
+    // the directory source itself as dead/WAF; surface `rootSubmitHint` instead.
+    if (goHint.redirectedFromGo && goHint.crossHost) {
+      return {
+        kind: 'alive',
+        httpStatus: response.status,
+        siteHint: 'directory_or_form',
+        redirectedFromGo: true,
+        ...(goHint.rootSubmitHint === undefined ? {} : { rootSubmitHint: goHint.rootSubmitHint }),
+      }
+    }
 
     const parkedReason = detectParkedOrSuspended(finalUrl, response.headers, body)
     if (parkedReason !== undefined) {
@@ -594,6 +825,8 @@ async function probeItemUrl(
       kind: 'alive',
       httpStatus: response.status,
       siteHint: detectSiteHint(finalUrl, response.headers, body),
+      ...(goHint.redirectedFromGo ? { redirectedFromGo: true } : {}),
+      ...(goHint.rootSubmitHint === undefined ? {} : { rootSubmitHint: goHint.rootSubmitHint }),
     }
   }
 
@@ -1077,6 +1310,8 @@ export async function runBatchPreflight(
           itemId: item.id,
           domain: item.sourceHost,
           siteHint: outcome.siteHint,
+          ...(outcome.redirectedFromGo ? { redirectedFromGo: true } : {}),
+          ...(outcome.rootSubmitHint === undefined ? {} : { rootSubmitHint: outcome.rootSubmitHint }),
         })
         if (softTags.length > 0) {
           cautionItems.push({
@@ -1173,9 +1408,11 @@ export async function runBatchPreflight(
   const wafFailEffect = await applyAutoFailWaf(batchSource, detail.batch.id, wafFailEntries, signal)
   const hardItemIds = taggedBlocked.map(entry => entry.id)
   const softItemIds = heldForManual.map(entry => entry.id)
+  const timeoutClusters = detectTimeoutClusters(retryableItems)
 
   const summary = `preflight batch ${detail.batch.id}: ${runnableItemIds.length} runnable, ${deadItems.length} dead, ${taggedBlocked.length} tagged-blocked, ${wafBlocked.length} waf_403, ${retryableItems.length} retryable`
     + (heldForManual.length > 0 ? `, ${heldForManual.length} held-manual` : '')
+    + (timeoutClusters.length > 0 ? `, ${timeoutClusters.length} timeout-cluster(s)` : '')
     + ` (auto-skipped ${totalAutoSkipped}`
     + (wafFailEffect.failedItemIds.length > 0 ? `, auto-failed-waf ${wafFailEffect.failedItemIds.length}` : '')
     + ')'
@@ -1215,6 +1452,7 @@ export async function runBatchPreflight(
       ...(deadItems.length > 0 ? { deadItems } : {}),
       ...(wafBlocked.length > 0 ? { wafBlocked } : {}),
       ...(retryableItems.length > 0 ? { retryableItems } : {}),
+      ...(timeoutClusters.length > 0 ? { timeoutClusters } : {}),
       ...(alreadyPublishedItemIds.length > 0 ? { alreadyPublishedItemIds } : {}),
       ...(autoSkip || autoSkipTagged
         ? {

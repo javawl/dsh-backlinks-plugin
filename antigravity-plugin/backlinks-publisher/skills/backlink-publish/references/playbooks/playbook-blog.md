@@ -1,6 +1,6 @@
 # 博客评论（category: 博客）
 
-> **v2 确定性快路径优先**：常规 WordPress 与 Wix 博客请**直接调用 `browser action="comment_publish"`**（传入 `url`、`commentText`、`authorName`、`authorEmail`、`websiteUrl`、`anchorText`），1 次调用完成导航、3–4 步渐进滚底与 4–5s 懒加载等待、main frame + child iframes 探测、`comment-box-placeholder` 展开等待、关评/CAPTCHA 识别、填表提交与重载核验；对复杂 Wix 布局/列表页/仅提示 `Log in to publish as a member` 且无验证码时，`comment_publish` 设有**防误报护栏**——会返回 `needs_llm_fallback`（附带 `bottomSnapshot` 底部紧凑上下文与 `formSummary`），绝不误报 `no_form`。拿到 `needs_llm_fallback` 后可直接基于 `bottomSnapshot`（若在博客列表页则点进近期 `/post/` 文章；若提示登录则打开登录面板 + `snapshot format="interactive"` 走登录决策树）继续处理。遇评论关闭时直接打 `评论关闭`（或 `comments_closed`，客户端会自动映射为现网兼容标签）。
+> **v2.2 确定性快路径优先**：WordPress（含 SmartMag 等折叠评论触发器与 302 跳转自恢复）、Wix、Typecho、自定义博客与 Blogger iframe 请**直接调用 `browser action="comment_publish"`**（传入 `url`、`commentText`、`authorName`、`authorEmail`、`websiteUrl`、`anchorText`）。Wix 链路内置 8–10s 懒加载锚点轮询、自动关遮罩、非评论 iframe 过滤、会员墙快判 `needs_login`（含 `loginInfo`，绝不盲点 Publish）、`Space` 自动转超链 `<a href>` 核验，以及发布后 2–3s 弹窗（reCAPTCHA/Sign Up/待审）与干净 URL 重载双重核验（消失返回 `uncertain_after_submit` + `optimistic_dom_not_persisted`）。WordPress 提交后先判多语种待审/`#comment-ID`（缓存未刷新降级 `submitted` + `post_submit_comment_id_cached`）。遇评论关闭直接打 `评论关闭`。
 
 在相关博客文章下留评论形成外链：表单有 Website 字段时填填写者主页 URL，没有时把链接嵌进评论正文。
 

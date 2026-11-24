@@ -3,12 +3,12 @@
 最常见的类型：把自己网站提交到 AI 导航/网站目录。
 
 ## 流程
-1. 入口：`submitUrl`（没有就找页面里的 Submit/Add site/提交链接）。
-2. 勘察表单：字段通常是 网站名/URL/一句话描述/长描述/分类/Logo/邮箱。
+1. 入口：`submitUrl`（若预检返回 `rootSubmitHint` 说明源链接为 `/go/` 外跳，直接从站点根域找 Submit/Add site/提交链接）。
+2. MkDirs / AI-Autofill 提交页优先调用 **`browser action="directory_autofill"`**（传 `url`、`websiteUrl`、`name`、`tagline`、`description`、`email`），1 次完成 URL 填报→点击 Fetch/Autofill→等待回填→补齐缺失项并返回紧凑表单状态摘要。
 3. 描述分层：按字段长度选短（<80 字符）/中（<160）/长（<400）三档里最合适的一档；内容围绕网站真实功能写，不堆关键词。
-4. 分类：选最贴近的真实分类，宁缺勿错。
+4. 分类：选最贴近的真实分类，宁缺勿错（compact 快照自动折叠 >15 项下拉框防止截断表单下半段）。
 5. 邮箱：用 `mailbox_create` 生成一次性邮箱；若需邮箱验证链接，`mail_wait` 后点击或粘贴 `link`。
-6. 填表推荐用 `browser action="batch_fill"` 一次填入多个字段并复查；提交前可用 `snapshot` 核对 URL/分类无误 → 提交 → 记录服务器回执文本。
+6. 填表与提交推荐用 `browser action="batch_fill"`（带 `submitTarget` 自动返回 `submitFeedback`，含原生 `alert` 弹窗、XHR/fetch 状态与正文、toast/modal 通知），彻底消除 OneNav 等异步站确认盲区。
 
 ## 常见坑
 - 要求互挂徽标（"需要反链"）：**提交前**先走徽标流程——`backlinks badge_add` 入库（记下 `backlinkId`）→ 再调用 `backlinks action="badge_verify"`（传入 `siteUrl`、`expectedTarget`、可选 `refreshUrl` 如 `https://<我方host>/footer/refresh`）直接触发刷新并验证首页 HTML 出现对方域名 → 确认 `verified: true` 后才去对方站点 `Verify Badge`/提交（禁止依赖 `bash`/`curl`）。

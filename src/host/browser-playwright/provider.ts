@@ -3,30 +3,97 @@
  */
 
 import { chromium } from 'playwright-core'
-import type { BrowserContext, Locator, Page } from 'playwright-core'
+import type { BrowserContext, Dialog, Locator, Page, Response as PwResponse } from 'playwright-core'
 import { assertNever } from '../../shared/backlinks-types.ts'
 import type {
   BrowserAutomationProvider,
   BrowserCommand,
+  BrowserPageInfo,
   BrowserResult,
   BrowserSession,
+  BrowserSubmitFeedback,
+  BrowserSubmitFeedbackDialog,
+  BrowserSubmitFeedbackResponse,
 } from '../browser/types.ts'
 import { BrowserError } from '../browser/types.ts'
-import { executeCommentPublish } from './comment-publish.ts'
+import { executeCommentPublish, isNavigationContextError } from './comment-publish.ts'
 import {
   COMPACT_TEXT_SCRIPT,
   compactAriaSnapshot,
   compactPlainText,
   formatCompactTextEvaluation,
 } from './compact-snapshot.ts'
+import { executeDirectoryAutofill } from './directory-autofill.ts'
 import { parseControlReport, renderPageControls, VISIBLE_CONTROLS_SCRIPT } from './interactive.ts'
 
 export const PLAYWRIGHT_BROWSER_PROVIDER_ID = 'playwright'
 export const DEFAULT_SNAPSHOT_MAX_CHARS = 60_000
 export const STRICT_MODE_INSPECT_TIMEOUT_MS = 1_500
 export const STRICT_MODE_MAX_CANDIDATES = 5
+export const DEFAULT_SUBMIT_FEEDBACK_WAIT_MS = 2_000
 
 const STRICT_MODE_PATTERN = /strict mode violation/iu
+const NAVIGATE_TIMEOUT_PATTERN = /timeout|timed\s+out/iu
+const STATIC_ASSET_URL_PATTERN = /\.(?:png|jpe?g|gif|webp|svg|ico|woff2?|ttf|eot|css|js|map)(?:[?#]|$)|google-analytics|googletagmanager|doubleclick|fonts\.googleapis/iu
+
+const COLLECT_DOM_NOTICES_SCRIPT = String.raw`(() => {
+  const clean = value => String(value ?? '').replace(/\s+/g, ' ').trim();
+  const isVisible = (el) => {
+    if (!el || el.nodeType !== 1) return false;
+    if (el.hidden) return false;
+    const style = typeof getComputedStyle === 'function' ? getComputedStyle(el) : null;
+    if (style && (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0')) return false;
+    if (el.closest('[hidden], [aria-hidden="true"]')) return false;
+    return true;
+  };
+  const out = [];
+  const push = (raw) => {
+    const t = clean(raw).slice(0, 220);
+    if (t.length >= 2 && !out.includes(t) && out.length < 10) out.push(t);
+  };
+  const explicitSelectors = [
+    '[role="alert"]',
+    '[role="alertdialog"]',
+    '[role="dialog"]',
+    '[role="status"]',
+    '[aria-live="polite"]',
+    '[aria-live="assertive"]',
+    '.toast',
+    '.toastify',
+    '.notyf',
+    '.swal2-popup',
+    '.layui-layer',
+    '.el-message',
+    '.el-notification',
+    '.ant-message',
+    '.ant-notification',
+    '[class*="toast" i]',
+    '[class*="snackbar" i]',
+    '[class*="alert" i]',
+    '[class*="modal" i]',
+  ];
+  for (const sel of explicitSelectors) {
+    let nodes = [];
+    try {
+      nodes = Array.from(document.querySelectorAll(sel));
+    } catch {}
+    for (const el of nodes) {
+      if (!isVisible(el)) continue;
+      push(el.innerText || el.textContent);
+    }
+  }
+  const keywordRegex = /\b(?:thank\s+you|thanks\s+for\s+submitting|submitted|successfully|pending\s+review|under\s+review|already\s+submitted|already\s+exists|error|invalid|required)\b|提交成功|已提交|审核中|等待审核|待审核|已存在|重复提交|失败|错误|请填写/i;
+  for (const el of document.querySelectorAll('p, span, div, li, strong, small, h2, h3')) {
+    if (out.length >= 10) break;
+    if (!isVisible(el) || el.closest('script,style,noscript,svg,header,nav,footer')) continue;
+    if (el.children && el.children.length > 3) continue;
+    const t = clean(el.innerText || el.textContent);
+    if (t.length >= 3 && t.length <= 220 && keywordRegex.test(t)) {
+      push(t);
+    }
+  }
+  return out;
+})()`
 
 export interface StrictModeCandidate {
   readonly index: number
@@ -336,10 +403,16 @@ function throwIfAborted(signal: AbortSignal | undefined, commandKind: string): v
 export class PlaywrightSession implements BrowserSession {
   private closed = false
   private readonly pages = new Map<string, Page>()
+  private readonly pageToRef = new WeakMap<Page, string>()
+  private readonly pageMeta = new Map<string, { readonly isPopup: boolean }>()
   private readonly chains = new Map<string, Promise<unknown>>()
+  private readonly popupCollectors = new Set<(entry: { readonly ref: string; readonly page: Page }) => void>()
+  private keeperPage: Page | undefined
+  private creatingInternalPage = 0
   private legacyTail: Promise<unknown> = Promise.resolve()
   private lastRef: string | undefined
   private refSeq = 0
+  private popupSeq = 0
 
   constructor(
     private readonly context: BrowserContext,
@@ -349,15 +422,31 @@ export class PlaywrightSession implements BrowserSession {
     this.context.on('close', () => {
       this.closed = true
     })
+    this.context.on('page', (newPage: Page) => {
+      if (this.creatingInternalPage > 0) return
+      if (newPage === this.keeperPage || this.pageToRef.has(newPage)) return
+      const ref = `popup${++this.popupSeq}`
+      this.registerPage(ref, newPage, true)
+      for (const collector of this.popupCollectors) {
+        collector({ ref, page: newPage })
+      }
+    })
     for (const existing of this.context.pages()) {
       this.adopt(existing)
     }
+  }
+
+  isClosed(): boolean {
+    return this.closed
   }
 
   async act(command: BrowserCommand, signal?: AbortSignal): Promise<BrowserResult> {
     throwIfAborted(signal, command.kind)
     if (this.closed) {
       throw new BrowserError('browser session is closed', 'BROWSER_ACTION_FAILED')
+    }
+    if (command.kind === 'listPages') {
+      return await this.execute(command, signal)
     }
     return await (command.page === undefined
       ? this.chained(this.legacyTail, (tail) => { this.legacyTail = tail }, command, signal)
@@ -386,10 +475,30 @@ export class PlaywrightSession implements BrowserSession {
       switch (command.kind) {
         case 'navigate': {
           const { page, ref } = await this.resolveForNavigate(command.page)
-          await page.goto(command.url, {
-            timeout: command.timeoutMs ?? this.defaultTimeoutMs,
-            ...(command.waitUntil === undefined ? {} : { waitUntil: command.waitUntil }),
-          })
+          const timeout = command.timeoutMs ?? this.defaultTimeoutMs
+          const requestedWaitUntil = command.waitUntil
+          if (requestedWaitUntil === undefined) {
+            await page.goto(command.url, { timeout, waitUntil: 'domcontentloaded' })
+          } else {
+            try {
+              await page.goto(command.url, { timeout, waitUntil: requestedWaitUntil })
+            } catch (error) {
+              if (requestedWaitUntil !== 'domcontentloaded' && NAVIGATE_TIMEOUT_PATTERN.test(String(error instanceof Error ? error.message : error))) {
+                const readyState = typeof page.evaluate === 'function'
+                  ? await page.evaluate(() => (globalThis as { document?: { readyState?: string } }).document?.readyState ?? '').catch(() => '')
+                  : ''
+                const currentUrl = page.url()
+                if (
+                  (readyState === 'interactive' || readyState === 'complete')
+                  && currentUrl.length > 0
+                  && currentUrl !== 'about:blank'
+                ) {
+                  return await this.pageResult(page, ref, command.maxChars ?? this.defaultMaxChars)
+                }
+              }
+              throw error
+            }
+          }
           return await this.pageResult(page, ref, command.maxChars ?? this.defaultMaxChars)
         }
         case 'snapshot': {
@@ -474,13 +583,31 @@ export class PlaywrightSession implements BrowserSession {
         case 'click': {
           const { page } = await this.requirePage(command.page)
           const addressing = parseSelector(command.selector)
-          if (addressing.mode === 'xy') {
-            await page.mouse.click(addressing.x, addressing.y)
-            return { kind: 'acked' }
+          const runClick = async () => {
+            if (addressing.mode === 'xy') {
+              await page.mouse.click(addressing.x, addressing.y)
+              return
+            }
+            const locator = elementLocator(page, addressing, command.nth)
+            await this.runLocatorAction('click', locator, () => locator.click({ timeout: this.defaultTimeoutMs }))
           }
-          const locator = elementLocator(page, addressing, command.nth)
-          await this.runLocatorAction('click', locator, () => locator.click({ timeout: this.defaultTimeoutMs }))
-          return { kind: 'acked' }
+
+          if (command.captureSubmitFeedback === true) {
+            const { value: submitFeedback, openedPages } = await this.withPopupCapture(() =>
+              this.runClickWithSubmitFeedback(page, runClick, command.feedbackWaitMs ?? DEFAULT_SUBMIT_FEEDBACK_WAIT_MS, signal),
+            )
+            return {
+              kind: 'acked',
+              submitFeedback,
+              ...(openedPages.length > 0 ? { popupPageRef: openedPages[openedPages.length - 1]!.ref, openedPages } : {}),
+            }
+          }
+
+          const { openedPages } = await this.withPopupCapture(runClick)
+          return {
+            kind: 'acked',
+            ...(openedPages.length > 0 ? { popupPageRef: openedPages[openedPages.length - 1]!.ref, openedPages } : {}),
+          }
         }
         case 'fill': {
           const { page } = await this.requirePage(command.page)
@@ -547,10 +674,48 @@ export class PlaywrightSession implements BrowserSession {
         }
         case 'comment_publish': {
           const { page, ref } = await this.resolveForNavigate(command.page)
-          return await executeCommentPublish(page, ref, command, {
+          const { value: result, openedPages } = await this.withPopupCapture(() =>
+            executeCommentPublish(page, ref, command, {
+              defaultTimeoutMs: this.defaultTimeoutMs,
+              ...(signal === undefined ? {} : { signal }),
+            }),
+          )
+          return openedPages.length > 0
+            ? { ...result, popupPageRef: openedPages[openedPages.length - 1]!.ref, openedPages }
+            : result
+        }
+        case 'directory_autofill': {
+          const { page, ref } = command.url !== undefined
+            ? await this.resolveForNavigate(command.page)
+            : await this.requirePage(command.page)
+          return await executeDirectoryAutofill(page, ref, command, {
             defaultTimeoutMs: this.defaultTimeoutMs,
             ...(signal === undefined ? {} : { signal }),
           })
+        }
+        case 'listPages': {
+          // Adopt any untracked live non-keeper pages that may exist in the context.
+          for (const ctxPage of this.context.pages()) {
+            if (ctxPage === this.keeperPage || ctxPage.isClosed()) continue
+            if (!this.pageToRef.has(ctxPage)) {
+              this.adopt(ctxPage)
+            }
+          }
+          const infos: BrowserPageInfo[] = []
+          for (const [ref, p] of this.pages.entries()) {
+            if (p.isClosed()) continue
+            const meta = this.pageMeta.get(ref)
+            const url = p.url()
+            const title = await p.title().catch(() => '')
+            infos.push({
+              ref,
+              url,
+              title,
+              isPopup: meta?.isPopup ?? false,
+              ...(ref === this.lastRef ? { active: true } : {}),
+            })
+          }
+          return { kind: 'pages', pages: infos }
         }
         case 'bringToFront': {
           const { page } = await this.requirePage(command.page)
@@ -559,9 +724,17 @@ export class PlaywrightSession implements BrowserSession {
         }
         case 'closePage': {
           const { page, ref } = await this.requirePage(command.page)
+          const openPages = this.context.pages().filter(p => !p.isClosed())
+          const otherOpen = openPages.filter(p => p !== page)
+          if (otherOpen.length === 0 && typeof this.context.newPage === 'function') {
+            const blank = await this.createInternalPage()
+            this.keeperPage = blank
+            blank.on('close', () => {
+              if (this.keeperPage === blank) this.keeperPage = undefined
+            })
+          }
           await page.close()
-          this.pages.delete(ref)
-          this.chains.delete(ref)
+          this.removePageMapping(ref, page)
           return { kind: 'acked' }
         }
         default:
@@ -601,34 +774,250 @@ export class PlaywrightSession implements BrowserSession {
     }
   }
 
-  private adopt(page: Page): string {
-    const ref = `p${++this.refSeq}`
+  private async withPopupCapture<T>(
+    run: () => Promise<T>,
+  ): Promise<{ readonly value: T; readonly openedPages: readonly BrowserPageInfo[] }> {
+    const captured: Array<{ readonly ref: string; readonly page: Page }> = []
+    const collector = (entry: { readonly ref: string; readonly page: Page }) => {
+      captured.push(entry)
+    }
+    this.popupCollectors.add(collector)
+    try {
+      const value = await run()
+      await Promise.resolve()
+      const openedPages: BrowserPageInfo[] = []
+      for (const entry of captured) {
+        if (entry.page.isClosed()) continue
+        if (entry.page.url() === 'about:blank' && typeof entry.page.waitForLoadState === 'function') {
+          await entry.page.waitForLoadState('domcontentloaded', { timeout: 300 }).catch(() => undefined)
+        }
+        const title = await entry.page.title().catch(() => '')
+        openedPages.push({
+          ref: entry.ref,
+          url: entry.page.url(),
+          title,
+          isPopup: true,
+        })
+      }
+      return { value, openedPages }
+    } finally {
+      this.popupCollectors.delete(collector)
+    }
+  }
+
+  private async runClickWithSubmitFeedback(
+    page: Page,
+    runClick: () => Promise<void>,
+    waitMs: number,
+    signal?: AbortSignal,
+  ): Promise<BrowserSubmitFeedback> {
+    const beforeNotices = new Set<string>(
+      typeof page.evaluate === 'function'
+        ? await page.evaluate<string[]>(COLLECT_DOM_NOTICES_SCRIPT).catch(() => [])
+        : [],
+    )
+    const dialogs: BrowserSubmitFeedbackDialog[] = []
+    const networkResponses: BrowserSubmitFeedbackResponse[] = []
+    const pendingBodyReads: Promise<void>[] = []
+
+    const onDialog = (dialog: Dialog) => {
+      dialogs.push({
+        type: typeof dialog.type === 'function' ? dialog.type() : 'alert',
+        message: (typeof dialog.message === 'function' ? dialog.message() : '').slice(0, 300),
+      })
+      if (typeof dialog.accept === 'function') {
+        void dialog.accept().catch(() => undefined)
+      }
+    }
+
+    const onResponse = (response: PwResponse) => {
+      if (networkResponses.length >= 6) return
+      const req = typeof response.request === 'function' ? response.request() : undefined
+      const resourceType = typeof req?.resourceType === 'function' ? req.resourceType() : ''
+      const method = typeof req?.method === 'function' ? req.method().toUpperCase() : 'GET'
+      const url = typeof response.url === 'function' ? response.url() : ''
+      if (STATIC_ASSET_URL_PATTERN.test(url)) return
+      const isInteresting =
+        resourceType === 'xhr'
+        || resourceType === 'fetch'
+        || method === 'POST'
+        || method === 'PUT'
+        || method === 'PATCH'
+      if (!isInteresting) return
+
+      const status = typeof response.status === 'function' ? response.status() : 0
+      const headers = typeof response.headers === 'function' ? response.headers() : {}
+      const contentType = headers['content-type'] ?? headers['Content-Type'] ?? ''
+      const readTask = (async () => {
+        let bodySnippet: string | undefined
+        if (
+          typeof response.text === 'function'
+          && (contentType.length === 0 || /(?:json|text|xml|html|javascript)/iu.test(contentType))
+        ) {
+          const rawText = await response.text().catch(() => '')
+          const cleaned = rawText.replace(/\s+/gu, ' ').trim()
+          if (cleaned.length > 0) bodySnippet = cleaned.slice(0, 240)
+        }
+        networkResponses.push({
+          url: url.slice(0, 180),
+          status,
+          ...(contentType ? { contentType: contentType.slice(0, 60) } : {}),
+          ...(bodySnippet === undefined ? {} : { bodySnippet }),
+        })
+      })()
+      pendingBodyReads.push(readTask)
+    }
+
+    const attachable = page as unknown as {
+      on?: (event: string, listener: (...args: never[]) => void) => unknown
+      off?: (event: string, listener: (...args: never[]) => void) => unknown
+      removeListener?: (event: string, listener: (...args: never[]) => void) => unknown
+    }
+    attachable.on?.('dialog', onDialog as never)
+    attachable.on?.('response', onResponse as never)
+
+    try {
+      await runClick().catch((error: unknown) => {
+        if (isNavigationContextError(error)) return
+        throw error
+      })
+
+      const clampedWait = Math.max(0, Math.min(waitMs, 5_000))
+      if (clampedWait > 0) {
+        await new Promise<void>((resolve, reject) => {
+          if (signal?.aborted) {
+            reject(new BrowserError('browser click aborted', 'BROWSER_ABORTED'))
+            return
+          }
+          const onAbort = () => {
+            clearTimeout(timer)
+            reject(new BrowserError('browser click aborted', 'BROWSER_ABORTED'))
+          }
+          const timer = setTimeout(() => {
+            signal?.removeEventListener('abort', onAbort)
+            resolve()
+          }, clampedWait)
+          signal?.addEventListener('abort', onAbort, { once: true })
+        })
+      }
+
+      if (typeof page.waitForLoadState === 'function') {
+        await page.waitForLoadState('domcontentloaded', { timeout: 1_000 }).catch(() => undefined)
+      }
+      await Promise.allSettled(pendingBodyReads)
+    } finally {
+      const detach = attachable.off ?? attachable.removeListener
+      detach?.call(attachable, 'dialog', onDialog as never)
+      detach?.call(attachable, 'response', onResponse as never)
+    }
+
+    const afterNotices = typeof page.evaluate === 'function'
+      ? await page.evaluate<string[]>(COLLECT_DOM_NOTICES_SCRIPT).catch(() => [])
+      : []
+    const newNotices = afterNotices.filter(n => !beforeNotices.has(n))
+    const domNotices = newNotices.length > 0 ? newNotices : afterNotices.slice(0, 3)
+
+    const finalUrl = page.url()
+    const title = await page.title().catch(() => '')
+
+    return {
+      ...(dialogs.length > 0 ? { dialogs } : {}),
+      ...(networkResponses.length > 0 ? { networkResponses } : {}),
+      ...(domNotices.length > 0 ? { domNotices } : {}),
+      finalUrl,
+      ...(title ? { title } : {}),
+    }
+  }
+
+  private async createInternalPage(): Promise<Page> {
+    this.creatingInternalPage++
+    try {
+      return await this.context.newPage()
+    } finally {
+      this.creatingInternalPage--
+    }
+  }
+
+  private registerPage(ref: string, page: Page, isPopup: boolean): void {
     this.pages.set(ref, page)
-    this.lastRef = ref
+    this.pageToRef.set(page, ref)
+    this.pageMeta.set(ref, { isPopup })
+    if (!isPopup) {
+      this.lastRef = ref
+    }
     page.on('close', () => {
-      this.pages.delete(ref)
+      this.removePageMapping(ref, page)
     })
+  }
+
+  private removePageMapping(ref: string, page: Page): void {
+    if (this.pages.get(ref) !== page) return
+    this.pages.delete(ref)
+    this.pageMeta.delete(ref)
+    this.chains.delete(ref)
+    if (this.lastRef === ref) {
+      this.lastRef = this.findFallbackBusinessRef()
+    }
+  }
+
+  private findFallbackBusinessRef(): string | undefined {
+    let fallbackPopup: string | undefined
+    for (const [candidateRef, candidatePage] of this.pages.entries()) {
+      if (candidatePage.isClosed()) continue
+      if (this.pageMeta.get(candidateRef)?.isPopup) {
+        fallbackPopup = candidateRef
+      } else {
+        return candidateRef
+      }
+    }
+    return fallbackPopup
+  }
+
+  private adopt(page: Page): string {
+    const existingRef = this.pageToRef.get(page)
+    if (existingRef !== undefined && this.pages.get(existingRef) === page) {
+      this.lastRef = existingRef
+      return existingRef
+    }
+    const ref = `p${++this.refSeq}`
+    this.registerPage(ref, page, false)
     return ref
   }
 
   private async requirePage(ref: string | undefined): Promise<{ page: Page; ref: string }> {
     if (ref === undefined) {
-      const pages = this.context.pages()
+      if (this.lastRef !== undefined) {
+        const active = this.pages.get(this.lastRef)
+        if (active !== undefined && !active.isClosed()) {
+          return { page: active, ref: this.lastRef }
+        }
+      }
+      const fallbackRef = this.findFallbackBusinessRef()
+      if (fallbackRef !== undefined) {
+        const fallbackPage = this.pages.get(fallbackRef)!
+        this.lastRef = fallbackRef
+        return { page: fallbackPage, ref: fallbackRef }
+      }
+      if (this.keeperPage !== undefined && !this.keeperPage.isClosed()) {
+        const promoted = this.keeperPage
+        this.keeperPage = undefined
+        return { page: promoted, ref: this.adopt(promoted) }
+      }
+      const pages = this.context.pages().filter(p => !p.isClosed() && p !== this.keeperPage)
       const last = pages[pages.length - 1]
       if (last) {
-        if (this.pages.get(this.lastRef ?? '') !== last) {
-          this.adopt(last)
-        }
-        return { page: last, ref: this.lastRef as string }
+        return { page: last, ref: this.adopt(last) }
       }
-      const page = await this.context.newPage()
+      const page = await this.createInternalPage()
       return { page, ref: this.adopt(page) }
     }
     const page = this.pages.get(ref)
     if (page === undefined || page.isClosed()) {
       throw new BrowserError(`browser page "${ref}" is not open`, 'BROWSER_ACTION_FAILED')
     }
-    this.lastRef = ref
+    if (!this.pageMeta.get(ref)?.isPopup) {
+      this.lastRef = ref
+    }
     return { page, ref }
   }
 
@@ -636,15 +1025,19 @@ export class PlaywrightSession implements BrowserSession {
     if (ref !== undefined) {
       const existing = this.pages.get(ref)
       if (existing !== undefined && !existing.isClosed()) {
-        this.lastRef = ref
+        if (!this.pageMeta.get(ref)?.isPopup) {
+          this.lastRef = ref
+        }
         return { page: existing, ref }
       }
-      const page = await this.context.newPage()
-      this.pages.set(ref, page)
-      this.lastRef = ref
-      page.on('close', () => {
-        this.pages.delete(ref)
-      })
+      if (this.keeperPage !== undefined && !this.keeperPage.isClosed()) {
+        const page = this.keeperPage
+        this.keeperPage = undefined
+        this.registerPage(ref, page, false)
+        return { page, ref }
+      }
+      const page = await this.createInternalPage()
+      this.registerPage(ref, page, false)
       return { page, ref }
     }
     return await this.requirePage(undefined)

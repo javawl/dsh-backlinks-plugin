@@ -129,12 +129,18 @@ describe('built MCP server artifact & stdio handshake', () => {
     expect(backlinksTool.inputSchema.properties.sortOrder).toBeDefined()
     expect(backlinksTool.inputSchema.properties.remove).toBeDefined()
     expect(backlinksTool.inputSchema.properties.templateSignature).toBeDefined()
+    expect(backlinksTool.inputSchema.properties.websiteId?.description).toContain('batch_list')
     expect(backlinksTool.inputSchema.properties.waitTimeoutMs?.description).toContain('30000')
 
     const browserTool = tools[1]!
     expect(browserTool.inputSchema.properties.action?.enum).toContain('batch_fill')
     expect(browserTool.inputSchema.properties.action?.enum).toContain('wait_for_login')
     expect(browserTool.inputSchema.properties.action?.enum).toContain('comment_publish')
+    expect(browserTool.inputSchema.properties.action?.enum).toContain('listPages')
+    expect(browserTool.inputSchema.properties.action?.enum).toContain('directory_autofill')
+    expect(browserTool.inputSchema.properties.feedbackWaitMs).toBeDefined()
+    expect(browserTool.inputSchema.properties.tagline).toBeDefined()
+    expect(browserTool.inputSchema.properties.waitAfterFetchMs).toBeDefined()
     expect(browserTool.inputSchema.properties.nth).toBeDefined()
     expect(browserTool.inputSchema.properties.submitNth).toBeDefined()
     expect(browserTool.inputSchema.properties.full).toBeDefined()
