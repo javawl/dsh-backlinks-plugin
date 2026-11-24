@@ -17,7 +17,8 @@ import type { Page } from 'playwright-core';
 import type { BrowserCommentPublishCommand, BrowserCommentPublishResult, CommentPublishFormSummary, CommentPublishLoginInfo } from '../browser/types.ts';
 import type { SleepLike } from '../../mcp/backlinks-tool.ts';
 export declare const DEFAULT_LAZY_WAIT_MAX_MS = 2500;
-export declare const DEFAULT_WIX_LAZY_WAIT_MAX_MS = 9000;
+export declare const DEFAULT_WIX_LAZY_WAIT_MAX_MS = 15000;
+export declare const DEFAULT_WIX_NAV_TIMEOUT_MS = 15000;
 export declare const DEFAULT_WIX_EXPAND_WAIT_MAX_MS = 4000;
 export declare const DEFAULT_WIX_POST_SUBMIT_WAIT_MS = 2500;
 export interface WordPressInspection {
@@ -25,12 +26,14 @@ export interface WordPressInspection {
     readonly collapsedTriggerSelector?: string;
     readonly formSelector?: string;
     readonly commentSelector?: string;
+    readonly commentIsContentEditable?: boolean;
     readonly authorSelector?: string;
     readonly authorRequired?: boolean;
     readonly emailSelector?: string;
     readonly emailRequired?: boolean;
     readonly urlSelector?: string;
     readonly submitSelector?: string;
+    readonly guestToggleSelector?: string;
     readonly captcha?: {
         readonly detected: boolean;
         readonly kind?: string;
@@ -60,6 +63,10 @@ export interface WixInspection {
     readonly captchaDetected: boolean;
     readonly hasGuestEditor: boolean;
     readonly hasLazyPlaceholder: boolean;
+    readonly hasEmptyCommentPlaceholder?: boolean;
+    readonly hasLoadingIndicator?: boolean;
+    readonly hasCommentListOrCount?: boolean;
+    readonly hasWriteCommentPrompt?: boolean;
     readonly hasCommentCountOnly: boolean;
     readonly hasBlogPostStructure: boolean;
     readonly isBlogListPage: boolean;
@@ -118,6 +125,7 @@ export interface WixPostSubmitInspection {
     readonly hasCaptcha: boolean;
     readonly hasLoginDialog: boolean;
     readonly moderationNotice?: string;
+    readonly ackButtonSelector?: string;
     readonly dialogText?: string;
     readonly loginInfo?: CommentPublishLoginInfo;
 }
@@ -138,11 +146,11 @@ export declare function stripHtmlLinkForRichEditor(commentText: string, anchorTe
  * banners, CAPTCHAs, and minimal fallback form metadata.
  */
 export declare const INSPECT_COMMENT_PAGE_SCRIPT: string;
-/** Post-Publish Wix inspection checking visible `role=dialog` for reCAPTCHA, login/signup, or moderation. */
+/** Post-Publish Wix inspection checking visible `role=dialog` for reCAPTCHA, login/signup, or moderation (incl. Thai 'รับทราบ'). */
 export declare const INSPECT_WIX_POST_SUBMIT_SCRIPT: string;
 /** Lightweight self-contained script run inside non-ad child frames. */
 export declare const INSPECT_CHILD_FRAME_SCRIPT: string;
-/** Script evaluated inside `iframe[src*="blogger.com/comment"]`. */
+/** Script evaluated inside Blogger `#comment-editor` / `iframe[src*="blogger.com/comment"]`. */
 export declare const INSPECT_BLOGGER_FRAME_SCRIPT: string;
 /**
  * Self-contained browser evaluation function checking post-submit / post-reload
@@ -169,6 +177,23 @@ export interface ExecuteCommentPublishOptions {
 export declare const CAPTCHA_FRAME_URL_PATTERN: RegExp;
 export declare const KNOWN_COMMENT_FRAME_URL_PATTERN: RegExp;
 export declare const NON_COMMENT_FRAME_URL_PATTERN: RegExp;
+export declare const POST_SUBMIT_WAF_FINGERPRINT_PATTERN: RegExp;
+export interface PostSubmitWafDetectionInput {
+    readonly httpStatus?: number;
+    readonly responseHeaders?: Readonly<Record<string, string>>;
+    readonly responseSnippet?: string;
+    readonly postSubmitUrl?: string;
+    readonly postSubmitSnippet?: string;
+    readonly title?: string;
+}
+export interface PostSubmitWafDetection {
+    readonly blocked: boolean;
+    readonly httpStatus?: number;
+    readonly provider?: string;
+    readonly snippet?: string;
+}
+/** Detect HTTP 403 or 406/429 WAF-fingerprinted blocks returned after comment submission. */
+export declare function detectPostSubmitWafBlock(input: PostSubmitWafDetectionInput): PostSubmitWafDetection;
 export declare function isNavigationContextError(error: unknown): boolean;
 export declare function inspectChildFrames(page: Page): Promise<ChildFramesInspection>;
 export declare function executeCommentPublish(page: Page, ref: string, command: BrowserCommentPublishCommand, options: ExecuteCommentPublishOptions): Promise<BrowserCommentPublishResult>;

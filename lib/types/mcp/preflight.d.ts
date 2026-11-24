@@ -158,7 +158,10 @@ export declare function readBoundedBodyText(response: Response, options?: {
 export declare function detectSiteHint(finalUrl: string, headers: Headers, body: string): PreflightSiteHint;
 /**
  * Group timed-out items sharing a common URL path prefix pattern (e.g. >= 3 items
- * matching `/nano-banana-pro-*` or `/blog/post/*`) into `timeoutClusters`.
+ * matching `/nano-banana-pro-*` or `/blog/post/*`) or shared mid-slug multi-word
+ * n-gram phrase (e.g. `/*nano-banana-pro*` merging `/nano-banana-pro-*` with
+ * `/how-nano-banana-pro-*` and `/the-science-behind-nano-banana-pro/`) into
+ * deduplicated `timeoutClusters`.
  */
 export declare function detectTimeoutClusters(retryableItems: readonly PreflightRetryableItem[], minClusterSize?: number): readonly PreflightTimeoutCluster[];
 export declare function runBatchPreflight(batchSource: BacklinkBatchSourceProvider, detail: BacklinkBatchDetail, options: BatchPreflightOptions, signal?: AbortSignal): Promise<BatchPreflightResult>;

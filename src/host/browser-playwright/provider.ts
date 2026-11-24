@@ -16,7 +16,7 @@ import type {
   BrowserSubmitFeedbackResponse,
 } from '../browser/types.ts'
 import { BrowserError } from '../browser/types.ts'
-import { executeCommentPublish, isNavigationContextError } from './comment-publish.ts'
+import { DEFAULT_WIX_NAV_TIMEOUT_MS, executeCommentPublish, isNavigationContextError } from './comment-publish.ts'
 import {
   COMPACT_TEXT_SCRIPT,
   compactAriaSnapshot,
@@ -475,7 +475,10 @@ export class PlaywrightSession implements BrowserSession {
       switch (command.kind) {
         case 'navigate': {
           const { page, ref } = await this.resolveForNavigate(command.page)
-          const timeout = command.timeoutMs ?? this.defaultTimeoutMs
+          const baseTimeout = command.timeoutMs ?? this.defaultTimeoutMs
+          const timeout = command.siteHint === 'wix_blog'
+            ? Math.max(baseTimeout, DEFAULT_WIX_NAV_TIMEOUT_MS)
+            : baseTimeout
           const requestedWaitUntil = command.waitUntil
           if (requestedWaitUntil === undefined) {
             await page.goto(command.url, { timeout, waitUntil: 'domcontentloaded' })

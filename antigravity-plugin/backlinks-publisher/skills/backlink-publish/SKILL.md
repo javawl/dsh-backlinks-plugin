@@ -10,27 +10,28 @@ description: 本工作区所有"发外链/发布外链/发布批次/跑批次/�
 1. **幂等**：一个条目只允许一次"最终提交"动作，一个来源对一个网站只发一次——发布前先验证发布记录和状态（见单条目循环第 1 步），已提交/已上线的条目自己跳过，绝不重复发布。提交后拿不到明确回执（结果未知 / `uncertain_after_submit`）时，回写 `failed + manual_required`，**绝不自动重试**。
 2. **诚实回写**：`live` 必须是你亲自抓取公开页面并确认包含可点击目标链接后的结论；"提交成功但待审核"只能回写 `submitted`。
 
-## 一页式高效执行速查卡（v2.2 快路径 · 常规站点禁止 `read_file` 翻参考文档）
+## 一页式高效执行速查卡（v2.2.1 快路径 · 常规站点禁止 `read_file` 翻参考文档）
 
 > **零 `read_file` 原则**：本速查卡与下方主流程已覆盖全部常规目录、博客、表单规则；**常规站点无需调用 `read_file` 翻阅 `references/*` 多个参考手册**，仅在遇到异常登录态或特殊模板问题时按需查阅。
 
 1. **前置预检（1 次）**：`backlinks action="batch_preflight"`（`batchId`、`autoSkip: true`、`autoSkipTagged: true`、`autoFailWaf: true`）。
-   - HTML 嗅探全读 ≤128KB 或首 32KB + 尾 64KB；识别 `/go/` 外跳（输出 `rootSubmitHint`）与 ≥3 条同路径超时聚类（`timeoutClusters`）。
+   - HTML 嗅探全读 ≤128KB 或首 32KB + 尾 64KB；识别 `/go/` 外跳（输出 `rootSubmitHint`）与 ≥3 条同路径前缀/中段 slug 词元超时聚类（`timeoutClusters`，自动合并 `/nano-banana-pro-*` 与 `/how-nano-banana-pro-*` 等同类超时站）。
    - 默认自动排除已带 `waf_403` 的条目（进 `heldForManual` / `skippedByTag.softItemIds`），`autoFailWaf: true` 直接标新老 `waf_403` 为 `failed(manual_required)`。
    - 拿到存活清单 `runnableItems: [{ itemId, domain, siteHint, rootSubmitHint? }]`（`wordpress_comment` / `typecho_comment` / `wix_blog` / `comments_closed_hint` / `directory_or_form` / `other`）。
 2. **读取批次（仅 1 次）**：`batch_list` 支持 `websiteId` 精准过滤；`batch_get`（`compact: true`, `pendingOnly: true`）一次拿齐 `website` 6 字段、`anchors` 与 `publishedSourceIds`。
 3. **分片认领**：仅从 `runnableItemIds` 挑 **5–6 条** `batch_claim`（同域 `sourceHost` 串行；单会话 10–12 条 / 2 片）。
 4. **博客与目录确定性快路径（`comment_publish` / `directory_autofill`）**：
-   - 博客评论（`wordpress_comment` / `typecho_comment` / `wix_blog` / `comments_closed_hint` / Blogger / 自定义博客）：**直接调用 `browser action="comment_publish"`**（`url`、`commentText`、`authorName`、`authorEmail`、`websiteUrl`、`anchorText`、可选 `page`）。内置 Wix 8–10s 懒加载轮询、自动关遮罩、非评论 iframe 过滤、会员墙 `needs_login` 快判、`Space` 自动转超链 `<a href>` 核验、发布后 2–3s 弹窗+重载双重核验；WP 302 上下文销毁自恢复、`#comment-ID` 缓存降级与折叠评论展开；Typecho 与 Blogger iframe 支持。
+   - 博客评论（`wordpress_comment` / `typecho_comment` / `wix_blog` / `comments_closed_hint` / Blogger / 自定义博客）：**直接调用 `browser action="comment_publish"`**（`url`、`commentText`、`authorName`、`authorEmail`、`websiteUrl`、`anchorText`、可选 `siteHint` / `page`）。内置 Wix 14–15s 渐进早退懒加载（`siteHint: "wix_blog"` 首次导航放宽至 15s）、已登录 `comment-box-rce-wrapper` 优先填发、关评空占位安全直判 `no_form`、disabled 按钮降级、泰语 `'รับทราบ'` 审核弹窗识别关闭；WP 302 自恢复、Jetpack Verbum 访客流自动展开、POST 403/WAF 直判 `blocked_waf`；Typecho 与 Blogger `#comment-editor` `role="button"` Publish 支持。
    - 返回 `outcome` 映射：
      - `live` → `item_result(live, publicUrl)`
-     - `submitted` → `item_result(submitted, publicUrl)`（含多语种待审与 `post_submit_comment_id_cached`）
+     - `submitted` → `item_result(submitted, publicUrl)`（含多语种/泰语待审与 `post_submit_comment_id_cached`）
      - `comments_closed` → `item_result(skipped, skipReason)` + `source_tags(["评论关闭"])`
      - `no_form` → `item_result(skipped, skipReason)` + `source_tags(["no_form"])`
      - `blocked_captcha` → `bringToFront`，`item_result(failed, manual_required, templateSignature)` + `source_tags(["has_captcha"])`（绝不绕过验证码）
+     - `blocked_waf` → `item_result(failed, manual_required, templateSignature)` + `source_tags(["waf_403"])`（提交被 HTTP 403/406/429 WAF 拦截，绝不重试提交）
      - `needs_login` → Wix/Blogger 会员墙（未盲点 Publish）；按 `loginInfo` + `snapshot format="interactive"` 走 Google SSO 或邮箱注册
      - `uncertain_after_submit` → **`item_result(failed, manual_required)`（严守幂等，绝不重发；查看 `reason`/`postSubmitUrl`/`postSubmitSnippet`）**
-     - `needs_llm_fallback` → 页面已打开且附 `formSummary` + `bottomSnapshot`，直接接着操作勿重复 `navigate`！
+     - `needs_llm_fallback` → 页面已打开且附 `formSummary` + `bottomSnapshot`（留意 `reason` 如 `submit_button_disabled`），直接接着操作勿重复 `navigate`！
    - 目录站（MkDirs / AI-Autofill 提交页）：先调 **`browser action="directory_autofill"`**（`url`、`websiteUrl`、`name`、`tagline`、`description`、`email`）自动抓取并补齐缺失字段，再补齐剩余必填项用 `batch_fill` 提交。
 5. **非博客/弹窗/回退站点**：
    - `snapshot` 默认**紧凑模式（4,500 字符）**：`>15` 项 `<select>` 自动折叠为前 3 + `... (共 N 项)` + 末 2，状态/成功/错误文案豁免裁剪，`interactive` 补齐 `input[type=url]`，`[forms]` 区分 `#id` 与 `[name=]`；按需传 `full: true`。

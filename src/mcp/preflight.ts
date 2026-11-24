@@ -586,9 +586,27 @@ function detectGoRedirectHint(originalUrl: URL, finalUrl: string): {
   }
 }
 
+const TIMEOUT_CLUSTER_SLUG_STOPWORDS = new Set([
+  'a', 'an', 'the', 'of', 'to', 'in', 'on', 'at', 'by', 'as', 'is', 'it', 'or', 'be', 'do',
+  'we', 'us', 'my', 'no', 'so', 'up', 'out', 'off', 'via', 'vs',
+  'and', 'but', 'for', 'with', 'from', 'that', 'this', 'these', 'those', 'into', 'onto',
+  'over', 'under', 'about', 'after', 'before', 'behind', 'between', 'through', 'your', 'our',
+  'their', 'its', 'was', 'were', 'are', 'have', 'has', 'had', 'can', 'will',
+  'how', 'why', 'what', 'when', 'where', 'who',
+])
+
+function isSlugNoiseToken(token: string): boolean {
+  if (token.length <= 1) return true
+  if (/^\d+$/u.test(token)) return true
+  return TIMEOUT_CLUSTER_SLUG_STOPWORDS.has(token)
+}
+
 /**
  * Group timed-out items sharing a common URL path prefix pattern (e.g. >= 3 items
- * matching `/nano-banana-pro-*` or `/blog/post/*`) into `timeoutClusters`.
+ * matching `/nano-banana-pro-*` or `/blog/post/*`) or shared mid-slug multi-word
+ * n-gram phrase (e.g. `/*nano-banana-pro*` merging `/nano-banana-pro-*` with
+ * `/how-nano-banana-pro-*` and `/the-science-behind-nano-banana-pro/`) into
+ * deduplicated `timeoutClusters`.
  */
 export function detectTimeoutClusters(
   retryableItems: readonly PreflightRetryableItem[],
@@ -597,15 +615,24 @@ export function detectTimeoutClusters(
   const timedOut = retryableItems.filter(item => item.reason === 'timeout')
   if (timedOut.length < minClusterSize) return []
 
-  const groups = new Map<string, { readonly items: PreflightRetryableItem[]; readonly specificity: number }>()
-  const addPattern = (pattern: string, item: PreflightRetryableItem, specificity: number) => {
+  type ClusterPatternKind = 'prefix' | 'slug_ngram' | 'dir'
+  const groups = new Map<
+    string,
+    { readonly items: PreflightRetryableItem[]; readonly specificity: number; readonly kind: ClusterPatternKind }
+  >()
+  const addPattern = (
+    pattern: string,
+    item: PreflightRetryableItem,
+    specificity: number,
+    kind: ClusterPatternKind,
+  ) => {
     const existing = groups.get(pattern)
     if (existing) {
       if (!existing.items.some(i => i.id === item.id)) {
         existing.items.push(item)
       }
     } else {
-      groups.set(pattern, { items: [item], specificity })
+      groups.set(pattern, { items: [item], specificity, kind })
     }
   }
 
@@ -622,26 +649,50 @@ export function detectTimeoutClusters(
     if (segments.length === 0) continue
 
     const lastIdx = segments.length - 1
-    const lastSeg = segments[lastIdx]!
+    const lastSeg = segments[lastIdx]!.replace(/\.(?:html?|php|aspx?)$/u, '')
     const dirPrefix = segments.length > 1 ? `/${segments.slice(0, lastIdx).join('/')}` : ''
 
-    // Hyphenated slug prefix patterns (e.g. `/nano-banana-pro-guide` -> `/nano-banana-pro-*`, `/nano-banana-*`).
+    // 1. Hyphenated slug prefix patterns (e.g. `/nano-banana-pro-guide` -> `/nano-banana-pro-*`, `/nano-banana-*`).
     const hyphenTokens = lastSeg.split('-').filter(Boolean)
     if (hyphenTokens.length >= 3) {
       for (let len = hyphenTokens.length - 1; len >= 2; len--) {
-        const prefix = hyphenTokens.slice(0, len).join('-')
+        const prefixTokens = hyphenTokens.slice(0, len)
+        const meaningfulCount = prefixTokens.filter(tok => !isSlugNoiseToken(tok)).length
+        if (meaningfulCount === 0) continue
+        const prefix = prefixTokens.join('-')
         const pattern = `${dirPrefix}/${prefix}-*`
-        addPattern(pattern, item, 100 + pattern.length)
+        addPattern(pattern, item, 200 + len * 20 + pattern.length, 'prefix')
       }
-    } else if (hyphenTokens.length === 2) {
+    } else if (hyphenTokens.length === 2 && !isSlugNoiseToken(hyphenTokens[0]!)) {
       const pattern = `${dirPrefix}/${hyphenTokens[0]}-*`
-      addPattern(pattern, item, 80 + pattern.length)
+      addPattern(pattern, item, 180 + pattern.length, 'prefix')
     }
 
-    // Multi-segment directory prefix patterns (e.g. `/tools/foo` -> `/tools/*`).
+    // 2. Mid-slug contiguous multi-word n-gram patterns (2-4 tokens, boundary-filtered for stopwords/numbers)
+    //    so `/how-nano-banana-pro-*` and `/the-science-behind-nano-banana-pro/` merge with `/nano-banana-pro-*`.
+    for (const rawSegment of segments) {
+      const cleanSegment = rawSegment.replace(/\.(?:html?|php|aspx?)$/u, '')
+      const tokens = cleanSegment.split('-').filter(Boolean)
+      if (tokens.length < 2) continue
+      const maxN = Math.min(4, tokens.length)
+      for (let n = 2; n <= maxN; n++) {
+        for (let start = 0; start <= tokens.length - n; start++) {
+          const slice = tokens.slice(start, start + n)
+          if (isSlugNoiseToken(slice[0]!) || isSlugNoiseToken(slice[slice.length - 1]!)) continue
+          const meaningfulCount = slice.filter(tok => !isSlugNoiseToken(tok)).length
+          if (meaningfulCount < 2) continue
+          const phrase = slice.join('-')
+          if (phrase.length < 5) continue
+          const pattern = `/*${phrase}*`
+          addPattern(pattern, item, 150 + n * 20 + phrase.length, 'slug_ngram')
+        }
+      }
+    }
+
+    // 3. Multi-segment directory prefix patterns (e.g. `/tools/foo` -> `/tools/*`).
     if (segments.length >= 2) {
       const pattern = `/${segments.slice(0, -1).join('/')}/*`
-      addPattern(pattern, item, 50 + pattern.length)
+      addPattern(pattern, item, 50 + pattern.length, 'dir')
     }
   }
 
@@ -653,21 +704,22 @@ export function detectTimeoutClusters(
     })
 
   const clusters: PreflightTimeoutCluster[] = []
-  const coveredSets: Set<number>[] = []
+  const assignedIds = new Set<number>()
 
   for (const [pattern, entry] of candidates) {
-    const ids = entry.items.map(i => i.id)
-    const alreadyCovered = coveredSets.some(set => ids.every(id => set.has(id)))
-    if (alreadyCovered) continue
+    const remainingItems = entry.items.filter(item => !assignedIds.has(item.id))
+    if (remainingItems.length < minClusterSize) continue
 
-    coveredSets.push(new Set(ids))
-    const hosts = [...new Set(entry.items.map(i => i.host))]
+    const ids = remainingItems.map(i => i.id)
+    for (const id of ids) assignedIds.add(id)
+    const hosts = [...new Set(remainingItems.map(i => i.host))]
+    const kindLabel = entry.kind === 'slug_ngram' ? '路径关键词' : '路径前缀'
     clusters.push({
       pattern,
       count: ids.length,
       itemIds: ids,
       hosts,
-      hint: `${ids.length} 条超时条目共享路径前缀 ${pattern}，疑似同模板慢站/批量不可达，建议跳过或延后单独重试`,
+      hint: `${ids.length} 条超时条目共享${kindLabel} ${pattern}，疑似同模板慢站/批量不可达，建议跳过或延后单独重试`,
     })
   }
 

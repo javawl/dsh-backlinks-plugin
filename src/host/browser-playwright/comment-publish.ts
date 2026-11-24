@@ -27,7 +27,8 @@ import type { SleepLike } from '../../mcp/backlinks-tool.ts'
 import { dismissBlockingOverlays } from './overlay.ts'
 
 export const DEFAULT_LAZY_WAIT_MAX_MS = 2_500
-export const DEFAULT_WIX_LAZY_WAIT_MAX_MS = 9_000
+export const DEFAULT_WIX_LAZY_WAIT_MAX_MS = 15_000
+export const DEFAULT_WIX_NAV_TIMEOUT_MS = 15_000
 export const DEFAULT_WIX_EXPAND_WAIT_MAX_MS = 4_000
 export const DEFAULT_WIX_POST_SUBMIT_WAIT_MS = 2_500
 const LAZY_POLL_INTERVAL_MS = 400
@@ -40,12 +41,14 @@ export interface WordPressInspection {
   readonly collapsedTriggerSelector?: string
   readonly formSelector?: string
   readonly commentSelector?: string
+  readonly commentIsContentEditable?: boolean
   readonly authorSelector?: string
   readonly authorRequired?: boolean
   readonly emailSelector?: string
   readonly emailRequired?: boolean
   readonly urlSelector?: string
   readonly submitSelector?: string
+  readonly guestToggleSelector?: string
   readonly captcha?: {
     readonly detected: boolean
     readonly kind?: string
@@ -77,6 +80,10 @@ export interface WixInspection {
   readonly captchaDetected: boolean
   readonly hasGuestEditor: boolean
   readonly hasLazyPlaceholder: boolean
+  readonly hasEmptyCommentPlaceholder?: boolean
+  readonly hasLoadingIndicator?: boolean
+  readonly hasCommentListOrCount?: boolean
+  readonly hasWriteCommentPrompt?: boolean
   readonly hasCommentCountOnly: boolean
   readonly hasBlogPostStructure: boolean
   readonly isBlogListPage: boolean
@@ -139,6 +146,7 @@ export interface WixPostSubmitInspection {
   readonly hasCaptcha: boolean
   readonly hasLoginDialog: boolean
   readonly moderationNotice?: string
+  readonly ackButtonSelector?: string
   readonly dialogText?: string
   readonly loginInfo?: CommentPublishLoginInfo
 }
@@ -150,6 +158,7 @@ interface BloggerFrameInspection {
   readonly loginInfo?: CommentPublishLoginInfo
   readonly hasEditor: boolean
   readonly commentSelector?: string
+  readonly commentIsContentEditable?: boolean
   readonly identitySelectSelector?: string
   readonly supportsNameUrlIdentity?: boolean
   readonly anonNameSelector?: string
@@ -254,8 +263,19 @@ export const INSPECT_COMMENT_PAGE_SCRIPT = String.raw`(() => {
     }
   };
 
+  const isContentEditableEl = (el) => {
+    if (!el || el.nodeType !== 1) return false;
+    const ce = el.getAttribute('contenteditable');
+    const editable = ce === 'true' || ce === '' || ce === 'plaintext-only' || el.isContentEditable === true;
+    if (!editable) return false;
+    if (el.parentElement && el.parentElement.closest('[contenteditable="true"], [contenteditable=""], [contenteditable="plaintext-only"]')) {
+      return false;
+    }
+    return true;
+  };
+
   const scopeSelectorFor = (scopeEl) => {
-    if (!scopeEl) return '';
+    if (!scopeEl || scopeEl === document) return '';
     if (scopeEl.id) {
       const byId = '#' + escapeCss(scopeEl.id);
       if (uniqueInScope(scopeEl, byId)) return byId;
@@ -264,6 +284,11 @@ export const INSPECT_COMMENT_PAGE_SCRIPT = String.raw`(() => {
     if (hook) {
       const byHook = '[data-hook="' + hook.replace(/"/g, '\\"') + '"]';
       if (uniqueInScope(scopeEl, byHook)) return byHook;
+    }
+    const testId = scopeEl.getAttribute && scopeEl.getAttribute('data-testid');
+    if (testId) {
+      const byTestId = '[data-testid="' + testId.replace(/"/g, '\\"') + '"]';
+      if (uniqueInScope(scopeEl, byTestId)) return byTestId;
     }
     return scopeEl.localName || '';
   };
@@ -289,31 +314,63 @@ export const INSPECT_COMMENT_PAGE_SCRIPT = String.raw`(() => {
       const byTestId = '[data-testid="' + testIdAttr.replace(/"/g, '\\"') + '"]';
       if (uniqueInScope(el, byTestId)) return byTestId;
     }
-    if (scopeEl) {
-      const scopeSel = scopeSelectorFor(scopeEl);
-      if (scopeSel && nameAttr) {
+    const tryScoped = (anchorEl) => {
+      if (!anchorEl || anchorEl === document || anchorEl === el) return '';
+      const scopeSel = scopeSelectorFor(anchorEl);
+      if (!scopeSel) return '';
+      if (nameAttr) {
         const scopedName = scopeSel + ' ' + el.localName + '[name="' + nameAttr.replace(/"/g, '\\"') + '"]';
         if (uniqueInScope(el, scopedName)) return scopedName;
       }
-      if (scopeSel && hookAttr) {
+      if (hookAttr) {
         const scopedHook = scopeSel + ' [data-hook="' + hookAttr.replace(/"/g, '\\"') + '"]';
         if (uniqueInScope(el, scopedHook)) return scopedHook;
       }
-      if (scopeSel && el.type) {
+      if (el.type) {
         const scopedType = scopeSel + ' ' + el.localName + '[type="' + String(el.type).replace(/"/g, '\\"') + '"]';
         if (uniqueInScope(el, scopedType)) return scopedType;
       }
-      if (scopeSel && el.getAttribute('contenteditable') === 'true') {
+      if (el.getAttribute('contenteditable') === 'true') {
         const scopedCe = scopeSel + ' [contenteditable="true"]';
         if (uniqueInScope(el, scopedCe)) return scopedCe;
       }
-      if (scopeSel && el.getAttribute('role') === 'textbox') {
+      if (isContentEditableEl(el)) {
+        const scopedCeAny = scopeSel + ' [contenteditable]';
+        if (uniqueInScope(el, scopedCeAny)) return scopedCeAny;
+      }
+      if (el.getAttribute('role') === 'textbox') {
         const scopedTb = scopeSel + ' [role="textbox"]';
         if (uniqueInScope(el, scopedTb)) return scopedTb;
       }
+      if (el.localName === 'textarea') {
+        const scopedTa = scopeSel + ' textarea';
+        if (uniqueInScope(el, scopedTa)) return scopedTa;
+      }
+      const aria = el.getAttribute('aria-label');
+      if (aria) {
+        const scopedAria = scopeSel + ' ' + el.localName + '[aria-label="' + aria.replace(/"/g, '\\"') + '"]';
+        if (uniqueInScope(el, scopedAria)) return scopedAria;
+      }
+      if (el.getAttribute('role') === 'button') {
+        const scopedRoleBtn = scopeSel + ' [role="button"]';
+        if (uniqueInScope(el, scopedRoleBtn)) return scopedRoleBtn;
+      }
+      if (el.localName === 'button') {
+        const scopedBtn = scopeSel + ' button';
+        if (uniqueInScope(el, scopedBtn)) return scopedBtn;
+      }
+      return '';
+    };
+    const fromScope = tryScoped(scopeEl);
+    if (fromScope) return fromScope;
+    const nearestAnchor = el.parentElement ? el.parentElement.closest('[data-hook], [data-testid], [id]') : null;
+    if (nearestAnchor && nearestAnchor !== scopeEl) {
+      const fromNearest = tryScoped(nearestAnchor);
+      if (fromNearest) return fromNearest;
     }
+    const anchorSel = nearestAnchor ? scopeSelectorFor(nearestAnchor) : '';
     let path = '';
-    for (let node = el, depth = 0; node && node.nodeType === 1 && depth < 8; node = node.parentElement, depth++) {
+    for (let node = el, depth = 0; node && node.nodeType === 1 && depth < 16; node = node.parentElement, depth++) {
       const tag = node.localName;
       const parent = node.parentNode;
       if (!parent) break;
@@ -321,6 +378,10 @@ export const INSPECT_COMMENT_PAGE_SCRIPT = String.raw`(() => {
       const seg = siblings.length > 1 ? tag + ':nth-of-type(' + (siblings.indexOf(node) + 1) + ')' : tag;
       path = path ? seg + ' > ' + path : seg;
       if (uniqueInScope(el, path)) return path;
+      if (nearestAnchor && node.parentElement === nearestAnchor && anchorSel) {
+        const anchored = anchorSel + ' > ' + path;
+        if (uniqueInScope(el, anchored)) return anchored;
+      }
     }
     return '';
   };
@@ -331,14 +392,16 @@ export const INSPECT_COMMENT_PAGE_SCRIPT = String.raw`(() => {
     || /wixstatic\.com|static\.parastorage\.com|_wixCIDX|wix-warmup-data|communities-blog-ooi/i.test(docHtmlPrefix)
   );
   const isWordPress = !!(
-    document.querySelector('form#commentform, form[action*="wp-comments-post.php"], meta[name="generator"][content*="WordPress" i], link[href*="wp-content"]')
-    || /wp-comments-post\.php|wp-content/i.test(docHtmlPrefix)
+    document.querySelector('form#commentform, form[action*="wp-comments-post.php"], .verbum-comments, .jetpack-comments, meta[name="generator"][content*="WordPress" i], link[href*="wp-content"]')
+    || /wp-comments-post\.php|wp-content|verbum-comments/i.test(docHtmlPrefix)
   );
   const isTypecho = !!(
     document.querySelector('meta[name="generator"][content*="Typecho" i]')
     || (document.querySelector('input[name="mail"]') && document.querySelector('textarea[name="text"]'))
   );
-  const hasBloggerCommentIframe = !!document.querySelector('iframe[src*="blogger.com/comment" i]');
+  const hasBloggerCommentIframe = !!document.querySelector(
+    'iframe#comment-editor, iframe[name="comment-editor"], iframe[src*="blogger.com/comment" i], iframe[src*="blogspot.com/comment" i]'
+  );
 
   const extractVisibleText = (el) => {
     if (!el) return '';
@@ -407,40 +470,67 @@ export const INSPECT_COMMENT_PAGE_SCRIPT = String.raw`(() => {
     if (match) closedPhrase = match[0];
   }
 
-  // WordPress comment form detection (including hidden #comment collapsed trigger detection).
+  // WordPress comment form detection (including hidden #comment collapsed trigger & Jetpack Verbum Gutenberg contenteditable).
   const allWpTextareas = Array.from(document.querySelectorAll('textarea[name="comment"], textarea#comment'));
   const wpCommentTextarea = allWpTextareas.find(isVisible) || null;
   const wpAnyTextarea = wpCommentTextarea || allWpTextareas[0] || null;
   const wpFormCandidate = document.querySelector('form#commentform, form[action*="wp-comments-post.php"]')
-    || (wpAnyTextarea ? wpAnyTextarea.closest('form') : null);
+    || (wpAnyTextarea ? wpAnyTextarea.closest('form') : null)
+    || (isWordPress ? document.querySelector('.verbum-comments form, .jetpack-comments form, #respond form, #respond.comment-respond, .verbum-comments, .jetpack-comments') : null);
 
   let wordpress = { found: false };
   if (wpFormCandidate && isVisible(wpFormCandidate)) {
-    const commentEl = wpFormCandidate.querySelector('textarea[name="comment"], textarea#comment, textarea:not([name*="ak_"])');
-    const authorEl = wpFormCandidate.querySelector('input[name="author"], input#author');
-    const emailEl = wpFormCandidate.querySelector('input[name="email"], input#email, input[type="email"]');
-    const urlEl = wpFormCandidate.querySelector('input[name="url"], input#url, input[type="url"], input[name*="website" i]');
-    const submitEl = wpFormCandidate.querySelector('button[type="submit"], input[type="submit"], button:not([type="button"]):not([type="reset"])');
+    const wpSearchScope = wpFormCandidate.closest('#respond, .verbum-comments, .jetpack-comments') || wpFormCandidate;
+    const textareaEl = Array.from(wpFormCandidate.querySelectorAll('textarea[name="comment"], textarea#comment, textarea:not([name*="ak_"])'))
+      .find(isVisible);
+    const richCommentEl = textareaEl ? null : Array.from(
+      wpSearchScope.querySelectorAll(
+        '.verbum-editor [contenteditable="true"], .verbum-editor [contenteditable=""], .block-editor-rich-text__editable[contenteditable="true"], [contenteditable="true"][role="textbox"], [contenteditable="true"], [role="textbox"]'
+      )
+    ).find(el => isVisible(el) && (isContentEditableEl(el) || el.getAttribute('role') === 'textbox'));
+    const commentEl = textareaEl || richCommentEl;
+    const authorEl = Array.from(wpSearchScope.querySelectorAll('input[name="author"], input#author, input[name="name"], input[placeholder*="name" i], input[aria-label*="name" i]')).find(isVisible);
+    const emailEl = Array.from(wpSearchScope.querySelectorAll('input[name="email"], input#email, input[type="email"], input[placeholder*="email" i], input[aria-label*="email" i]')).find(isVisible);
+    const urlEl = Array.from(wpSearchScope.querySelectorAll('input[name="url"], input#url, input[type="url"], input[name*="website" i], input[placeholder*="website" i], input[placeholder*="url" i], input[aria-label*="website" i]')).find(isVisible);
+    const submitEl = Array.from(
+      wpSearchScope.querySelectorAll('#submit, button#submit, input#submit, button[type="submit"], input[type="submit"], button:not([type="button"]):not([type="reset"]), [role="button"]')
+    ).find(el => {
+      if (!isVisible(el)) return false;
+      if (el.id === 'submit' || el.type === 'submit') return true;
+      const t = clean(el.innerText || el.textContent || el.getAttribute('value') || el.getAttribute('aria-label'));
+      return /^(?:post\s+comment|comment|publish|submit|reply|send|发表评论|提交评论|发布|提交)$/i.test(t);
+    });
+    const guestToggleRegex = /^(?:add\s+your\s+name|continue\s+as\s+(?:a\s+)?guest|comment\s+as\s+(?:a\s+)?guest|post\s+as\s+(?:a\s+)?guest|leave\s+a\s+comment\s+as\s+(?:a\s+)?guest|fill\s+in\s+your\s+details|use\s+name\s+and\s+email)$/i;
+    const guestToggleEl = Array.from(wpSearchScope.querySelectorAll('button, [role="button"], a')).find(el => {
+      if (!isVisible(el) || el === submitEl) return false;
+      const t = clean(el.innerText || el.textContent || el.getAttribute('aria-label') || el.getAttribute('title'));
+      return guestToggleRegex.test(t);
+    });
     const captcha = detectFormCaptcha(wpFormCandidate, 'wordpress');
 
     if (commentEl && isVisible(commentEl)) {
+      const commentIsContentEditable = commentEl.localName !== 'textarea';
       wordpress = {
         found: true,
         formSelector: selectorFor(wpFormCandidate) || 'form#commentform',
-        commentSelector: selectorFor(commentEl, wpFormCandidate),
+        commentSelector: selectorFor(commentEl, wpSearchScope),
+        ...(commentIsContentEditable ? { commentIsContentEditable: true } : {}),
         ...(authorEl && isVisible(authorEl) ? {
-          authorSelector: selectorFor(authorEl, wpFormCandidate),
+          authorSelector: selectorFor(authorEl, wpSearchScope),
           authorRequired: !!(authorEl.required || authorEl.getAttribute('aria-required') === 'true'),
         } : {}),
         ...(emailEl && isVisible(emailEl) ? {
-          emailSelector: selectorFor(emailEl, wpFormCandidate),
+          emailSelector: selectorFor(emailEl, wpSearchScope),
           emailRequired: !!(emailEl.required || emailEl.getAttribute('aria-required') === 'true'),
         } : {}),
         ...(urlEl && isVisible(urlEl) ? {
-          urlSelector: selectorFor(urlEl, wpFormCandidate),
+          urlSelector: selectorFor(urlEl, wpSearchScope),
         } : {}),
         ...(submitEl && isVisible(submitEl) ? {
-          submitSelector: selectorFor(submitEl, wpFormCandidate),
+          submitSelector: selectorFor(submitEl, wpSearchScope),
+        } : {}),
+        ...(guestToggleEl && isVisible(guestToggleEl) ? {
+          guestToggleSelector: selectorFor(guestToggleEl, wpSearchScope),
         } : {}),
         ...(captcha.detected ? { captcha } : {}),
       };
@@ -565,7 +655,7 @@ export const INSPECT_COMMENT_PAGE_SCRIPT = String.raw`(() => {
   }
 
   // Wix blog comment & layout structure detection (separates lazy placeholders & counters from interactive controls).
-  const isSectionPlaceholderHook = hook => /^comments-section-placeholder$/i.test(hook);
+  const isSectionPlaceholderHook = hook => /^(?:comments-section-placeholder|comments-placeholder|blog-comments-placeholder)$/i.test(hook);
   const isCounterHook = hook => /^comments?-count(?:er)?(?:-wrapper)?$|^post-footer__comment-count$/i.test(hook);
   const allCommentHookEls = Array.from(document.querySelectorAll('[data-hook*="comment" i], [data-testid*="comment" i], #comments'));
   const commentHooks = [];
@@ -574,16 +664,16 @@ export const INSPECT_COMMENT_PAGE_SCRIPT = String.raw`(() => {
     if (h && !commentHooks.includes(h)) commentHooks.push(h);
     if (commentHooks.length >= 12) break;
   }
-  const hasCommentCountOnly = allCommentHookEls.some(el => isCounterHook(clean(el.getAttribute('data-hook'))));
+  const hasCounterHookEl = allCommentHookEls.some(el => isCounterHook(clean(el.getAttribute('data-hook'))));
   const wixCommentRoots = allCommentHookEls.filter(el => {
     if (!isVisible(el)) return false;
     const h = clean(el.getAttribute('data-hook'));
     if (isSectionPlaceholderHook(h) || /^skeleton-loader$/i.test(h) || isCounterHook(h) || /comment-count/i.test(h)) return false;
     const text = extractVisibleText(el);
-    const hasInteractiveChild = !!el.querySelector('button, input, textarea, select, iframe, [contenteditable="true"], [role="textbox"]');
+    const hasInteractiveChild = !!el.querySelector('button, input, textarea, select, iframe, [contenteditable="true"], [contenteditable=""], [role="textbox"]');
     const isInteractiveItself = el.localName === 'button'
       || el.localName === 'textarea'
-      || el.getAttribute('contenteditable') === 'true'
+      || isContentEditableEl(el)
       || el.getAttribute('role') === 'textbox';
     return !!(text || hasInteractiveChild || isInteractiveItself);
   });
@@ -611,8 +701,40 @@ export const INSPECT_COMMENT_PAGE_SCRIPT = String.raw`(() => {
 
   const bodyTextClean = extractVisibleText(document.body);
   const hasCommentsLoadingText = /\bcomments\s+loading\b|\bloading\s+comments\b/i.test(bodyTextClean);
+  const placeholderEls = Array.from(document.querySelectorAll(
+    '[data-hook="comments-section-placeholder"], [data-hook="comments-placeholder"], [data-hook="blog-comments-placeholder"]'
+  ));
+  const isPlaceholderEmpty = (el) => {
+    const text = extractVisibleText(el);
+    if (text.length > 0) return false;
+    if (el.querySelector('button, input, textarea, select, iframe, a[href], [contenteditable="true"], [contenteditable=""], [role="textbox"], [role="button"], [role="progressbar"], [aria-busy="true"]')) {
+      return false;
+    }
+    const rect = typeof el.getBoundingClientRect === 'function' ? el.getBoundingClientRect() : null;
+    if (rect && rect.height > 8) return false;
+    return true;
+  };
+  const hasVisibleSpinnerOrSkeleton = Array.from(document.querySelectorAll(
+    '[data-hook="skeleton-loader"], [data-hook*="loader" i], [data-hook*="spinner" i], [role="progressbar"], [aria-busy="true"], [data-hook*="comment" i] [class*="spinner" i], [data-hook*="comment" i] [class*="loading" i], article [class*="spinner" i]'
+  )).some(isVisible);
+  const hasLoadingIndicator = hasCommentsLoadingText || hasVisibleSpinnerOrSkeleton;
+  const hasNonZeroCommentCount = allCommentHookEls.some(el => {
+    if (!isVisible(el)) return false;
+    const h = clean(el.getAttribute('data-hook'));
+    if (!isCounterHook(h)) return false;
+    const t = extractVisibleText(el);
+    const nums = t.match(/\d+/g);
+    return !!(nums && nums.some(n => Number(n) > 0));
+  });
+  const hasCommentListNode = Array.from(document.querySelectorAll(
+    '[data-hook="top-level-comment-list"], [data-hook*="comment-list" i], [data-hook="comment-item"], [data-hook="single-comment"]'
+  )).some(el => isVisible(el) && (extractVisibleText(el).length > 0 || el.children.length > 0));
+  const hasCommentListOrCount = hasNonZeroCommentCount || hasCommentListNode;
+  const hasWriteCommentPrompt = /\b(?:write\s+a\s+comment|leave\s+a\s+comment|add\s+a\s+comment|post\s+a\s+comment)\b|escreva\s+um\s+coment|escribe\s+un\s+coment|escribir\s+un\s+coment|kirjoita\s+kommentti|écrire\s+un\s+commentaire|写评论|发表评论|เขียนความคิดเห็น/i.test(bodyTextClean);
+  const hasEmptyCommentPlaceholder = isWix && placeholderEls.length > 0 && placeholderEls.every(isPlaceholderEmpty);
+
   const hasLazyPlaceholder = isWix && (
-    !!document.querySelector('[data-hook="comments-section-placeholder"]')
+    placeholderEls.length > 0
     || allCommentHookEls.some(el => isSectionPlaceholderHook(clean(el.getAttribute('data-hook'))))
     || hasCommentsLoadingText
     || (!isBlogListPage && !!document.querySelector('[data-hook="skeleton-loader"]'))
@@ -625,7 +747,7 @@ export const INSPECT_COMMENT_PAGE_SCRIPT = String.raw`(() => {
   const scrollY = Math.round(window.scrollY || (document.documentElement ? document.documentElement.scrollTop : 0) || 0);
   const readyState = typeof document.readyState === 'string' ? document.readyState : 'complete';
   const tailWindowText = bodyTextClean.slice(-1500);
-  const hasCommentHintText = /\b(?:write a comment|comments?|leave a comment|add a comment|escreva|escribe|escribir|kirjoita|kommentar|écrire|coment[aá]rios?|commentaires?|kommentare?|评论|留言)\b/i.test(tailWindowText);
+  const hasCommentHintText = /\b(?:write a comment|comments?|leave a comment|add a comment|escreva|escribe|escribir|kirjoita|kommentar|écrire|coment[aá]rios?|commentaires?|kommentare?|评论|留言|ความคิดเห็น)\b/i.test(tailWindowText);
   const isComplexWixLayout = isWix && (
     !!document.querySelector('[id*="SITE_CONTAINER"], [data-hook="recent-posts"]')
     || /wix-warmup-data|communities-blog-ooi/i.test(docHtmlPrefix)
@@ -634,7 +756,39 @@ export const INSPECT_COMMENT_PAGE_SCRIPT = String.raw`(() => {
     || hasCommentHintText
   );
 
-  const wixHasCommentSection = isWix && wixCommentRoots.length > 0;
+  // Detect visible Wix comment editor FIRST so already-logged-in Wix blogs (e.g. visible
+  // comment-box-rce-wrapper + Publish) are never blocked by leftover comment-count or placeholders.
+  const wixEditorEl = isWix ? Array.from(document.querySelectorAll([
+    '[data-hook="comment-box-rce-wrapper"][contenteditable="true"]',
+    '[data-hook="comment-box-rce-wrapper"][contenteditable=""]',
+    '[data-hook="comment-box-rce-wrapper"][role="textbox"]',
+    '[data-hook="comment-box-rce-wrapper"] [contenteditable="true"]',
+    '[data-hook="comment-box-rce-wrapper"] [contenteditable=""]',
+    '[data-hook="comment-box-rce-wrapper"] [contenteditable="plaintext-only"]',
+    '[data-hook="comment-box-rce-wrapper"] [role="textbox"]',
+    '[data-hook="comment-box-rce-wrapper"] textarea',
+    '[data-hook="comment-box-rce-wrapper"] .ProseMirror',
+    '[data-hook="comment-box-rce-wrapper"] .public-DraftEditor-content',
+    '[data-hook*="comment-box"] [contenteditable="true"]',
+    '[data-hook*="comment-box"] [contenteditable=""]',
+    '[data-hook="ricos-tiptap-editor"] [contenteditable="true"]',
+    '[data-hook="fullRicosEditor"] [contenteditable="true"]',
+    '[data-hook="create-comment-input"]',
+    '[data-hook*="comment"] [contenteditable="true"]',
+    '[data-hook*="comment"] [contenteditable=""]',
+    '[data-hook*="comment"] [role="textbox"]',
+    '[data-hook*="comment"] textarea',
+    '[data-hook*="comment"] .tiptap.ProseMirror',
+    '[data-hook*="comment"] .public-DraftEditor-content',
+    '[placeholder*="Write a comment" i]',
+    '[aria-label*="Write a comment" i]',
+    '[placeholder*="Add a comment" i]',
+    '[placeholder*="Leave a comment" i]',
+    'form textarea[placeholder*="comment" i]',
+    'form textarea[aria-label*="comment" i]',
+  ].join(', '))).find(el => isVisible(el) && (isContentEditableEl(el) || el.localName === 'textarea' || el.getAttribute('role') === 'textbox')) : null;
+
+  const wixHasCommentSection = isWix && (wixCommentRoots.length > 0 || !!wixEditorEl);
   const wixLoginRegex = /\b(?:log\s*in|sign\s*in)\s+to\s+(?:comment|publish|reply|post)\b|\b(?:log\s*in|sign\s*in)\s+to\s+publish\s+as\s+a\s+member\b|\bsign\s*up\s+to\s+comment\b|faça\s+login\s+para\s+(?:comentar|publicar)|inicia(?:r)?\s+sesi[oó]n\s+para\s+(?:comentar|publicar)|connectez-vous\s+pour\s+(?:commenter|publier)|登录.*(?:评论|发表)/i;
   const wixShortLoginBtnRegex = /^\s*(?:log\s*in|sign\s*in|sign\s*up|faça\s+login|fazer\s+login|iniciar\s+sesi[oó]n|inicia\s+sesi[oó]n|se\s+connecter|connexion|anmelden|einloggen|kirjaudu(?:\s+sisään)?|登录|登入)\b/i;
 
@@ -692,13 +846,13 @@ export const INSPECT_COMMENT_PAGE_SCRIPT = String.raw`(() => {
   }
 
   const wixGlobalLoginButton = Array.from(document.querySelectorAll('[data-hook*="login" i], [data-testid*="signUp" i], [data-testid*="login" i], button, a'))
-    .find(el => isVisible(el) && wixLoginRegex.test(clean(el.innerText || el.textContent || el.getAttribute('aria-label'))));
+    .find(el => isVisible(el) && !el.closest('header, nav, footer, [role="banner"], [role="navigation"], [role="contentinfo"]') && wixLoginRegex.test(clean(el.innerText || el.textContent || el.getAttribute('aria-label'))));
 
   const wixCommentScopedLogin = loginButtons.length > 0 && !hasVisibleWixGuestInputs;
   const wixLoginRequired = isWix && (
     wixCommentScopedLogin
     || (wixLoginRegex.test(wixContainerText) && !hasVisibleWixGuestInputs)
-    || (!!wixGlobalLoginButton && !hasVisibleWixGuestInputs)
+    || (!wixEditorEl && !!wixGlobalLoginButton && !hasVisibleWixGuestInputs)
     || (!!wixExplicitMemberLogin && !hasVisibleWixGuestInputs)
     || !!wixMemberDialog
   );
@@ -718,7 +872,11 @@ export const INSPECT_COMMENT_PAGE_SCRIPT = String.raw`(() => {
     captchaDetected: isWix && pageVisibleCaptcha,
     hasGuestEditor: false,
     hasLazyPlaceholder: isWix && hasLazyPlaceholder,
-    hasCommentCountOnly: isWix && hasCommentCountOnly,
+    hasEmptyCommentPlaceholder,
+    hasLoadingIndicator: isWix && hasLoadingIndicator,
+    hasCommentListOrCount: isWix && hasCommentListOrCount,
+    hasWriteCommentPrompt: isWix && hasWriteCommentPrompt,
+    hasCommentCountOnly: isWix && hasCounterHookEl && !wixEditorEl,
     hasBlogPostStructure,
     isBlogListPage,
     isComplexWixLayout,
@@ -727,11 +885,9 @@ export const INSPECT_COMMENT_PAGE_SCRIPT = String.raw`(() => {
   };
 
   if (isWix && !wixLoginRequired) {
-    const editorEl = Array.from(document.querySelectorAll(
-      '[data-hook*="comment-box"] [contenteditable="true"], [data-hook="ricos-tiptap-editor"] [contenteditable="true"], [data-hook="fullRicosEditor"] [contenteditable="true"], [data-hook="create-comment-input"], [data-hook*="comment"] [contenteditable="true"], [data-hook*="comment"] [role="textbox"], [data-hook*="comment"] textarea, [data-hook*="comment"] .tiptap.ProseMirror, [data-hook*="comment"] .public-DraftEditor-content, [placeholder*="Write a comment" i], [aria-label*="Write a comment" i]'
-    )).find(el => isVisible(el) && (el.getAttribute('contenteditable') === 'true' || el.localName === 'textarea' || el.getAttribute('role') === 'textbox'));
+    const editorEl = wixEditorEl;
 
-    const triggerTextRegex = /write\s+a\s+comment|leave\s+a\s+comment|add\s+a\s+comment|post\s+a\s+comment|escribir|escribe\s+un\s+coment|escreva|kirjoita|kommentar|écrire|ecrire|写评论|发表评论|留下评论/i;
+    const triggerTextRegex = /write\s+a\s+comment|leave\s+a\s+comment|add\s+a\s+comment|post\s+a\s+comment|escribir|escribe\s+un\s+coment|escreva|kirjoita|kommentar|écrire|ecrire|写评论|发表评论|留下评论|เขียนความคิดเห็น/i;
     const triggerEl = editorEl ? null : (
       Array.from(document.querySelectorAll('button[data-hook="comment-box-placeholder"], [data-hook="comment-box-placeholder"], [data-hook="open-comment-box"], [data-hook*="comment-box-placeholder"]'))
         .find(el => isVisible(el) && el !== editorEl)
@@ -745,43 +901,52 @@ export const INSPECT_COMMENT_PAGE_SCRIPT = String.raw`(() => {
       || Array.from(document.querySelectorAll('main button, article button, main [role="button"], article [role="button"], button'))
         .find(el => {
           if (!isVisible(el) || el === editorEl || el.closest('header, nav, [role="navigation"]')) return false;
-          return /^\s*(?:write|leave|add|post)\s+a\s+comment\b|^\s*(?:escribir|escribe|escreva|kirjoita|kommentar|écrire|ecrire|写评论)/i.test(clean(el.innerText || el.textContent || el.getAttribute('aria-label')));
+          return /^\s*(?:write|leave|add|post)\s+a\s+comment\b|^\s*(?:escribir|escribe|escreva|kirjoita|kommentar|écrire|ecrire|写评论|เขียนความคิดเห็น)/i.test(clean(el.innerText || el.textContent || el.getAttribute('aria-label')));
         })
     );
 
     if (editorEl) {
       const boxScope = editorEl.closest('[data-hook*="comment-box"]:not([data-hook*="rce-wrapper"])')
-        || (editorEl.parentElement ? editorEl.parentElement.closest('[data-hook*="comment"], [data-testid*="comment"], form') : null)
+        || (editorEl.parentElement ? editorEl.parentElement.closest('[data-hook*="comment"]:not([data-hook*="rce-wrapper"]), [data-testid*="comment"], form') : null)
+        || editorEl.closest('[data-hook="comment-box-rce-wrapper"]')
         || document;
-      const outerScope = editorEl.closest('[data-hook*="comments-section"], [data-testid*="comment"], #comments, section')
-        || (boxScope.parentElement ? boxScope.parentElement.closest('[data-hook*="comment"], [data-testid*="comment"], section') : null)
+      const outerScope = editorEl.closest('[data-hook*="comments-section"], [data-testid*="comment"], #comments, section, article, form')
+        || (boxScope.parentElement ? boxScope.parentElement.closest('[data-hook*="comment"], [data-testid*="comment"], section, article, main') : null)
+        || (boxScope.parentElement && boxScope.parentElement !== document.body ? boxScope.parentElement : null)
         || document;
       const nameEl = Array.from(boxScope.querySelectorAll('input[type="text"], input:not([type])')).find(el => isVisible(el) && /name|nick|author|昵称|姓名/i.test(clean((el.getAttribute('name') || '') + ' ' + (el.getAttribute('placeholder') || '') + ' ' + (el.getAttribute('aria-label') || ''))));
       const emailEl = Array.from(boxScope.querySelectorAll('input[type="email"], input[name*="email" i]')).find(isVisible);
       const websiteEl = Array.from(boxScope.querySelectorAll('input[type="url"], input[name*="website" i], input[name*="url" i], input[placeholder*="website" i]')).find(isVisible);
       const findLinkBtn = (scope) => Array.from(scope.querySelectorAll('button, [role="button"]')).find(el => isVisible(el) && /\blink\b|插入链接|链接/i.test(clean((el.getAttribute('aria-label') || '') + ' ' + (el.getAttribute('title') || '') + ' ' + (el.getAttribute('data-hook') || '') + ' ' + (el.getAttribute('data-testid') || ''))));
-      const findSubmitBtn = (scope) => Array.from(scope.querySelectorAll('[data-hook="submit-comment-button"], [data-hook="publish-comment-button"], [data-hook="primary-btn"], button[type="submit"], button')).find(el => {
+      const findSubmitBtn = (scope) => Array.from(scope.querySelectorAll('[data-hook="submit-comment-button"], [data-hook="publish-comment-button"], [data-hook*="publish" i], [data-hook="primary-btn"], button[type="submit"], button, [role="button"]')).find(el => {
         if (!isVisible(el)) return false;
         const hook = clean(el.getAttribute('data-hook'));
         if (hook === 'submit-comment-button' || hook === 'publish-comment-button') return true;
-        if (hook === 'primary-btn' && el.closest('[data-hook*="comment-box"], [data-hook*="comments-section"]')) return true;
-        return /^(?:publish|post|submit|comment|reply|publicar|enviar|publier|veröffentlichen|julkaise|发布|提交|评论)$/i.test(clean(el.innerText || el.textContent || el.getAttribute('aria-label')));
+        if (hook === 'primary-btn' && el.closest('[data-hook*="comment-box"], [data-hook*="comments-section"], [data-hook*="comment"]')) return true;
+        return /^(?:publish(?:\s+comment)?|post(?:\s+comment)?|submit(?:\s+comment)?|comment|reply|publicar|enviar|publier|veröffentlichen|julkaise|เผยแพร่|โพสต์|ส่ง|公開|게시|发布|提交|评论)$/i.test(
+          clean(el.innerText || el.textContent || el.getAttribute('aria-label') || el.getAttribute('title'))
+        );
       });
-      const linkBtn = findLinkBtn(boxScope) || findLinkBtn(outerScope);
-      const submitEl = findSubmitBtn(boxScope) || findSubmitBtn(outerScope);
+      const linkBtnInBox = findLinkBtn(boxScope);
+      const linkBtn = linkBtnInBox || findLinkBtn(outerScope);
+      const linkBtnScope = linkBtnInBox ? boxScope : outerScope;
+      const submitInBox = findSubmitBtn(boxScope);
+      const submitEl = submitInBox || findSubmitBtn(outerScope);
+      const submitScope = submitInBox ? boxScope : outerScope;
 
       wix = {
         ...wix,
         hasCommentSection: true,
         loginRequired: false,
         hasGuestEditor: true,
+        hasCommentCountOnly: false,
         editorSelector: selectorFor(editorEl, boxScope),
-        editorIsContentEditable: editorEl.getAttribute('contenteditable') === 'true' || editorEl.getAttribute('role') === 'textbox',
+        editorIsContentEditable: isContentEditableEl(editorEl) || editorEl.getAttribute('role') === 'textbox',
         ...(nameEl ? { nameSelector: selectorFor(nameEl, boxScope) } : {}),
         ...(emailEl ? { emailSelector: selectorFor(emailEl, boxScope) } : {}),
         ...(websiteEl ? { websiteSelector: selectorFor(websiteEl, boxScope) } : {}),
-        ...(linkBtn ? { linkButtonSelector: selectorFor(linkBtn, boxScope) } : {}),
-        ...(submitEl ? { submitSelector: selectorFor(submitEl, boxScope) } : {}),
+        ...(linkBtn ? { linkButtonSelector: selectorFor(linkBtn, linkBtnScope) } : {}),
+        ...(submitEl ? { submitSelector: selectorFor(submitEl, submitScope) } : {}),
       };
     } else if (triggerEl) {
       wix = {
@@ -789,6 +954,7 @@ export const INSPECT_COMMENT_PAGE_SCRIPT = String.raw`(() => {
         hasCommentSection: true,
         loginRequired: false,
         hasGuestEditor: false,
+        hasCommentCountOnly: false,
         triggerSelector: selectorFor(triggerEl),
       };
     }
@@ -868,9 +1034,12 @@ export const INSPECT_COMMENT_PAGE_SCRIPT = String.raw`(() => {
   };
 })()`
 
-/** Post-Publish Wix inspection checking visible `role=dialog` for reCAPTCHA, login/signup, or moderation. */
+/** Post-Publish Wix inspection checking visible `role=dialog` for reCAPTCHA, login/signup, or moderation (incl. Thai 'รับทราบ'). */
 export const INSPECT_WIX_POST_SUBMIT_SCRIPT = String.raw`(() => {
   const clean = value => String(value ?? '').replace(/\s+/g, ' ').trim();
+  const escapeCss = value => (typeof CSS !== 'undefined' && typeof CSS.escape === 'function')
+    ? CSS.escape(value)
+    : String(value).replace(/([^\w-])/g, '\\$1');
   const isVisible = (el) => {
     if (!el || el.nodeType !== 1) return false;
     if (el.hidden) return false;
@@ -878,6 +1047,48 @@ export const INSPECT_WIX_POST_SUBMIT_SCRIPT = String.raw`(() => {
     if (style && (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0')) return false;
     if (el.closest('[hidden], [aria-hidden="true"]')) return false;
     return true;
+  };
+  const unique = (el, sel) => {
+    if (!sel) return false;
+    try {
+      const list = document.querySelectorAll(sel);
+      return list.length === 1 && list[0] === el;
+    } catch {
+      return false;
+    }
+  };
+  const selectorFor = (el) => {
+    if (!el) return '';
+    if (el.id) {
+      const byId = '#' + escapeCss(el.id);
+      if (unique(el, byId)) return byId;
+    }
+    const hook = el.getAttribute('data-hook');
+    if (hook) {
+      const byHook = '[data-hook="' + hook.replace(/"/g, '\\"') + '"]';
+      if (unique(el, byHook)) return byHook;
+    }
+    const testId = el.getAttribute('data-testid');
+    if (testId) {
+      const byTestId = '[data-testid="' + testId.replace(/"/g, '\\"') + '"]';
+      if (unique(el, byTestId)) return byTestId;
+    }
+    const aria = el.getAttribute('aria-label');
+    if (aria) {
+      const byAria = el.localName + '[aria-label="' + aria.replace(/"/g, '\\"') + '"]';
+      if (unique(el, byAria)) return byAria;
+    }
+    let path = '';
+    for (let node = el, depth = 0; node && node.nodeType === 1 && depth < 12; node = node.parentElement, depth++) {
+      const tag = node.localName;
+      const parent = node.parentNode;
+      if (!parent) break;
+      const siblings = Array.from(parent.children || []).filter(s => s.localName === tag);
+      const seg = siblings.length > 1 ? tag + ':nth-of-type(' + (siblings.indexOf(node) + 1) + ')' : tag;
+      path = path ? seg + ' > ' + path : seg;
+      if (unique(el, path)) return path;
+    }
+    return '';
   };
   const extractText = (el) => {
     if (!el) return '';
@@ -903,14 +1114,18 @@ export const INSPECT_WIX_POST_SUBMIT_SCRIPT = String.raw`(() => {
   const dialogs = Array.from(document.querySelectorAll('[role="dialog"], [role="alertdialog"], [aria-modal="true"], [id^="SM_ROOT_COMP"]'))
     .filter(isVisible);
 
-  const moderationRegex = /awaiting\s+moderation|pending\s+approval|pending\s+review|held\s+for\s+moderation|submitted\s+for\s+review|under\s+review|moderation|waiting\s+for\s+approval|aguardando\s+(?:modera[çc][ãa]o|aprova[çc][ãa]o)|pendiente\s+de\s+(?:moderaci[oó]n|aprobaci[oó]n)|en\s+attente\s+de\s+(?:mod[ée]ration|validation)|wartet\s+auf\s+(?:freischaltung|moderation)|等待审核|待审核|审核通过后显示/i;
-  const loginRegex = /\b(?:sign\s*up|log\s*in|sign\s*in|continue\s+with\s+google|sign\s+up\s+with\s+google|sign\s+in\s+with\s+google|already\s+a\s+member|faça\s+login|iniciar\s+sesi[oó]n|se\s+connecter|anmelden|kirjaudu)\b|登录|注册/i;
+  const moderationRegex = /awaiting\s+moderation|pending\s+approval|pending\s+review|held\s+for\s+moderation|submitted\s+for\s+review|under\s+review|moderation|waiting\s+for\s+approval|will\s+appear\s+(?:once|after)\s+(?:it\s+is\s+)?approved|aguardando\s+(?:modera[çc][ãa]o|aprova[çc][ãa]o)|pendiente\s+de\s+(?:moderaci[oó]n|aprobaci[oó]n)|en\s+attente\s+de\s+(?:mod[ée]ration|validation|approbation)|wartet\s+auf\s+(?:freischaltung|moderation)|in\s+attesa\s+di\s+(?:moderazione|approvazione)|wacht\s+op\s+goedkeuring|oczekuje\s+na\s+(?:moderacj[ęe]|zatwierdzenie)|onay\s+bekliyor|ожидает\s+модерации|на\s+модерации|รอการอนุมัติ|รอการตรวจสอบ|รอตรวจสอบ|กำลังรอการอนุมัติ|อยู่ระหว่างการตรวจสอบ|ได้รับการอนุมัติ|ความคิดเห็นของคุณ.*อนุมัติ|承認待ち|審査中|승인\s*대기|검토\s*중|đang\s+chờ\s+(?:duyệt|kiểm\s+duyệt)|menunggu\s+(?:persetujuan|moderasi)|等待审核|待审核|审核通过后显示/i;
+  const loginRegex = /\b(?:sign\s*up|log\s*in|sign\s*in|continue\s+with\s+google|sign\s+up\s+with\s+google|sign\s+in\s+with\s+google|already\s+a\s+member|faça\s+login|iniciar\s+sesi[oó]n|se\s+connecter|anmelden|kirjaudu)\b|เข้าสู่ระบบ|ลงทะเบียน|登录|注册/i;
+  const errorDialogRegex = /\b(?:error|failed|invalid|cannot\s+post|unable\s+to\s+post|try\s+again\s+later)\b|เกิดข้อผิดพลาด|ไม่สามารถ/i;
+  const ackButtonRegex = /^(?:got\s*it|ok|okay|done|close|understood|entendido|compris|verstanden|รับทราบ|ตกลง|知道了|好的|确定|了解|확인)$/i;
+  const thaiAckRegex = /^รับทราบ$/i;
 
   let hasCaptcha = !!document.querySelector(
     'iframe[src*="recaptcha" i], iframe[src*="hcaptcha" i], iframe[src*="turnstile" i], .g-recaptcha, .h-captcha, .cf-turnstile'
   );
   let hasLoginDialog = false;
   let moderationNotice = '';
+  let ackButtonSelector = '';
   let dialogText = '';
   const loginButtons = [];
   const ssoProviders = [];
@@ -919,16 +1134,18 @@ export const INSPECT_WIX_POST_SUBMIT_SCRIPT = String.raw`(() => {
   for (const dialog of dialogs) {
     const text = extractText(dialog);
     if (!dialogText && text) dialogText = text.slice(0, 240);
-    if (
+    const dialogHasCaptcha = !!(
       dialog.querySelector('iframe[src*="recaptcha" i], iframe[src*="hcaptcha" i], iframe[src*="turnstile" i], .g-recaptcha, .h-captcha, .cf-turnstile')
       || /\b(?:recaptcha|hcaptcha|turnstile|i'm\s+not\s+a\s+robot)\b/i.test(text)
-    ) {
+    );
+    if (dialogHasCaptcha) {
       hasCaptcha = true;
     }
-    if (
+    const dialogIsLogin = !!(
       dialog.querySelector('[data-testid*="signUp" i], [data-testid*="login" i], input[type="password"]')
       || loginRegex.test(text)
-    ) {
+    );
+    if (dialogIsLogin) {
       hasLoginDialog = true;
       if (dialog.querySelector('input[type="email"], input[type="password"]')) hasEmailForm = true;
       for (const btn of dialog.querySelectorAll('button, a, [role="button"]')) {
@@ -940,9 +1157,19 @@ export const INSPECT_WIX_POST_SUBMIT_SCRIPT = String.raw`(() => {
         if (lbl && loginButtons.length < 6 && !loginButtons.includes(lbl)) loginButtons.push(lbl);
       }
     }
+    const ackBtn = Array.from(dialog.querySelectorAll('button, [role="button"], a')).find(btn => {
+      if (!isVisible(btn)) return false;
+      const lbl = clean(btn.innerText || btn.textContent || btn.getAttribute('aria-label'));
+      return ackButtonRegex.test(lbl);
+    });
+    const ackLabel = ackBtn ? clean(ackBtn.innerText || ackBtn.textContent || ackBtn.getAttribute('aria-label')) : '';
     const modMatch = moderationRegex.exec(text);
-    if (modMatch && !moderationNotice) {
-      moderationNotice = modMatch[0];
+    const isThaiAckModeration = !dialogIsLogin && !dialogHasCaptcha && !errorDialogRegex.test(text) && thaiAckRegex.test(ackLabel);
+    if ((modMatch || isThaiAckModeration) && !moderationNotice) {
+      moderationNotice = modMatch ? modMatch[0] : ackLabel;
+      if (ackBtn) {
+        ackButtonSelector = selectorFor(ackBtn);
+      }
     }
   }
 
@@ -950,6 +1177,7 @@ export const INSPECT_WIX_POST_SUBMIT_SCRIPT = String.raw`(() => {
     hasCaptcha,
     hasLoginDialog,
     ...(moderationNotice ? { moderationNotice } : {}),
+    ...(ackButtonSelector ? { ackButtonSelector } : {}),
     ...(dialogText ? { dialogText } : {}),
     ...(hasLoginDialog ? {
       loginInfo: {
@@ -993,31 +1221,53 @@ export const INSPECT_CHILD_FRAME_SCRIPT = String.raw`(() => {
   };
 })()`
 
-/** Script evaluated inside `iframe[src*="blogger.com/comment"]`. */
+/** Script evaluated inside Blogger `#comment-editor` / `iframe[src*="blogger.com/comment"]`. */
 export const INSPECT_BLOGGER_FRAME_SCRIPT = String.raw`(() => {
   const clean = value => String(value ?? '').replace(/\s+/g, ' ').trim();
+  const escapeCss = value => (typeof CSS !== 'undefined' && typeof CSS.escape === 'function')
+    ? CSS.escape(value)
+    : String(value).replace(/([^\w-])/g, '\\$1');
   const isVisible = (el) => {
     if (!el || el.nodeType !== 1) return false;
     if (el.hidden) return false;
     const style = typeof getComputedStyle === 'function' ? getComputedStyle(el) : null;
     if (style && (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0')) return false;
+    if (el.closest('[hidden], [aria-hidden="true"]')) return false;
     return true;
+  };
+  const unique = (el, s) => {
+    if (!s) return false;
+    try {
+      const list = document.querySelectorAll(s);
+      return list.length === 1 && list[0] === el;
+    } catch {
+      return false;
+    }
   };
   const bodyText = clean(document.body ? (document.body.innerText || document.body.textContent) : '');
   const hasCaptcha = !!document.querySelector('.g-recaptcha, iframe[src*="recaptcha" i], .h-captcha, .cf-turnstile')
     || /\brecaptcha\b/i.test(bodyText);
   const closedMatch = /\bcomments\s+are\s+closed\b|\bcommenting\s+(?:is|has\s+been)\s+(?:closed|disabled)\b|评论已关闭/i.exec(bodyText);
-  const modMatch = /awaiting\s+moderation|visible\s+after\s+approval|pending\s+approval|comment\s+will\s+be\s+published\s+after|等待审核|待审核/i.exec(bodyText);
+  const modMatch = /awaiting\s+moderation|visible\s+after\s+approval|pending\s+approval|comment\s+will\s+be\s+published\s+after|รอการอนุมัติ|รอการตรวจสอบ|等待审核|待审核/i.exec(bodyText);
   const errMatch = /your\s+comment\s+could\s+not\s+be\s+saved|error|invalid/i.exec(bodyText);
 
-  const commentEl = Array.from(document.querySelectorAll('textarea#commentBody, textarea[name="commentBody"], textarea'))
-    .find(isVisible);
+  const commentEl = Array.from(document.querySelectorAll(
+    'textarea#commentBody, textarea[name="commentBody"], textarea, [contenteditable="true"], [role="textbox"]'
+  )).find(isVisible);
   const identitySelect = document.querySelector('select#identityMenu, select[name="identityMenu"]');
   const supportsNameUrlIdentity = !!(identitySelect && Array.from(identitySelect.options || []).some(o => /nameurl/i.test(o.value)));
   const anonNameEl = Array.from(document.querySelectorAll('input#anonName, input[name="anonName"]')).find(isVisible);
   const anonUrlEl = Array.from(document.querySelectorAll('input#anonURL, input[name="anonURL"]')).find(isVisible);
-  const submitEl = Array.from(document.querySelectorAll('input#postCommentSubmit, button#postCommentSubmit, input[name="postCommentSubmit"], button[name="postCommentSubmit"], button[type="submit"], input[type="submit"], button'))
-    .find(el => isVisible(el) && /^(?:publish|post|submit|send|发布|发表)$/i.test(clean(el.innerText || el.textContent || el.getAttribute('value'))));
+  const submitWordRegex = /^(?:publish(?:\s+comment)?|post(?:\s+comment)?|submit(?:\s+comment)?|send|publicar|publier|veröffentlichen|pubblica|publiceren|opublikuj|yayınla|опубликовать|เผยแพร่|โพสต์|公開|投稿|게시|发布|发表|提交|發佈|發表)$/i;
+  const submitCandidates = Array.from(document.querySelectorAll(
+    'input#postCommentSubmit, button#postCommentSubmit, input[name="postCommentSubmit"], button[name="postCommentSubmit"], [role="button"], button, input[type="submit"], input[type="button"]'
+  )).filter(isVisible);
+  const submitEl = submitCandidates.find(el => {
+    const idOrName = clean((el.id || '') + ' ' + (el.getAttribute('name') || ''));
+    if (/postCommentSubmit/i.test(idOrName)) return true;
+    const label = clean(el.innerText || el.textContent || el.getAttribute('value') || el.getAttribute('aria-label') || el.getAttribute('title'));
+    return submitWordRegex.test(label);
+  });
 
   const signInBtn = Array.from(document.querySelectorAll('a, button, [role="button"]')).find(el =>
     isVisible(el) && /\b(?:sign\s*in(?:\s+with\s+google)?|log\s*in)\b/i.test(clean(el.innerText || el.textContent || el.getAttribute('aria-label')))
@@ -1026,9 +1276,40 @@ export const INSPECT_BLOGGER_FRAME_SCRIPT = String.raw`(() => {
 
   const sel = (el, fallback) => {
     if (!el) return '';
-    if (el.id) return '#' + el.id;
+    if (el.id) {
+      const byId = '#' + escapeCss(el.id);
+      if (unique(el, byId)) return byId;
+    }
     const name = el.getAttribute('name');
-    if (name) return el.localName + '[name="' + name + '"]';
+    if (name) {
+      const byName = el.localName + '[name="' + name.replace(/"/g, '\\"') + '"]';
+      if (unique(el, byName)) return byName;
+    }
+    const aria = el.getAttribute('aria-label');
+    if (aria) {
+      const byAria = el.localName + '[aria-label="' + aria.replace(/"/g, '\\"') + '"]';
+      if (unique(el, byAria)) return byAria;
+    }
+    const jsname = el.getAttribute('jsname');
+    if (jsname) {
+      const byJsname = el.localName + '[jsname="' + jsname.replace(/"/g, '\\"') + '"]';
+      if (unique(el, byJsname)) return byJsname;
+    }
+    const testId = el.getAttribute('data-testid');
+    if (testId) {
+      const byTestId = '[data-testid="' + testId.replace(/"/g, '\\"') + '"]';
+      if (unique(el, byTestId)) return byTestId;
+    }
+    let path = '';
+    for (let node = el, depth = 0; node && node.nodeType === 1 && depth < 12; node = node.parentElement, depth++) {
+      const tag = node.localName;
+      const parent = node.parentNode;
+      if (!parent) break;
+      const siblings = Array.from(parent.children || []).filter(s => s.localName === tag);
+      const seg = siblings.length > 1 ? tag + ':nth-of-type(' + (siblings.indexOf(node) + 1) + ')' : tag;
+      path = path ? seg + ' > ' + path : seg;
+      if (unique(el, path)) return path;
+    }
     return fallback;
   };
 
@@ -1043,11 +1324,14 @@ export const INSPECT_BLOGGER_FRAME_SCRIPT = String.raw`(() => {
       },
     } : {}),
     hasEditor: !!commentEl,
-    ...(commentEl ? { commentSelector: sel(commentEl, 'textarea') } : {}),
+    ...(commentEl ? {
+      commentSelector: sel(commentEl, 'textarea'),
+      ...(commentEl.localName !== 'textarea' ? { commentIsContentEditable: true } : {}),
+    } : {}),
     ...(identitySelect ? { identitySelectSelector: sel(identitySelect, 'select#identityMenu'), supportsNameUrlIdentity } : {}),
     ...(anonNameEl ? { anonNameSelector: sel(anonNameEl, 'input[name="anonName"]') } : {}),
     ...(anonUrlEl ? { anonUrlSelector: sel(anonUrlEl, 'input[name="anonURL"]') } : {}),
-    ...(submitEl ? { submitSelector: sel(submitEl, 'input[type="submit"], button[type="submit"]') } : {}),
+    ...(submitEl ? { submitSelector: sel(submitEl, '[role="button"], button, input[type="submit"]') } : {}),
     ...(modMatch ? { moderationNotice: modMatch[0] } : {}),
     ...(errMatch && !modMatch ? { errorMessage: errMatch[0] } : {}),
     snippet: bodyText.slice(0, 240),
@@ -1162,6 +1446,12 @@ export function verifyCommentResultInDom(params: {
       'در\\s+انتظار\\s+(?:بررسی|تایید|تأیید)',
       'در\\s+صف\\s+بررسی',
       'پس\\s+از\\s+(?:تایید|تأیید)\\s+نمایش',
+      'รอการอนุมัติ',
+      'รอการตรวจสอบ',
+      'รอตรวจสอบ',
+      'กำลังรอการอนุมัติ',
+      'อยู่ระหว่างการตรวจสอบ',
+      'ได้รับการอนุมัติ',
       '等待审核',
       '待审核',
       '审核通过后显示',
@@ -1289,9 +1579,255 @@ const DEFAULT_PROGRESSIVE_SCROLL_STEPS = [0.5, 0.85, 1.0] as const
 
 export const CAPTCHA_FRAME_URL_PATTERN = /recaptcha|hcaptcha|turnstile/iu
 export const KNOWN_COMMENT_FRAME_URL_PATTERN =
-  /disqus\.com|blogger\.com\/comment|giscus\.app|utteranc\.es|hyvor\.com|commentbox\.io|intensedebate|facebook\.com\/plugins\/comments|comments-ooi|wixapps\.net\/.*comment|comment.*iframe/iu
+  /disqus\.com|blogger\.com\/comment|blogspot\.com\/comment|jetpack\.wordpress\.com\/jetpack-comment|giscus\.app|utteranc\.es|hyvor\.com|commentbox\.io|intensedebate|facebook\.com\/plugins\/comments|comments-ooi|wixapps\.net\/.*comment|comment.*iframe/iu
 export const NON_COMMENT_FRAME_URL_PATTERN =
   /^$|^about:blank$|^javascript:|doubleclick\.net|googlesyndication\.com|googleadservices\.com|googletagmanager\.com|google-analytics\.com|connect\.facebook\.net\/.*fbevents|video\.wixstatic\.com|youtube\.com(?:\/|$)|youtu\.be|vimeo\.com|trustpilot\.com|engage\.wixapps\.net|usrfiles\.com|filesusr\.com|google\.com\/maps|maps\.google\.com|calendly\.com|intercom\.io|tawk\.to|crisp\.chat|klaviyo\.com|spotify\.com\/embed|soundcloud\.com\/player/iu
+
+export const POST_SUBMIT_WAF_FINGERPRINT_PATTERN =
+  /litespeed|cloudflare|attention\s+required!|just\s+a\s+moment|sucuri|wordfence|mod_?security|modsecurity|imperva|incapsula|akamai|barracuda|cloudfront|403\s+forbidden|access\s+denied|request\s+blocked|forbidden\s+you\s+don'?t\s+have\s+permission|not\s+acceptable|too\s+many\s+requests|blocked\s+by\s+(?:firewall|waf|security)/iu
+
+export interface PostSubmitWafDetectionInput {
+  readonly httpStatus?: number
+  readonly responseHeaders?: Readonly<Record<string, string>>
+  readonly responseSnippet?: string
+  readonly postSubmitUrl?: string
+  readonly postSubmitSnippet?: string
+  readonly title?: string
+}
+
+export interface PostSubmitWafDetection {
+  readonly blocked: boolean
+  readonly httpStatus?: number
+  readonly provider?: string
+  readonly snippet?: string
+}
+
+function inferPostSubmitWafProvider(combinedText: string): string {
+  if (/litespeed/iu.test(combinedText)) return 'litespeed'
+  if (/cloudflare|cf-ray|cf-mitigated|attention\s+required!|just\s+a\s+moment/iu.test(combinedText)) return 'cloudflare'
+  if (/sucuri/iu.test(combinedText)) return 'sucuri'
+  if (/wordfence/iu.test(combinedText)) return 'wordfence'
+  if (/mod_?security|modsecurity/iu.test(combinedText)) return 'modsecurity'
+  if (/cloudfront|x-amz-cf/iu.test(combinedText)) return 'cloudfront'
+  if (/imperva|incapsula/iu.test(combinedText)) return 'imperva'
+  if (/akamai/iu.test(combinedText)) return 'akamai'
+  return 'waf'
+}
+
+/** Detect HTTP 403 or 406/429 WAF-fingerprinted blocks returned after comment submission. */
+export function detectPostSubmitWafBlock(input: PostSubmitWafDetectionInput): PostSubmitWafDetection {
+  const headersText = Object.entries(input.responseHeaders ?? {})
+    .map(([k, v]) => `${k}: ${v}`)
+    .join(' ')
+  const combined = [
+    headersText,
+    input.title ?? '',
+    input.postSubmitSnippet ?? '',
+    input.responseSnippet ?? '',
+  ].filter(Boolean).join(' ')
+  const bestSnippet = (input.postSubmitSnippet?.trim() || input.responseSnippet?.trim() || input.title?.trim() || undefined)?.slice(0, 260)
+
+  if (input.httpStatus === 403) {
+    return {
+      blocked: true,
+      httpStatus: 403,
+      provider: inferPostSubmitWafProvider(combined),
+      ...(bestSnippet === undefined ? {} : { snippet: bestSnippet }),
+    }
+  }
+
+  if ((input.httpStatus === 406 || input.httpStatus === 429) && POST_SUBMIT_WAF_FINGERPRINT_PATTERN.test(combined)) {
+    return {
+      blocked: true,
+      httpStatus: input.httpStatus,
+      provider: inferPostSubmitWafProvider(combined),
+      ...(bestSnippet === undefined ? {} : { snippet: bestSnippet }),
+    }
+  }
+
+  // Fallback when response event was unavailable (e.g. direct navigation error page on /wp-comments-post.php).
+  const onWpEndpoint = Boolean(input.postSubmitUrl && /wp-comments-post\.php/iu.test(input.postSubmitUrl))
+  const hasExplicit403Text = /\b403\s+forbidden\b/iu.test(combined)
+  const hasStrongWafVendorAndBlock =
+    /(?:litespeed|cloudflare|sucuri|wordfence|mod_?security|modsecurity)/iu.test(combined)
+    && /(?:403|406|429|forbidden|access\s+denied|request\s+blocked|not\s+acceptable|blocked\s+by)/iu.test(combined)
+  if ((onWpEndpoint && (hasExplicit403Text || hasStrongWafVendorAndBlock)) || (hasExplicit403Text && hasStrongWafVendorAndBlock)) {
+    const inferredStatus = /\b406\b/u.test(combined) && !/\b403\b/u.test(combined)
+      ? 406
+      : /\b429\b/u.test(combined) && !/\b403\b/u.test(combined)
+        ? 429
+        : 403
+    return {
+      blocked: true,
+      httpStatus: inferredStatus,
+      provider: inferPostSubmitWafProvider(combined),
+      ...(bestSnippet === undefined ? {} : { snippet: bestSnippet }),
+    }
+  }
+
+  return { blocked: false }
+}
+
+/** Check whether a Playwright locator is disabled via `isDisabled()`, `aria-disabled="true"`, or `disabled`. */
+async function isLocatorDisabled(locator: ReturnType<Page['locator']>): Promise<boolean> {
+  const probe = locator as unknown as {
+    isDisabled?: () => Promise<boolean>
+    getAttribute?: (name: string) => Promise<string | null>
+    evaluate?: <R>(fn: (node: unknown) => R) => Promise<R>
+  }
+  try {
+    if (typeof probe.isDisabled === 'function') {
+      if (await probe.isDisabled()) return true
+    }
+  } catch {
+    // fall through to attribute/evaluate checks
+  }
+  try {
+    if (typeof probe.getAttribute === 'function') {
+      const ariaDisabled = await probe.getAttribute('aria-disabled')
+      if (ariaDisabled !== null && ariaDisabled.toLowerCase() === 'true') return true
+      const disabledAttr = await probe.getAttribute('disabled')
+      if (disabledAttr !== null) return true
+    }
+  } catch {
+    // ignore
+  }
+  try {
+    if (typeof probe.evaluate === 'function') {
+      const evalDisabled = await probe.evaluate((node: unknown) => {
+        const el = node as { disabled?: boolean; getAttribute?(k: string): string | null } | null
+        if (!el) return false
+        if (el.disabled === true) return true
+        const aria = el.getAttribute?.('aria-disabled')
+        if (aria && aria.toLowerCase() === 'true') return true
+        const raw = el.getAttribute?.('disabled')
+        return raw !== null && raw !== undefined
+      })
+      if (evalDisabled === true) return true
+    }
+  } catch {
+    // ignore
+  }
+  return false
+}
+
+const INSPECT_DISABLED_SUBMIT_LOGIN_SCRIPT = String.raw`(() => {
+  const clean = value => String(value ?? '').replace(/\s+/g, ' ').trim();
+  const isVisible = (el) => {
+    if (!el || el.nodeType !== 1) return false;
+    if (el.hidden) return false;
+    const style = typeof getComputedStyle === 'function' ? getComputedStyle(el) : null;
+    if (style && (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0')) return false;
+    if (el.closest('[hidden], [aria-hidden="true"]')) return false;
+    return true;
+  };
+  const loginPromptRegex = /\b(?:must\s+be\s+logged\s+in|log\s*in\s+to\s+(?:comment|post|publish|reply)|sign\s*in\s+to\s+(?:comment|post|publish|reply)|please\s+(?:log\s*in|sign\s*in)|login\s+required|sign\s*up\s+to\s+comment)\b|请先登录|登录后(?:评论|发表)/i;
+  const scopes = Array.from(document.querySelectorAll('#respond, #comments, .comments-area, [data-hook*="comment" i], [role="dialog"], form, main, article'))
+    .filter(isVisible);
+  const targets = scopes.length > 0 ? scopes : (document.body ? [document.body] : []);
+  let matchedText = '';
+  const loginButtons = [];
+  const ssoProviders = [];
+  for (const scope of targets) {
+    const t = clean(scope.innerText || scope.textContent);
+    const m = loginPromptRegex.exec(t);
+    if (m && !matchedText) matchedText = m[0];
+    for (const btn of scope.querySelectorAll('button, a, [role="button"]')) {
+      if (!isVisible(btn) || btn.closest('header, nav, footer, [role="navigation"]')) continue;
+      const lbl = clean(btn.innerText || btn.textContent || btn.getAttribute('aria-label'));
+      const low = (lbl + ' ' + clean(btn.getAttribute('href')) + ' ' + clean(btn.getAttribute('data-testid'))).toLowerCase();
+      if (/google|gsi\/button/.test(low) && !ssoProviders.includes('google')) ssoProviders.push('google');
+      if (/\b(?:log\s*in|sign\s*in|sign\s*up)\b|登录|注册/i.test(lbl) && !loginButtons.includes(lbl) && loginButtons.length < 6) {
+        loginButtons.push(lbl);
+      }
+    }
+  }
+  const hasLoginPrompt = Boolean(matchedText || loginButtons.length > 0);
+  return {
+    hasLoginPrompt,
+    ...(matchedText ? { matchedText } : {}),
+    ...(hasLoginPrompt ? { loginInfo: { loginButtons, ssoProviders } } : {}),
+  };
+})()`
+
+const FIND_JETPACK_GUEST_TOGGLE_SCRIPT = String.raw`(() => {
+  const clean = value => String(value ?? '').replace(/\s+/g, ' ').trim();
+  const escapeCss = value => (typeof CSS !== 'undefined' && typeof CSS.escape === 'function')
+    ? CSS.escape(value)
+    : String(value).replace(/([^\w-])/g, '\\$1');
+  const isVisible = (el) => {
+    if (!el || el.nodeType !== 1) return false;
+    if (el.hidden) return false;
+    const style = typeof getComputedStyle === 'function' ? getComputedStyle(el) : null;
+    if (style && (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0')) return false;
+    if (el.closest('[hidden], [aria-hidden="true"]')) return false;
+    return true;
+  };
+  const unique = (el, sel) => {
+    if (!sel) return false;
+    try {
+      const list = document.querySelectorAll(sel);
+      return list.length === 1 && list[0] === el;
+    } catch {
+      return false;
+    }
+  };
+  const selectorFor = (el) => {
+    if (!el) return '';
+    if (el.id) {
+      const byId = '#' + escapeCss(el.id);
+      if (unique(el, byId)) return byId;
+    }
+    const testId = el.getAttribute('data-testid');
+    if (testId) {
+      const byTestId = '[data-testid="' + testId.replace(/"/g, '\\"') + '"]';
+      if (unique(el, byTestId)) return byTestId;
+    }
+    const aria = el.getAttribute('aria-label');
+    if (aria) {
+      const byAria = el.localName + '[aria-label="' + aria.replace(/"/g, '\\"') + '"]';
+      if (unique(el, byAria)) return byAria;
+    }
+    let path = '';
+    for (let node = el, depth = 0; node && node.nodeType === 1 && depth < 12; node = node.parentElement, depth++) {
+      const tag = node.localName;
+      const parent = node.parentNode;
+      if (!parent) break;
+      const siblings = Array.from(parent.children || []).filter(s => s.localName === tag);
+      const seg = siblings.length > 1 ? tag + ':nth-of-type(' + (siblings.indexOf(node) + 1) + ')' : tag;
+      path = path ? seg + ' > ' + path : seg;
+      if (unique(el, path)) return path;
+    }
+    return '';
+  };
+  const guestToggleRegex = /^(?:add\s+your\s+name|continue\s+as\s+(?:a\s+)?guest|comment\s+as\s+(?:a\s+)?guest|post\s+as\s+(?:a\s+)?guest|leave\s+a\s+comment\s+as\s+(?:a\s+)?guest|fill\s+in\s+your\s+details|use\s+name\s+and\s+email)$/i;
+  const scope = document.querySelector('#respond, .verbum-comments, .jetpack-comments, form#commentform, form[action*="wp-comments-post.php"]') || document;
+  const btn = Array.from(scope.querySelectorAll('button, [role="button"], a')).find(el => {
+    if (!isVisible(el)) return false;
+    const t = clean(el.innerText || el.textContent || el.getAttribute('aria-label') || el.getAttribute('title'));
+    return guestToggleRegex.test(t);
+  });
+  return btn ? selectorFor(btn) : '';
+})()`
+
+async function inspectDisabledSubmitLoginPrompt(page: Page): Promise<{
+  readonly hasLoginPrompt: boolean
+  readonly matchedText?: string
+  readonly loginInfo?: CommentPublishLoginInfo
+}> {
+  if (typeof page.evaluate !== 'function') return { hasLoginPrompt: false }
+  return await page
+    .evaluate<{ readonly hasLoginPrompt: boolean; readonly matchedText?: string; readonly loginInfo?: CommentPublishLoginInfo }>(
+      INSPECT_DISABLED_SUBMIT_LOGIN_SCRIPT,
+    )
+    .catch(() => ({ hasLoginPrompt: false }))
+}
+
+async function findDynamicJetpackGuestToggle(page: Page): Promise<string | undefined> {
+  if (typeof page.evaluate !== 'function') return undefined
+  const sel = await page.evaluate<string>(FIND_JETPACK_GUEST_TOGGLE_SCRIPT).catch(() => '')
+  return sel && sel.length > 0 ? sel : undefined
+}
 
 function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
   if (ms <= 0) return Promise.resolve()
@@ -1420,13 +1956,15 @@ export async function inspectChildFrames(page: Page): Promise<ChildFramesInspect
       continue
     }
 
-    const knownComment = KNOWN_COMMENT_FRAME_URL_PATTERN.test(frameUrl)
+    const frameName = typeof frame.name === 'function' ? frame.name() : ''
+    const isBloggerFrame = /blogger\.com\/comment|blogspot\.com\/comment/iu.test(frameUrl) || /^comment-editor$/iu.test(frameName)
+    const knownComment = KNOWN_COMMENT_FRAME_URL_PATTERN.test(frameUrl) || isBloggerFrame
     if (!knownComment && NON_COMMENT_FRAME_URL_PATTERN.test(frameUrl)) {
       continue
     }
 
-    if (/blogger\.com\/comment/iu.test(frameUrl)) {
-      bloggerFrameUrl ??= frameUrl
+    if (isBloggerFrame) {
+      bloggerFrameUrl ??= frameUrl || 'comment-editor'
     }
 
     if (knownComment) {
@@ -1625,6 +2163,7 @@ function buildFallbackResult(
   siteType: CommentPublishSiteType,
   inspection: CommentPageInspection,
   evidence?: string,
+  reason?: string,
 ): BrowserCommentPublishResult {
   return {
     kind: 'comment_publish',
@@ -1634,6 +2173,7 @@ function buildFallbackResult(
     title: inspection.title,
     finalUrl: inspection.finalUrl,
     ...(evidence === undefined ? {} : { evidence }),
+    ...(reason === undefined ? {} : { reason }),
     submitTriggered: false,
     formSummary: inspection.formSummary,
     ...(inspection.bottomSnapshot === undefined ? {} : { bottomSnapshot: inspection.bottomSnapshot }),
@@ -1686,7 +2226,7 @@ function buildWixNoFormDiagnosis(inspection: CommentPageInspection): string {
   return 'Wix 页面未定位到确定性评论入口，附带底部快照转交 LLM 二次确认（未触发提交）'
 }
 
-/** Shared submission + 302-resilient post-submit/reload verification for WP, Typecho, and custom blog forms. */
+/** Shared submission + Jetpack Verbum guest-flow + 403/WAF detection + 302-resilient post-submit/reload verification for WP, Typecho, and custom blog forms. */
 async function submitAndVerifyStandardForm(
   page: Page,
   ref: string,
@@ -1695,12 +2235,14 @@ async function submitAndVerifyStandardForm(
   inspection: CommentPageInspection,
   form: {
     readonly commentSelector?: string
+    readonly commentIsContentEditable?: boolean
     readonly authorSelector?: string
     readonly authorRequired?: boolean
     readonly emailSelector?: string
     readonly emailRequired?: boolean
     readonly urlSelector?: string
     readonly submitSelector?: string
+    readonly guestToggleSelector?: string
     readonly captcha?: {
       readonly detected: boolean
       readonly kind?: string
@@ -1758,55 +2300,273 @@ async function submitAndVerifyStandardForm(
   }
 
   const hasUrlField = form.urlSelector !== undefined
-  const commentBody = buildWpCommentContent(command.commentText, command.websiteUrl, command.anchorText, hasUrlField)
-
   await dismissBlockingOverlays(page, timeoutMs)
 
-  await page.locator(form.commentSelector!).first().fill(commentBody, { timeout: timeoutMs })
+  const commentLocator = page.locator(form.commentSelector!).first()
+  if (form.commentIsContentEditable) {
+    const stripped = stripHtmlLinkForRichEditor(command.commentText, command.anchorText, command.websiteUrl)
+    if (typeof commentLocator.click === 'function') {
+      await commentLocator.click({ timeout: timeoutMs }).catch(() => undefined)
+    }
+    await commentLocator.fill(stripped.plainText, { timeout: timeoutMs })
+  } else {
+    const commentBody = buildWpCommentContent(command.commentText, command.websiteUrl, command.anchorText, hasUrlField)
+    await commentLocator.fill(commentBody, { timeout: timeoutMs })
+  }
+
+  let authorFilled = false
+  let emailFilled = false
+  let urlFilled = false
+
   if (form.authorSelector !== undefined && command.authorName?.trim()) {
     await page.locator(form.authorSelector).first().fill(command.authorName.trim(), { timeout: timeoutMs })
+    authorFilled = true
   }
   if (form.emailSelector !== undefined && command.authorEmail?.trim()) {
     await page.locator(form.emailSelector).first().fill(command.authorEmail.trim(), { timeout: timeoutMs })
+    emailFilled = true
   }
   if (form.urlSelector !== undefined && command.websiteUrl?.trim()) {
     await page.locator(form.urlSelector).first().fill(command.websiteUrl.trim(), { timeout: timeoutMs })
+    urlFilled = true
   }
 
-  if (form.submitSelector === undefined) {
+  let activeSubmitSelector = form.submitSelector
+  let activeInspection = inspection
+
+  if (activeSubmitSelector === undefined) {
     return buildFallbackResult(
       ref,
       siteType,
-      inspection,
+      activeInspection,
       `${siteLabel} 评论框已填充但未定位到明确 Submit 按钮，转交 LLM 接管（未触发提交）`,
     )
   }
 
   await dismissBlockingOverlays(page, timeoutMs)
 
-  // Point of no return: clicking submit marks submitTriggered=true (idempotent: never retry on uncertainty).
-  const submitLocator = page.locator(form.submitSelector).first()
-  const navWaitTimeout = Math.min(10_000, timeoutMs)
-  const navPromise = typeof page.waitForNavigation === 'function'
-    ? page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: navWaitTimeout }).catch(() => null)
-    : typeof page.waitForLoadState === 'function'
-      ? page.waitForLoadState('domcontentloaded', { timeout: navWaitTimeout }).catch(() => null)
-      : Promise.resolve(null)
+  // Check if submit button is disabled; on WordPress Jetpack Verbum (Gutenberg comment box),
+  // automatically expand guest flow ("Add your name" / "Continue as a guest") and fill name/email/url.
+  let submitLocator = page.locator(activeSubmitSelector).first()
+  if (await isLocatorDisabled(submitLocator)) {
+    const guestToggleSel = siteType === 'wordpress'
+      ? (form.guestToggleSelector ?? await findDynamicJetpackGuestToggle(page))
+      : undefined
 
-  await Promise.all([
-    navPromise,
-    submitLocator.click({ timeout: timeoutMs }).catch((error: unknown) => {
-      if (isNavigationContextError(error)) return null
-      throw error
-    }),
-  ])
+    if (guestToggleSel) {
+      const toggleLocator = page.locator(guestToggleSel).first()
+      if (!(await isLocatorDisabled(toggleLocator))) {
+        await toggleLocator.click({ timeout: timeoutMs }).catch(() => undefined)
+
+        const expandDeadline = Date.now() + Math.min(2_000, timeoutMs)
+        let refreshedWp = activeInspection.wordpress
+        for (let poll = 0; poll < 8; poll++) {
+          throwIfAborted(signal)
+          await sleep(Math.min(250, timeoutMs), signal)
+          const nextInspection = await inspectCommentPageWithFrames(page).catch(() => activeInspection)
+          activeInspection = nextInspection
+          refreshedWp = nextInspection.wordpress
+          const revealedGuestInput = Boolean(
+            (!authorFilled && refreshedWp.authorSelector)
+            || (!emailFilled && refreshedWp.emailSelector)
+            || (!urlFilled && refreshedWp.urlSelector),
+          )
+          if (revealedGuestInput || Date.now() >= expandDeadline) break
+        }
+
+        if (!authorFilled && refreshedWp.authorSelector && command.authorName?.trim()) {
+          await page.locator(refreshedWp.authorSelector).first().fill(command.authorName.trim(), { timeout: timeoutMs })
+          authorFilled = true
+        }
+        if (!emailFilled && refreshedWp.emailSelector && command.authorEmail?.trim()) {
+          await page.locator(refreshedWp.emailSelector).first().fill(command.authorEmail.trim(), { timeout: timeoutMs })
+          emailFilled = true
+        }
+        if (!urlFilled && refreshedWp.urlSelector && command.websiteUrl?.trim()) {
+          await page.locator(refreshedWp.urlSelector).first().fill(command.websiteUrl.trim(), { timeout: timeoutMs })
+          urlFilled = true
+        }
+        if (refreshedWp.submitSelector) {
+          activeSubmitSelector = refreshedWp.submitSelector
+          submitLocator = page.locator(activeSubmitSelector).first()
+        }
+
+        const enableDeadline = Date.now() + Math.min(2_000, timeoutMs)
+        for (let poll = 0; poll < 8 && (await isLocatorDisabled(submitLocator)); poll++) {
+          if (Date.now() >= enableDeadline) break
+          throwIfAborted(signal)
+          await sleep(Math.min(200, timeoutMs), signal)
+        }
+      }
+    }
+
+    if (await isLocatorDisabled(submitLocator)) {
+      const loginProbe = await inspectDisabledSubmitLoginPrompt(page)
+      if (loginProbe.hasLoginPrompt) {
+        return buildNeedsLoginResult(
+          ref,
+          siteType,
+          activeInspection,
+          `${siteLabel} 评论提交按钮处于 disabled 状态且页面提示需要登录 (${loginProbe.matchedText ?? 'login required'})，未点击提交`,
+          loginProbe.loginInfo,
+        )
+      }
+      return buildFallbackResult(
+        ref,
+        siteType,
+        activeInspection,
+        `${siteLabel} 评论提交按钮处于 disabled 状态 (submit_button_disabled)，未点击提交，转交 LLM 核查`,
+        'submit_button_disabled',
+      )
+    }
+  }
+
+  // Capture POST/navigation HTTP status & headers to detect 403/406/429 WAF blocks cleanly.
+  interface CapturedPostResponse {
+    readonly url: string
+    readonly status: number
+    readonly headers: Readonly<Record<string, string>>
+    readonly bodySnippet?: string
+    readonly isWpEndpoint: boolean
+    readonly isPostOrDoc: boolean
+  }
+  const capturedResponses: CapturedPostResponse[] = []
+  const pendingBodyReads: Array<Promise<void>> = []
+  const onResponse = (resp: unknown) => {
+    const r = resp as {
+      url?: () => string
+      status?: () => number
+      headers?: () => Record<string, string>
+      text?: () => Promise<string>
+      request?: () => { method?: () => string; resourceType?: () => string }
+    }
+    if (typeof r?.status !== 'function') return
+    const status = r.status()
+    const url = typeof r.url === 'function' ? r.url() : ''
+    const req = typeof r.request === 'function' ? r.request() : undefined
+    const method = (typeof req?.method === 'function' ? req.method() : '').toUpperCase()
+    const resourceType = (typeof req?.resourceType === 'function' ? req.resourceType() : '').toLowerCase()
+    const isWpEndpoint = /wp-comments-post\.php/iu.test(url)
+    const isPostOrDoc = method === 'POST' || resourceType === 'document' || resourceType === 'xhr' || resourceType === 'fetch'
+    if (!isWpEndpoint && !isPostOrDoc) return
+    const headers = typeof r.headers === 'function' ? r.headers() : {}
+    const entry: {
+      url: string
+      status: number
+      headers: Readonly<Record<string, string>>
+      bodySnippet?: string
+      isWpEndpoint: boolean
+      isPostOrDoc: boolean
+    } = { url, status, headers, isWpEndpoint, isPostOrDoc }
+    capturedResponses.push(entry)
+    if ((status === 403 || status === 406 || status === 429) && typeof r.text === 'function') {
+      pendingBodyReads.push(
+        r.text()
+          .then(raw => {
+            const cleaned = raw.replace(/<[^>]+>/gu, ' ').replace(/\s+/gu, ' ').trim()
+            if (cleaned.length > 0) entry.bodySnippet = cleaned.slice(0, 260)
+          })
+          .catch(() => undefined),
+      )
+    }
+  }
+
+  const pageWithEvents = page as unknown as {
+    on?: (ev: string, fn: (arg: unknown) => void) => void
+    off?: (ev: string, fn: (arg: unknown) => void) => void
+  }
+  if (typeof pageWithEvents.on === 'function') {
+    pageWithEvents.on('response', onResponse)
+  }
+
+  // Point of no return: clicking submit marks submitTriggered=true (idempotent: never retry on uncertainty).
+  const navWaitTimeout = Math.min(10_000, timeoutMs)
+  let navResponse: unknown = null
+  try {
+    const navPromise = typeof page.waitForNavigation === 'function'
+      ? page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: navWaitTimeout }).catch(() => null)
+      : typeof page.waitForLoadState === 'function'
+        ? page.waitForLoadState('domcontentloaded', { timeout: navWaitTimeout }).catch(() => null)
+        : Promise.resolve(null)
+
+    const [navRes] = await Promise.all([
+      navPromise,
+      submitLocator.click({ timeout: timeoutMs }).catch((error: unknown) => {
+        if (isNavigationContextError(error)) return null
+        throw error
+      }),
+    ])
+    navResponse = navRes
+    if (pendingBodyReads.length > 0) {
+      await Promise.all(pendingBodyReads)
+    }
+  } finally {
+    if (typeof pageWithEvents.off === 'function') {
+      pageWithEvents.off('response', onResponse)
+    }
+  }
+
+  // Also inspect waitForNavigation response when returned directly.
+  if (navResponse && typeof (navResponse as { status?: unknown }).status === 'function') {
+    const nr = navResponse as {
+      url?: () => string
+      status: () => number
+      headers?: () => Record<string, string>
+    }
+    const navStatus = nr.status()
+    const navUrl = typeof nr.url === 'function' ? nr.url() : ''
+    if (!capturedResponses.some(c => c.url === navUrl && c.status === navStatus)) {
+      capturedResponses.push({
+        url: navUrl,
+        status: navStatus,
+        headers: typeof nr.headers === 'function' ? nr.headers() : {},
+        isWpEndpoint: /wp-comments-post\.php/iu.test(navUrl),
+        isPostOrDoc: true,
+      })
+    }
+  }
 
   // Check post-submit URL & DOM BEFORE reloading clean URL (tolerating 302 execution-context destruction).
   const postCheck = await safeVerifyResult(page, command, timeoutMs, sleep, signal)
   const postSubmitUrl = postCheck.currentUrl
   const postVerify = postCheck.verify
   const postCommentId = postCheck.commentId
-  const postSubmitSnippet = postVerify.snippet
+  const postTitle = await page.title().catch(() => activeInspection.title)
+
+  const blockedResponse = capturedResponses.find(c => (c.status === 403 || c.status === 406 || c.status === 429) && c.isWpEndpoint)
+    ?? capturedResponses.find(c => c.status === 403 || c.status === 406 || c.status === 429)
+    ?? capturedResponses.find(c => c.isWpEndpoint)
+    ?? capturedResponses[capturedResponses.length - 1]
+  const postSubmitSnippet = postVerify.snippet ?? blockedResponse?.bodySnippet
+
+  const wafBlock = detectPostSubmitWafBlock({
+    ...(blockedResponse?.status === undefined ? {} : { httpStatus: blockedResponse.status }),
+    ...(blockedResponse?.headers === undefined ? {} : { responseHeaders: blockedResponse.headers }),
+    ...(blockedResponse?.bodySnippet === undefined ? {} : { responseSnippet: blockedResponse.bodySnippet }),
+    postSubmitUrl,
+    ...(postSubmitSnippet === undefined ? {} : { postSubmitSnippet }),
+    title: postTitle,
+  })
+  if (wafBlock.blocked) {
+    const statusCode = wafBlock.httpStatus ?? 403
+    const provider = wafBlock.provider ?? 'waf'
+    return {
+      kind: 'comment_publish',
+      page: ref,
+      outcome: 'blocked_waf',
+      siteType,
+      title: postTitle,
+      finalUrl: postSubmitUrl,
+      postSubmitUrl,
+      httpStatus: statusCode,
+      ...(wafBlock.snippet === undefined ? {} : { postSubmitSnippet: wafBlock.snippet }),
+      reason: `waf_http_${statusCode}`,
+      templateSignature: `${siteType}:waf_${provider}`,
+      suggestedTags: ['waf_403'],
+      evidence: `${siteLabel} 提交评论被 WAF/防火墙拦截 (HTTP ${statusCode}, ${provider})`,
+      submitTriggered: true,
+    }
+  }
 
   if (postVerify.wpErrorMessage) {
     const mentionsCaptcha = /captcha|spam|security/iu.test(postVerify.wpErrorMessage)
@@ -1815,7 +2575,7 @@ async function submitAndVerifyStandardForm(
       page: ref,
       outcome: 'uncertain_after_submit',
       siteType,
-      title: await page.title().catch(() => inspection.title),
+      title: postTitle,
       finalUrl: postSubmitUrl,
       postSubmitUrl,
       ...(postSubmitSnippet === undefined ? {} : { postSubmitSnippet }),
@@ -1943,7 +2703,7 @@ async function submitAndVerifyStandardForm(
   }
 }
 
-/** Handle Blogger comment iframe (`iframe[src*="blogger.com/comment"]`). */
+/** Handle Blogger comment iframe (`#comment-editor` / `iframe[src*="blogger.com/comment"]`). */
 async function executeBloggerCommentIframe(
   page: Page,
   ref: string,
@@ -1961,7 +2721,8 @@ async function executeBloggerCommentIframe(
   const bloggerFrame = page.frames().find(frame => {
     if (typeof frame.isDetached === 'function' && frame.isDetached()) return false
     const u = typeof frame.url === 'function' ? frame.url() : ''
-    return /blogger\.com\/comment/iu.test(u)
+    const n = typeof frame.name === 'function' ? frame.name() : ''
+    return /blogger\.com\/comment|blogspot\.com\/comment/iu.test(u) || /^comment-editor$/iu.test(n)
   })
   if (!bloggerFrame || typeof bloggerFrame.evaluate !== 'function') return undefined
 
@@ -2052,14 +2813,32 @@ async function executeBloggerCommentIframe(
   }
 
   const hasAnonUrl = activeDetail.anonUrlSelector !== undefined
-  const body = buildWpCommentContent(command.commentText, command.websiteUrl, command.anchorText, hasAnonUrl)
-  await bloggerFrame.locator(activeDetail.commentSelector ?? detail.commentSelector).first().fill(body, { timeout: options.timeoutMs })
+  const commentLocator = bloggerFrame.locator(activeDetail.commentSelector ?? detail.commentSelector).first()
+  if (activeDetail.commentIsContentEditable) {
+    const stripped = stripHtmlLinkForRichEditor(command.commentText, command.anchorText, command.websiteUrl)
+    const bodyText = !hasAnonUrl && stripped.websiteUrl && !stripped.plainText.toLowerCase().includes(stripped.websiteUrl.toLowerCase())
+      ? `${stripped.plainText} ${stripped.websiteUrl}`.trim()
+      : stripped.plainText
+    if (typeof commentLocator.click === 'function') {
+      await commentLocator.click({ timeout: options.timeoutMs }).catch(() => undefined)
+    }
+    await commentLocator.fill(bodyText, { timeout: options.timeoutMs })
+  } else {
+    const body = buildWpCommentContent(command.commentText, command.websiteUrl, command.anchorText, hasAnonUrl)
+    await commentLocator.fill(body, { timeout: options.timeoutMs })
+  }
 
   if (activeDetail.anonNameSelector && command.authorName?.trim()) {
     await bloggerFrame.locator(activeDetail.anonNameSelector).first().fill(command.authorName.trim(), { timeout: options.timeoutMs })
   }
   if (activeDetail.anonUrlSelector && command.websiteUrl?.trim()) {
     await bloggerFrame.locator(activeDetail.anonUrlSelector).first().fill(command.websiteUrl.trim(), { timeout: options.timeoutMs })
+  }
+
+  // Re-inspect Blogger iframe after filling so dynamically enabled/rendered `role="button"` Publish controls are picked up.
+  const refreshedAfterFill = await bloggerFrame.evaluate<BloggerFrameInspection>(INSPECT_BLOGGER_FRAME_SCRIPT).catch(() => null)
+  if (refreshedAfterFill?.submitSelector) {
+    activeDetail = { ...activeDetail, submitSelector: refreshedAfterFill.submitSelector }
   }
 
   if (!activeDetail.submitSelector) {
@@ -2071,7 +2850,18 @@ async function executeBloggerCommentIframe(
     )
   }
 
-  await bloggerFrame.locator(activeDetail.submitSelector).first().click({ timeout: options.timeoutMs })
+  const bloggerSubmitLocator = bloggerFrame.locator(activeDetail.submitSelector).first()
+  if (await isLocatorDisabled(bloggerSubmitLocator)) {
+    return buildFallbackResult(
+      ref,
+      'blogger',
+      inspection,
+      'Blogger 评论 Publish 按钮处于 disabled 状态 (submit_button_disabled)，未点击提交，转交 LLM 核查',
+      'submit_button_disabled',
+    )
+  }
+
+  await bloggerSubmitLocator.click({ timeout: options.timeoutMs })
   await options.sleep(Math.min(1_500, options.timeoutMs), options.signal)
 
   const postFrame = await bloggerFrame.evaluate<BloggerFrameInspection>(INSPECT_BLOGGER_FRAME_SCRIPT).catch(() => null)
@@ -2173,33 +2963,38 @@ export async function executeCommentPublish(
   options: ExecuteCommentPublishOptions,
 ): Promise<BrowserCommentPublishResult> {
   const timeoutMs = command.timeoutMs ?? options.defaultTimeoutMs
+  const isWixHint = command.siteHint === 'wix_blog' || /\.wixsite\.com\b/iu.test(command.url)
+  const navTimeoutMs = isWixHint ? Math.max(timeoutMs, DEFAULT_WIX_NAV_TIMEOUT_MS) : timeoutMs
   const verifyReload = command.verifyReload !== false
   const probeOnly = command.probeOnly === true
   const baseLazyWaitMaxMs = Math.min(options.lazyWaitMaxMs ?? DEFAULT_LAZY_WAIT_MAX_MS, timeoutMs)
+  const wixWaitCeiling = Math.max(timeoutMs, DEFAULT_WIX_LAZY_WAIT_MAX_MS)
   const wixLazyWaitMaxMs = Math.min(
     options.wixLazyWaitMaxMs ?? options.lazyWaitMaxMs ?? DEFAULT_WIX_LAZY_WAIT_MAX_MS,
-    timeoutMs,
+    wixWaitCeiling,
   )
   const wixExpandWaitMaxMs = Math.min(options.wixExpandWaitMaxMs ?? DEFAULT_WIX_EXPAND_WAIT_MAX_MS, timeoutMs)
   const wixPostSubmitWaitMs = Math.min(options.wixPostSubmitWaitMs ?? DEFAULT_WIX_POST_SUBMIT_WAIT_MS, timeoutMs)
   const sleep = options.sleepImpl ?? defaultSleep
 
   throwIfAborted(options.signal)
-  await page.goto(command.url, { timeout: timeoutMs, waitUntil: 'domcontentloaded' })
+  await page.goto(command.url, { timeout: navTimeoutMs, waitUntil: 'domcontentloaded' })
   throwIfAborted(options.signal)
 
   let inspection = await inspectCommentPageWithFrames(page)
+  let completedFullLazyWait = false
 
-  // Progressive multi-step scroll + anchor scrollIntoView + 8-10s Wix lazy-load polling.
+  // Progressive multi-step scroll + anchor scrollIntoView + up to 15s Wix lazy-load polling (immediate early exit once actionable).
   if (!hasActionableCommentSurface(inspection)) {
-    let activeWaitMaxMs = inspection.isWix ? wixLazyWaitMaxMs : baseLazyWaitMaxMs
+    let activeWaitMaxMs = (inspection.isWix || isWixHint) ? wixLazyWaitMaxMs : baseLazyWaitMaxMs
     const startAt = Date.now()
     let deadline = startAt + activeWaitMaxMs
     let maxPolls = activeWaitMaxMs > 0 ? Math.max(1, Math.ceil(activeWaitMaxMs / LAZY_POLL_INTERVAL_MS)) : 0
+    let exitedEarly = false
 
     for (let poll = 0; poll < maxPolls && Date.now() < deadline; poll++) {
       throwIfAborted(options.signal)
-      const steps = inspection.isWix ? WIX_PROGRESSIVE_SCROLL_STEPS : DEFAULT_PROGRESSIVE_SCROLL_STEPS
+      const steps = (inspection.isWix || isWixHint) ? WIX_PROGRESSIVE_SCROLL_STEPS : DEFAULT_PROGRESSIVE_SCROLL_STEPS
       const fraction = steps[Math.min(poll, steps.length - 1)]!
       await scrollPageStep(page, fraction)
 
@@ -2214,8 +3009,12 @@ export async function executeCommentPublish(
         deadline = startAt + activeWaitMaxMs
         maxPolls = activeWaitMaxMs > 0 ? Math.max(1, Math.ceil(activeWaitMaxMs / LAZY_POLL_INTERVAL_MS)) : 0
       }
-      if (hasActionableCommentSurface(inspection)) break
+      if (hasActionableCommentSurface(inspection)) {
+        exitedEarly = true
+        break
+      }
     }
+    completedFullLazyWait = !exitedEarly && maxPolls > 0
   }
 
   // Expand collapsed WordPress comment form (e.g. SmartMag `a.ts-button`, `ADD A COMMENT`).
@@ -2447,7 +3246,25 @@ export async function executeCommentPublish(
         && !(inspection.childFrames?.hasUnknownInteractiveFrame)
         && (inspection.readyState === undefined || inspection.readyState !== 'loading')
 
-      if (canSafelyDeclareWixNoForm) {
+      const canDeclareEmptyWixPlaceholderNoForm =
+        completedFullLazyWait
+        && Boolean(inspection.wix.hasEmptyCommentPlaceholder)
+        && !inspection.wix.hasCommentSection
+        && !inspection.wix.hasGuestEditor
+        && !inspection.wix.triggerSelector
+        && !inspection.wix.loginRequired
+        && !inspection.wix.captchaDetected
+        && !inspection.wix.isBlogListPage
+        && !inspection.wix.hasLoadingIndicator
+        && !inspection.wix.hasCommentListOrCount
+        && !inspection.wix.hasWriteCommentPrompt
+        && !inspection.formSummary.hasLoginWall
+        && !(inspection.childFrames?.hasActionableCommentFrame)
+        && !(inspection.childFrames?.hasUnknownInteractiveFrame)
+        && !(inspection.childFrames?.captchaDetected)
+        && (inspection.readyState === undefined || inspection.readyState !== 'loading')
+
+      if (canSafelyDeclareWixNoForm || canDeclareEmptyWixPlaceholderNoForm) {
         return {
           kind: 'comment_publish',
           page: ref,
@@ -2455,7 +3272,9 @@ export async function executeCommentPublish(
           siteType: 'wix',
           title: inspection.title,
           finalUrl: inspection.finalUrl,
-          skipReason: 'Wix 静态页面经渐进滚动、懒加载等待与 iframe 过滤检查后确认无评论模块',
+          skipReason: canDeclareEmptyWixPlaceholderNoForm
+            ? 'Wix 博客完成完整滚动与懒加载等待后 comments-section-placeholder 持续为空（无输入框/评论列表/登录墙/加载动画），确认已关闭评论 (no_form)'
+            : 'Wix 静态页面经渐进滚动、懒加载等待与 iframe 过滤检查后确认无评论模块',
           suggestedTags: ['no_form'],
           submitTriggered: false,
         }
@@ -2600,8 +3419,30 @@ export async function executeCommentPublish(
 
     await dismissBlockingOverlays(page, timeoutMs)
 
+    // Guard against disabled submit buttons (e.g. migrated React comment boxes requiring login without login UI).
+    const wixSubmitLocator = page.locator(wix.submitSelector).first()
+    if (await isLocatorDisabled(wixSubmitLocator)) {
+      const loginProbe = await inspectDisabledSubmitLoginPrompt(page)
+      if (loginProbe.hasLoginPrompt) {
+        return buildNeedsLoginResult(
+          ref,
+          'wix',
+          inspection,
+          `Wix 评论提交按钮处于 disabled 状态且页面提示需要登录 (${loginProbe.matchedText ?? 'login required'})，未点击提交`,
+          loginProbe.loginInfo,
+        )
+      }
+      return buildFallbackResult(
+        ref,
+        'wix',
+        inspection,
+        'Wix 评论提交按钮处于 disabled 状态 (submit_button_disabled)，未点击提交，转交 LLM 核查',
+        'submit_button_disabled',
+      )
+    }
+
     // Point of no return: click Publish, then wait 2-3s inspecting role=dialog before reloading.
-    await page.locator(wix.submitSelector).first().click({ timeout: timeoutMs })
+    await wixSubmitLocator.click({ timeout: timeoutMs })
 
     const postSubmitDeadline = Date.now() + wixPostSubmitWaitMs
     const postSubmitMaxPolls = wixPostSubmitWaitMs > 0
@@ -2650,6 +3491,13 @@ export async function executeCommentPublish(
       }
 
       if (postDialog.moderationNotice) {
+        if (postDialog.ackButtonSelector && typeof page.locator === 'function') {
+          await page
+            .locator(postDialog.ackButtonSelector)
+            .first()
+            .click({ timeout: Math.min(2_000, timeoutMs) })
+            .catch(() => undefined)
+        }
         const currentUrl = page.url()
         return {
           kind: 'comment_publish',

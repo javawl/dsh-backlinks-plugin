@@ -12,6 +12,7 @@
  */
 
 import type { CallToolResult, Tool } from '@modelcontextprotocol/sdk/types.js'
+import { DEFAULT_WIX_NAV_TIMEOUT_MS } from '../host/browser-playwright/comment-publish.ts'
 import { PlaywrightBrowserProvider } from '../host/browser-playwright/provider.ts'
 import type {
   BrowserAutomationProvider,
@@ -115,7 +116,11 @@ export const BROWSER_TOOL_DEFINITION: Tool = {
       },
       timeoutMs: {
         type: 'integer',
-        description: 'Timeout in ms for navigate (default 10000; overridable per call, recommend 8000-10000), comment_publish (default 10000), directory_autofill (default 10000), waitFor (default 10000), or wait_for_login (default 300000).',
+        description: 'Timeout in ms for navigate (default 10000, or 15000 when siteHint=wix_blog; overridable per call, recommend 8000-10000), comment_publish (default 10000; Wix navigation auto-relaxes to 15000 when siteHint=wix_blog), directory_autofill (default 10000), waitFor (default 10000), or wait_for_login (default 300000).',
+      },
+      siteHint: {
+        type: 'string',
+        description: 'Optional preflight siteHint (e.g. wix_blog, wordpress_comment, typecho_comment, comments_closed_hint) for navigate / comment_publish; relaxes initial domcontentloaded timeout to 15000ms for slow Wix sites.',
       },
       commentText: {
         type: 'string',
@@ -576,6 +581,7 @@ export function formatMcpBrowserOutput(result: BrowserResult, maxChars: number):
         submitTriggered: result.submitTriggered,
         ...(result.probeOnly === undefined ? {} : { probeOnly: result.probeOnly }),
         ...(result.loginInfo === undefined ? {} : { loginInfo: result.loginInfo }),
+        ...(result.httpStatus === undefined ? {} : { httpStatus: result.httpStatus }),
         ...(result.postSubmitUrl === undefined ? {} : { postSubmitUrl: result.postSubmitUrl }),
         ...(result.postSubmitSnippet === undefined ? {} : { postSubmitSnippet: result.postSubmitSnippet }),
         ...(result.popupPageRef === undefined ? {} : { popupPageRef: result.popupPageRef }),
@@ -887,6 +893,7 @@ export function createBrowserToolHandler(deps: BrowserToolDependencies) {
       const url = readNonEmpty(args.url, 'url')
       const value = readNonEmpty(args.value, 'value')
       const waitUntil = readWaitUntil(args.waitUntil)
+      const siteHint = readNonEmpty(args.siteHint, 'siteHint')
       const timeoutMs = readPositiveInt(args.timeoutMs, 'timeoutMs')
       const requestedMaxChars = readPositiveInt(args.maxChars, 'maxChars')
 
@@ -903,11 +910,14 @@ export function createBrowserToolHandler(deps: BrowserToolDependencies) {
           effectiveMaxChars = requestedMaxChars !== undefined
             ? Math.min(requestedMaxChars, config.maxOutputChars)
             : Math.min(config.navigateMaxChars, config.maxOutputChars)
+          const effectiveNavTimeoutMs = timeoutMs
+            ?? (siteHint === 'wix_blog' ? Math.max(config.browserTimeoutMs, DEFAULT_WIX_NAV_TIMEOUT_MS) : undefined)
           command = addressed({
             kind: 'navigate',
             url: target,
             ...(waitUntil === undefined ? {} : { waitUntil }),
-            ...(timeoutMs === undefined ? {} : { timeoutMs }),
+            ...(siteHint === undefined ? {} : { siteHint }),
+            ...(effectiveNavTimeoutMs === undefined ? {} : { timeoutMs: effectiveNavTimeoutMs }),
             maxChars: effectiveMaxChars,
           })
           break
@@ -952,6 +962,8 @@ export function createBrowserToolHandler(deps: BrowserToolDependencies) {
           const authorEmail = readNonEmpty(args.authorEmail, 'authorEmail')
           const websiteUrl = readUrl(args.websiteUrl, 'websiteUrl')
           const anchorText = readNonEmpty(args.anchorText, 'anchorText')
+          const effectiveCommentTimeoutMs = timeoutMs
+            ?? (siteHint === 'wix_blog' ? Math.max(config.browserTimeoutMs, DEFAULT_WIX_NAV_TIMEOUT_MS) : config.browserTimeoutMs)
           command = addressed({
             kind: 'comment_publish',
             url: targetUrl,
@@ -960,7 +972,8 @@ export function createBrowserToolHandler(deps: BrowserToolDependencies) {
             ...(authorEmail === undefined ? {} : { authorEmail }),
             ...(websiteUrl === undefined ? {} : { websiteUrl }),
             ...(anchorText === undefined ? {} : { anchorText }),
-            timeoutMs: timeoutMs ?? config.browserTimeoutMs,
+            ...(siteHint === undefined ? {} : { siteHint }),
+            timeoutMs: effectiveCommentTimeoutMs,
             ...(args.verifyReload === undefined ? {} : { verifyReload: args.verifyReload }),
             ...(args.probeOnly === undefined ? {} : { probeOnly: args.probeOnly }),
           })

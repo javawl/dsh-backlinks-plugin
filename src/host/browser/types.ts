@@ -32,6 +32,7 @@ export interface BrowserNavigateCommand extends BrowserPageAddress {
   readonly waitUntil?: 'load' | 'domcontentloaded' | 'networkidle'
   readonly maxChars?: number
   readonly timeoutMs?: number
+  readonly siteHint?: string
 }
 
 export interface BrowserSnapshotCommand extends BrowserPageAddress {
@@ -115,6 +116,7 @@ export type CommentPublishOutcome =
   | 'uncertain_after_submit'
   | 'comments_closed'
   | 'blocked_captcha'
+  | 'blocked_waf'
   | 'needs_login'
   | 'no_form'
   | 'needs_llm_fallback'
@@ -148,6 +150,7 @@ export interface BrowserCommentPublishCommand extends BrowserPageAddress {
   readonly authorEmail?: string
   readonly websiteUrl?: string
   readonly anchorText?: string
+  readonly siteHint?: string
   readonly timeoutMs?: number
   readonly verifyReload?: boolean
   readonly probeOnly?: boolean
@@ -293,6 +296,7 @@ export interface BrowserCommentPublishResult {
   readonly submitTriggered: boolean
   readonly probeOnly?: boolean
   readonly loginInfo?: CommentPublishLoginInfo
+  readonly httpStatus?: number
   readonly postSubmitUrl?: string
   readonly postSubmitSnippet?: string
   readonly popupPageRef?: string

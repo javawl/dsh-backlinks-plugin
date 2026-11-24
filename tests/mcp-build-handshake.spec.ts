@@ -151,6 +151,7 @@ describe('built MCP server artifact & stdio handshake', () => {
     expect(browserTool.inputSchema.properties.anchorText).toBeDefined()
     expect(browserTool.inputSchema.properties.verifyReload).toBeDefined()
     expect(browserTool.inputSchema.properties.probeOnly).toBeDefined()
+    expect(browserTool.inputSchema.properties.siteHint).toBeDefined()
     expect(browserTool.inputSchema.properties.fields?.items?.properties?.nth).toBeDefined()
     expect(browserTool.inputSchema.properties.maxChars?.description).toContain('3000')
     expect(browserTool.inputSchema.properties.maxChars?.description).toContain('4500')
