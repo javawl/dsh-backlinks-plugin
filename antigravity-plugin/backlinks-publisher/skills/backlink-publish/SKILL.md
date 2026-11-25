@@ -10,7 +10,7 @@ description: 本工作区所有"发外链/发布外链/发布批次/跑批次/�
 1. **幂等**：一个条目只允许一次"最终提交"动作，一个来源对一个网站只发一次——发布前先验证发布记录和状态（见单条目循环第 1 步），已提交/已上线的条目自己跳过，绝不重复发布。提交后拿不到明确回执（结果未知 / `uncertain_after_submit`）时，回写 `failed + manual_required`，**绝不自动重试**。
 2. **诚实回写**：`live` 必须是你亲自抓取公开页面并确认包含可点击目标链接后的结论；"提交成功但待审核"只能回写 `submitted`。
 
-## 一页式高效执行速查卡（v2.3 快路径 · 启动严禁 `ls` 扫目录或全量 `read_file`）
+## 一页式高效执行速查卡（v2.3.2 快路径 · 启动严禁 `ls` 扫目录或全量 `read_file`）
 
 > **零启动冗余原则**：本速查卡与下方主流程已覆盖全部常规目录、博客、表单规则与参数。**启动时禁止反复 `ls` 目录，也禁止 `read_file` 庞大的 schema JSON 或 `references/*` 参考手册**，直接按下方极简参数表调用工具；仅在遇到异常登录态或特殊模板问题时按需查阅参考文档。
 
@@ -24,7 +24,7 @@ description: 本工作区所有"发外链/发布外链/发布批次/跑批次/�
 | `backlinks batch_claim` | `batchId`, `itemIds: [...]`（5–6 条存活 ID） |
 | `backlinks item_result` | `itemId`, `status` (`live`/`submitted`/`failed`/`skipped`), `publicUrl?`, `anchorText?`, `targetUrl?`, `failureMode?`, `failureReason?`, `skipReason?`, `templateSignature?`, `evidence` |
 | `backlinks source_tags` | `sourceId`, `tags: [...]` |
-| `browser comment_publish` | `url`, `commentText`, `authorName?`, `authorEmail?`, `websiteUrl?`, `anchorText?`, `siteHint?`, `autoGoogleSso?: true`, `verifyReload?: true`, `page?` |
+| `browser comment_publish` | `url`, `commentText`, `authorName?`, `authorEmail?`, `websiteUrl?`, `anchorText?`, `siteHint?`, `autoGoogleSso?: true`, `verifyReload?: true`, `deadlineMs?: 55000`, `page?` |
 | `browser directory_autofill` | `url?`, `websiteUrl`, `name?`, `tagline?`, `description?`, `email?`, `page?` |
 | `browser batch_fill` | `fields: [{ target, op?, value?, nth? }]`, `submitTarget?`, `submitNth?`, `page?` |
 
@@ -37,14 +37,16 @@ description: 本工作区所有"发外链/发布外链/发布批次/跑批次/�
    - **低 `runnable <= 5` 多批接力规则**：若当前批次预检后 `runnable <= 5`，跑完这几条并 `lease_release` 后，可在同一会话（10–12 条预算内）直接接力预检并认领下一个待发批次，避免只发 1–3 条就结束会话。
 3. **分片认领**：仅从 `runnableItemIds` 挑 **5–6 条** `batch_claim`（同域 `sourceHost` 串行；单会话 10–12 条 / 2 片，允许低存活小批接力）。
 4. **博客与目录确定性快路径（`comment_publish` / `directory_autofill`）**：
-   - 博客评论（`wordpress_comment` / `typecho_comment` / `wix_blog` / `comments_closed_hint` / Valine / Blogger / 自定义博客）：**直接调用 `browser action="comment_publish"`**。
+   - 博客评论（`wordpress_comment` / `typecho_comment` / `wix_blog` / `comments_closed_hint` / Valine / Blogger / OpenCart / 自定义博客）：**直接调用 `browser action="comment_publish"`**。
+     - **工具级硬超时熔断与卡死页签回收（v2.3.2）**：`comment_publish` 默认 55s 硬截止（`deadlineMs` 上限 90s；`navigate` 35s、`snapshot` 25s、`batch_fill`/`directory_autofill` 45s），内部单步 `fill`/`click`/`waitFor` 均收紧至 ≤7s。触发硬截止时自动回收卡死页签（不关闭浏览器会话）并结构化返回 `{ outcome: "timeout", retryable: true, reason: "tool_deadline_exceeded" }`。
      - **非 Wix `commit` 导航 + 万级评论 WP 流式容错 + 轻量资源拦截**：非 Wix 站使用 `waitUntil: 'commit'`（默认 15s，尊重更高 `timeoutMs`）并拦截 `image`/`media`/`font`/广告统计域（严禁拦截 `document`/`stylesheet`/`xhr`/`fetch` 与 Wix/OAuth/CAPTCHA 域，`finally` 自动解除）。检测到流式加载或高评论 WP 大页（`readyState === 'loading'` 且 DOM 增长，或 `wp-content`/`.comment-list`/>30 个 `#comment-*`）时动态延长表单等待至最多 15s，一旦 `#commentform`/`#comment` 挂载立刻 `scrollIntoViewIfNeeded()` 进入填表（普通无表单页仍快速早退）。首探遇 `Execution context was destroyed` 自动等 2000ms 重试 1 次。
-     - **WordPress 新 `#comment-ID` 判定与 `wp_die` 403 区分**：提交前采集页面最大 `#comment-ID`，提交后若分配全新更大 `#comment-<newId>` 且无报错（即便受全页缓存或审核队列影响），返回 `submitted`（`wp_new_comment_id_assigned`，保留 `#comment-<newId>` 链接），并扩展英/法/西/德/意/葡/土/俄/日/中/波斯/泰语待审词库与轻量 cache-bust 复检。若 HTTP 403 为 `wp_die` 表单校验（如缺评分），返回 `needs_llm_fallback`（`wp_die_validation_error`）而非 `blocked_waf`。
-     - **Wix 一键 Google SSO（`autoGoogleSso: true` 默认开启）与已登录占位展开**：无 CAPTCHA / `signupRecaptchaOption=ALWAYS` 的 Wix `needs_login` 自动点击登录 → 复检 CAPTCHA → 点多语言 Google SSO（含韩语 `Google 로그인` 及英/日/中/西/法/德/意/葡/俄）→ 自动接管账号选择/授权同意弹窗 → 登录成功后自动填评发布与重载核验。已登录态（无可见 `login-as-member-text-button`）遇折叠 `[data-hook="comment-box-placeholder"]` 自动先点开展开编辑器再填评（若点开弹出登录墙则立刻转未登录分支，严守未登录禁填红线）。遇 `"Looks like there was a technical issue"` 立即返回 `manual_required`（`templateSignature: "wix:google_sso_technical_issue"`，快速熔断严禁重试）。
-     - **Valine 与多语言提交按钮**：支持 Valine（`input.vnick`/`vmail`/`vlink`、`textarea.veditor`、`button.vsubmit`，捕获 LeanCloud `POST .../classes/Comment` 201 或重载 `.first()` 核验 `a.vnick`）及土/西/法/德/意/葡/俄/日/中提交按钮（如 `GÖNDER`）。
+     - **WordPress WooCommerce 评价 Tab 展开 + 5 星自动勾选 + `unapproved=` 识别**：检测 WP 表单前自动展开隐藏的 WooCommerce `#tab-title-reviews` / `.reviews_tab` 评价标签页；提交前自动为未选星级的评论/商品评价勾选 5 星；提交后若分配全新 `#comment-<newId>`、重定向带 `unapproved=`/`moderation-hash=`（含 302 Location）或命中多语种待审词库（英/法/德/捷克/西/俄/波兰/印尼/葡/意/土/荷/日/韩/越/波斯/泰/中），稳定返回 `submitted`。HTTP 403 `wp_die` 表单校验返回 `needs_llm_fallback`（`wp_die_validation_error`）而非 `blocked_waf`。
+     - **Wix 一键 Google SSO（`autoGoogleSso: true` 默认开启）、占位展开与 RCE 工具栏插链回退**：无 CAPTCHA / `signupRecaptchaOption=ALWAYS` 的 Wix `needs_login` 自动匹配多语种登录入口（含西语 `Iniciar sesión`/`Inicia sesión`、葡语 `Entrar`/`Fazer login`、法语 `Se connecter`、德语 `Anmelden`、日语 `ログイン`、俄语 `Войти`、韩语、中文）→ 复检 CAPTCHA → 点 Google SSO → 自动接管账号选择/授权同意弹窗 → 登录成功后自动填评发布与重载核验。Wix RCE 输入 URL + Space 未自动转链时，自动回退尝试 RCE 工具栏 Link 按钮 / `Ctrl+K` 插链并校验 `<a>` 后再发布（均不可用才返回 `wix:rce_no_autolink`）。遇 `"Looks like there was a technical issue"` 立即返回 `manual_required`（`templateSignature: "wix:google_sso_technical_issue"`，快速熔断严禁重试）。
+     - **Valine、OpenCart 与多语言提交按钮**：支持 Valine（`input.vnick`/`vmail`/`vlink`、`textarea.veditor`、`button.vsubmit`）、OpenCart 评论/评价表单（`#button-comment`/`#button-review`/`#form-review` + `name`/`text`，无 CAPTCHA 时自动提交并核验 AJAX 回执）及多语种提交按钮（如 `GÖNDER`）。
    - 返回 `outcome` 映射：
      - `live` → `item_result(live, publicUrl)`
-     - `submitted` → `item_result(submitted, publicUrl)`（含 `wp_new_comment_id_assigned`、`post_submit_comment_id_cached` 与多语种待审）
+     - `submitted` → `item_result(submitted, publicUrl)`（含 `wp_new_comment_id_assigned`、`post_submit_comment_id_cached`、`wp_unapproved_redirect` 与多语种待审）
+     - `timeout` → `retryable: true`（`tool_deadline_exceeded`，卡死页签已自动回收）；可重试 1 次或视站点状态回写 `failed(manual_required)`
      - `comments_closed` → `item_result(skipped, skipReason)` + `source_tags(["评论关闭"])`
      - `no_form` → `item_result(skipped, skipReason)` + `source_tags(["no_form"])`
      - `blocked_captcha` → `bringToFront`，`item_result(failed, manual_required, templateSignature)` + `source_tags(["has_captcha"])`（绝不绕过验证码）

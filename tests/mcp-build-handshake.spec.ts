@@ -88,7 +88,7 @@ describe('built MCP server artifact & stdio handshake', () => {
     expect(initResp.error).toBeUndefined()
     expect(initResp.result?.serverInfo).toEqual({
       name: 'backlinks-publisher',
-      version: '1.0.0',
+      version: '2.3.2',
     })
 
     send({ jsonrpc: '2.0', method: 'notifications/initialized' })
@@ -157,6 +157,8 @@ describe('built MCP server artifact & stdio handshake', () => {
     expect(browserTool.inputSchema.properties.maxChars?.description).toContain('4500')
     expect(browserTool.inputSchema.properties.maxChars?.description).toContain('16000')
     expect(browserTool.inputSchema.properties.timeoutMs?.description).toContain('10000')
+    expect(browserTool.inputSchema.properties.deadlineMs?.description).toContain('55000')
+    expect(browserTool.inputSchema.properties.deadlineMs?.description).toContain('90000')
 
     const exitCode = await new Promise<number | null>((resolveExit, rejectExit) => {
       const timer = setTimeout(() => {

@@ -1,6 +1,6 @@
 {
   "name": "@javawl/dsh-backlinks-bundle",
-  "version": "1.0.1",
+  "version": "2.3.2",
   "description": "Standalone backlink publishing bundle for DeepSeek Harness: batch console, persistent Chrome automation, Supermanager & Cloud-mail providers, and publishing skills.",
   "license": "MIT",
   "repository": {

@@ -5,6 +5,7 @@ import { CodedError } from '../../shared/errors.ts';
 export type BrowserCommand = BrowserNavigateCommand | BrowserSnapshotCommand | BrowserBringToFrontCommand | BrowserClickCommand | BrowserFillCommand | BrowserSelectCommand | BrowserCheckCommand | BrowserPressCommand | BrowserUploadCommand | BrowserScreenshotCommand | BrowserWaitForCommand | BrowserProbeCommand | BrowserCommentPublishCommand | BrowserDirectoryAutofillCommand | BrowserListPagesCommand | BrowserClosePageCommand;
 export interface BrowserPageAddress {
     readonly page?: string;
+    readonly deadlineMs?: number;
 }
 export interface BrowserNavigateCommand extends BrowserPageAddress {
     readonly kind: 'navigate';
@@ -76,8 +77,8 @@ export interface BrowserProbeCommand extends BrowserPageAddress {
     readonly kind: 'probe';
     readonly selector?: string;
 }
-export type CommentPublishSiteType = 'wordpress' | 'wix' | 'typecho' | 'blogger' | 'valine' | 'other';
-export type CommentPublishOutcome = 'live' | 'submitted' | 'uncertain_after_submit' | 'comments_closed' | 'blocked_captcha' | 'blocked_waf' | 'needs_login' | 'manual_required' | 'no_form' | 'needs_llm_fallback' | 'form_ready';
+export type CommentPublishSiteType = 'wordpress' | 'wix' | 'typecho' | 'blogger' | 'valine' | 'opencart' | 'other';
+export type CommentPublishOutcome = 'live' | 'submitted' | 'uncertain_after_submit' | 'comments_closed' | 'blocked_captcha' | 'blocked_waf' | 'needs_login' | 'manual_required' | 'no_form' | 'needs_llm_fallback' | 'form_ready' | 'timeout';
 export interface CommentPublishLoginInfo {
     readonly loginButtons: readonly string[];
     readonly ssoProviders: readonly string[];
@@ -222,6 +223,10 @@ export interface BrowserCommentPublishResult {
     readonly templateSignature?: string;
     readonly suggestedTags?: readonly string[];
     readonly submitTriggered: boolean;
+    readonly retryable?: boolean;
+    readonly pageRecycled?: boolean;
+    readonly deadlineMs?: number;
+    readonly elapsedMs?: number;
     readonly probeOnly?: boolean;
     readonly loginInfo?: CommentPublishLoginInfo;
     readonly httpStatus?: number;
@@ -236,12 +241,13 @@ export interface BrowserSession {
     act(command: BrowserCommand, signal?: AbortSignal): Promise<BrowserResult>;
     close(): Promise<void>;
     isClosed?(): boolean;
+    recyclePage?(page?: string): Promise<boolean>;
 }
 export interface BrowserAutomationProvider {
     readonly id: string;
     available(): boolean;
     open(signal?: AbortSignal): Promise<BrowserSession>;
 }
-export type BrowserErrorCode = 'BROWSER_DUPLICATE_PROVIDER' | 'BROWSER_PROVIDER_CONFIGURED_MISSING' | 'BROWSER_PROVIDER_CONFIGURED_UNAVAILABLE' | 'BROWSER_PROVIDER_UNAVAILABLE' | 'BROWSER_PROVIDER_AMBIGUOUS' | 'BROWSER_LAUNCH_FAILED' | 'BROWSER_ABORTED' | 'BROWSER_ACTION_FAILED';
+export type BrowserErrorCode = 'BROWSER_DUPLICATE_PROVIDER' | 'BROWSER_PROVIDER_CONFIGURED_MISSING' | 'BROWSER_PROVIDER_CONFIGURED_UNAVAILABLE' | 'BROWSER_PROVIDER_UNAVAILABLE' | 'BROWSER_PROVIDER_AMBIGUOUS' | 'BROWSER_LAUNCH_FAILED' | 'BROWSER_ABORTED' | 'BROWSER_TIMEOUT' | 'BROWSER_ACTION_FAILED';
 export declare class BrowserError extends CodedError<BrowserErrorCode> {
 }

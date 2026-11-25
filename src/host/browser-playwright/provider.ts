@@ -31,6 +31,48 @@ export const DEFAULT_SNAPSHOT_MAX_CHARS = 60_000
 export const STRICT_MODE_INSPECT_TIMEOUT_MS = 1_500
 export const STRICT_MODE_MAX_CANDIDATES = 5
 export const DEFAULT_SUBMIT_FEEDBACK_WAIT_MS = 2_000
+const RECYCLE_PAGE_IO_TIMEOUT_MS = 3_000
+
+export class BrowserDeadlineError extends BrowserError {
+  readonly action: string
+  readonly pageRef: string
+  readonly deadlineMs: number
+  readonly elapsedMs: number
+  readonly pageRecycled: boolean
+
+  constructor(params: {
+    readonly action: string
+    readonly pageRef: string
+    readonly deadlineMs: number
+    readonly elapsedMs: number
+    readonly pageRecycled: boolean
+  }) {
+    super(
+      `browser ${params.action} exceeded hard deadline (${params.deadlineMs}ms)`,
+      'BROWSER_TIMEOUT',
+    )
+    this.name = 'BrowserDeadlineError'
+    this.action = params.action
+    this.pageRef = params.pageRef
+    this.deadlineMs = params.deadlineMs
+    this.elapsedMs = params.elapsedMs
+    this.pageRecycled = params.pageRecycled
+  }
+}
+
+async function settleWithTimeout<T>(promise: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      promise.catch(() => fallback),
+      new Promise<T>((resolve) => {
+        timer = setTimeout(() => resolve(fallback), timeoutMs)
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
 
 const STRICT_MODE_PATTERN = /strict mode violation/iu
 const NAVIGATE_TIMEOUT_PATTERN = /timeout|timed\s+out/iu
@@ -525,9 +567,144 @@ export class PlaywrightSession implements BrowserSession {
     command: BrowserCommand,
     signal?: AbortSignal,
   ): Promise<BrowserResult> {
-    const next = previous.then(() => this.execute(command, signal))
+    const next = previous.then(() => this.executeWithDeadline(command, signal))
     store(next.catch(() => undefined))
     return next
+  }
+
+  async recyclePage(ref?: string): Promise<boolean> {
+    if (this.closed) return false
+    let targetRef = ref
+    let targetPage = targetRef !== undefined ? this.pages.get(targetRef) : undefined
+    if (targetPage === undefined && targetRef === undefined) {
+      if (this.lastRef !== undefined) {
+        targetRef = this.lastRef
+        targetPage = this.pages.get(this.lastRef)
+      }
+      if (targetPage === undefined) {
+        const fallbackRef = this.findFallbackBusinessRef()
+        if (fallbackRef !== undefined) {
+          targetRef = fallbackRef
+          targetPage = this.pages.get(fallbackRef)
+        }
+      }
+    }
+    if (targetRef === undefined || targetPage === undefined) {
+      return false
+    }
+
+    // Evict immediately so the next command never reuses a frozen tab or stalled chain.
+    this.removePageMapping(targetRef, targetPage)
+
+    if (typeof targetPage.isClosed === 'function' && targetPage.isClosed()) {
+      return true
+    }
+
+    try {
+      const openPages = this.context.pages().filter(p => !p.isClosed())
+      const otherOpen = openPages.filter(p => p !== targetPage)
+      if (otherOpen.length === 0 && typeof this.context.newPage === 'function') {
+        const blank = await settleWithTimeout(
+          this.createInternalPage().then(p => p as Page | undefined),
+          RECYCLE_PAGE_IO_TIMEOUT_MS,
+          undefined,
+        )
+        if (blank !== undefined) {
+          this.keeperPage = blank
+          blank.on('close', () => {
+            if (this.keeperPage === blank) this.keeperPage = undefined
+          })
+        }
+      }
+    } catch {
+      // Best-effort keeper creation; proceed to close hung page safely.
+    }
+
+    if (typeof targetPage.close === 'function') {
+      await settleWithTimeout(
+        targetPage.close().then(() => true),
+        RECYCLE_PAGE_IO_TIMEOUT_MS,
+        false,
+      )
+    }
+    return true
+  }
+
+  private async executeWithDeadline(command: BrowserCommand, signal?: AbortSignal): Promise<BrowserResult> {
+    const deadlineMs = command.deadlineMs
+    if (deadlineMs === undefined || !Number.isFinite(deadlineMs) || deadlineMs <= 0) {
+      return await this.execute(command, signal)
+    }
+
+    const startedAt = Date.now()
+    const controller = new AbortController()
+    const onExternalAbort = () => {
+      controller.abort()
+    }
+    if (signal?.aborted) {
+      controller.abort()
+    } else if (signal) {
+      signal.addEventListener('abort', onExternalAbort, { once: true })
+    }
+
+    const execPromise = this.execute(command, controller.signal)
+    // Prevent unhandled rejection if deadline wins and late Playwright errors reject after page.close().
+    execPromise.catch(() => undefined)
+
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeoutMarker = Symbol('deadline_exceeded')
+    try {
+      const raced = await Promise.race([
+        execPromise,
+        new Promise<typeof timeoutMarker>((resolve) => {
+          timer = setTimeout(() => resolve(timeoutMarker), deadlineMs)
+        }),
+      ])
+      if (raced !== timeoutMarker) {
+        return raced
+      }
+
+      controller.abort()
+      const pageRef = command.page ?? this.lastRef ?? 'p1'
+      const pageRecycled = await this.recyclePage(command.page)
+      const elapsedMs = Date.now() - startedAt
+
+      if (command.kind === 'comment_publish') {
+        const siteType = command.siteHint === 'wix_blog'
+          ? 'wix'
+          : command.siteHint === 'wordpress_comment'
+            ? 'wordpress'
+            : command.siteHint === 'typecho_comment'
+              ? 'typecho'
+              : 'other'
+        return {
+          kind: 'comment_publish',
+          page: pageRef,
+          outcome: 'timeout',
+          retryable: true,
+          reason: 'tool_deadline_exceeded',
+          siteType,
+          title: '',
+          finalUrl: command.url,
+          submitTriggered: false,
+          pageRecycled,
+          deadlineMs,
+          elapsedMs,
+          evidence: `comment_publish 超过硬截止 ${deadlineMs}ms，已自动回收卡死页签 (pageRecycled=${String(pageRecycled)})`,
+        }
+      }
+
+      throw new BrowserDeadlineError({
+        action: command.kind,
+        pageRef,
+        deadlineMs,
+        elapsedMs,
+        pageRecycled,
+      })
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+      if (signal) signal.removeEventListener('abort', onExternalAbort)
+    }
   }
 
   private async execute(command: BrowserCommand, signal?: AbortSignal): Promise<BrowserResult> {
@@ -751,6 +928,7 @@ export class PlaywrightSession implements BrowserSession {
           const { value: result, openedPages } = await this.withPopupCapture(() =>
             executeCommentPublish(page, ref, command, {
               defaultTimeoutMs: this.defaultTimeoutMs,
+              ...(command.deadlineMs === undefined ? {} : { deadlineMs: command.deadlineMs }),
               ...(signal === undefined ? {} : { signal }),
             }),
           )
@@ -764,6 +942,7 @@ export class PlaywrightSession implements BrowserSession {
             : await this.requirePage(command.page)
           return await executeDirectoryAutofill(page, ref, command, {
             defaultTimeoutMs: this.defaultTimeoutMs,
+            ...(command.deadlineMs === undefined ? {} : { deadlineMs: command.deadlineMs }),
             ...(signal === undefined ? {} : { signal }),
           })
         }

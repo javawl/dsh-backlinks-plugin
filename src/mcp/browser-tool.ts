@@ -13,7 +13,7 @@
 
 import type { CallToolResult, Tool } from '@modelcontextprotocol/sdk/types.js'
 import { DEFAULT_WIX_NAV_TIMEOUT_MS } from '../host/browser-playwright/comment-publish.ts'
-import { PlaywrightBrowserProvider } from '../host/browser-playwright/provider.ts'
+import { BrowserDeadlineError, PlaywrightBrowserProvider } from '../host/browser-playwright/provider.ts'
 import type {
   BrowserAutomationProvider,
   BrowserCommand,
@@ -26,6 +26,55 @@ import { BrowserError } from '../host/browser/types.ts'
 import { assertNever } from '../shared/backlinks-types.ts'
 import { redactSecrets, type McpConfig } from './config.ts'
 import type { SleepLike } from './backlinks-tool.ts'
+
+export const DEFAULT_COMMENT_PUBLISH_DEADLINE_MS = 55_000
+export const MAX_TOOL_DEADLINE_MS = 90_000
+export const DEFAULT_NAVIGATE_DEADLINE_MS = 35_000
+export const DEFAULT_SNAPSHOT_DEADLINE_MS = 25_000
+export const DEFAULT_BATCH_FILL_DEADLINE_MS = 45_000
+export const DEFAULT_DIRECTORY_AUTOFILL_DEADLINE_MS = 45_000
+export const DEFAULT_SINGLE_ACTION_DEADLINE_MS = 30_000
+
+export function resolveToolDeadlineMs(
+  action: BrowserAction,
+  explicitDeadlineMs?: number,
+  timeoutMs?: number,
+): number | undefined {
+  if (
+    action === 'wait_for_login'
+    || action === 'closeBrowser'
+    || action === 'listPages'
+    || action === 'closePage'
+    || action === 'bringToFront'
+  ) {
+    return undefined
+  }
+  if (explicitDeadlineMs !== undefined) {
+    return Math.min(Math.max(1, explicitDeadlineMs), MAX_TOOL_DEADLINE_MS)
+  }
+  switch (action) {
+    case 'comment_publish':
+      return timeoutMs !== undefined && timeoutMs > DEFAULT_COMMENT_PUBLISH_DEADLINE_MS
+        ? Math.min(timeoutMs, MAX_TOOL_DEADLINE_MS)
+        : DEFAULT_COMMENT_PUBLISH_DEADLINE_MS
+    case 'navigate':
+      return Math.min(Math.max((timeoutMs ?? 10_000) + 15_000, DEFAULT_NAVIGATE_DEADLINE_MS), MAX_TOOL_DEADLINE_MS)
+    case 'snapshot':
+      return timeoutMs !== undefined
+        ? Math.min(Math.max(timeoutMs, DEFAULT_SNAPSHOT_DEADLINE_MS), MAX_TOOL_DEADLINE_MS)
+        : DEFAULT_SNAPSHOT_DEADLINE_MS
+    case 'batch_fill':
+      return timeoutMs !== undefined
+        ? Math.min(timeoutMs, MAX_TOOL_DEADLINE_MS)
+        : DEFAULT_BATCH_FILL_DEADLINE_MS
+    case 'directory_autofill':
+      return timeoutMs !== undefined && timeoutMs > DEFAULT_DIRECTORY_AUTOFILL_DEADLINE_MS
+        ? Math.min(timeoutMs, MAX_TOOL_DEADLINE_MS)
+        : DEFAULT_DIRECTORY_AUTOFILL_DEADLINE_MS
+    default:
+      return Math.min(Math.max((timeoutMs ?? 10_000) + 15_000, DEFAULT_SINGLE_ACTION_DEADLINE_MS), MAX_TOOL_DEADLINE_MS)
+  }
+}
 
 export const BROWSER_ACTIONS = [
   'navigate',
@@ -62,7 +111,7 @@ export interface BatchFillField {
 export const BROWSER_TOOL_DEFINITION: Tool = {
   name: 'browser',
   description:
-    'Drive one shared persistent real-Chrome session across tabs: comment_publish (deterministic WordPress/Wix/Typecho/Blogger/Valine comment probe, commit-first nav with lightweight resource blocking, Wix autoGoogleSso, fill, submit & reload verification), directory_autofill (MkDirs / AI-Autofill URL fetch + visible-only backfill fast-path), navigate (domcontentloaded priority, compact summary), snapshot (compact by default at 4500 chars with >15-option select collapsing; full=true to expand), click/fill/select/press/upload/screenshot/waitFor, batch_fill (visible-only matching + post-submit dialog/XHR/toast submitFeedback), wait_for_login, listPages (active tabs & OAuth popups), bringToFront, closePage, and closeBrowser.',
+    'Drive one shared persistent real-Chrome session across tabs with hard tool-level deadline circuit breaking and hung-tab recycling: comment_publish (deterministic WordPress/WooCommerce/Wix/Typecho/Blogger/Valine/OpenCart comment probe, commit-first nav with lightweight resource blocking, WP star rating + WooCommerce review tab auto-expand, Wix autoGoogleSso & RCE toolbar link fallback, fill, submit & reload verification; 55s default hard deadline, max 90s), directory_autofill (MkDirs / AI-Autofill URL fetch + visible-only backfill fast-path), navigate (domcontentloaded priority, compact summary), snapshot (compact by default at 4500 chars with >15-option select collapsing; full=true to expand), click/fill/select/press/upload/screenshot/waitFor, batch_fill (visible-only matching + post-submit dialog/XHR/toast submitFeedback), wait_for_login, listPages (active tabs & OAuth popups), bringToFront, closePage, and closeBrowser.',
   inputSchema: {
     type: 'object',
     additionalProperties: false,
@@ -117,6 +166,10 @@ export const BROWSER_TOOL_DEFINITION: Tool = {
       timeoutMs: {
         type: 'integer',
         description: 'Timeout in ms for navigate (default 10000, or 20000 with commit wait when siteHint=wix_blog; overridable per call, recommend 8000-10000), comment_publish (commit-first nav: 15000ms non-Wix / 20000ms Wix by default; respects higher caller timeoutMs), directory_autofill (default 10000), waitFor (default 10000), or wait_for_login (default 300000).',
+      },
+      deadlineMs: {
+        type: 'integer',
+        description: 'Hard overall call deadline in ms before circuit-breaking and recycling a hung tab (comment_publish default 55000, navigate 35000, snapshot 25000, batch_fill/directory_autofill 45000; hard cap 90000). Returns structured { outcome: "timeout", retryable: true, reason: "tool_deadline_exceeded" }.',
       },
       siteHint: {
         type: 'string',
@@ -266,6 +319,9 @@ export class BrowserSessionManager {
       return await session.act(command, signal)
     } catch (error) {
       if (error instanceof BrowserError) {
+        if (error.code === 'BROWSER_TIMEOUT') {
+          throw error
+        }
         const isPreDispatchClosed = error.message === 'browser session is closed'
         if (isPreDispatchClosed) {
           await this.discardSession(session)
@@ -292,6 +348,33 @@ export class BrowserSessionManager {
   async closeSession(): Promise<void> {
     await this.opening?.catch(() => undefined)
     await this.discardSession()
+  }
+
+  async recyclePage(page?: string): Promise<boolean> {
+    const session = this.session
+    if (!session || session.isClosed?.() === true) {
+      return false
+    }
+    if (typeof session.recyclePage === 'function') {
+      return await session.recyclePage(page).catch(() => false)
+    }
+    try {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      try {
+        return await Promise.race([
+          session.act(page === undefined ? { kind: 'closePage' } : { kind: 'closePage', page })
+            .then(() => true)
+            .catch(() => false),
+          new Promise<boolean>((resolve) => {
+            timer = setTimeout(() => resolve(false), 3_000)
+          }),
+        ])
+      } finally {
+        if (timer !== undefined) clearTimeout(timer)
+      }
+    } catch {
+      return false
+    }
   }
 
   private async ensureSession(signal?: AbortSignal): Promise<BrowserSession> {
@@ -584,6 +667,10 @@ export function formatMcpBrowserOutput(result: BrowserResult, maxChars: number):
         ...(result.templateSignature === undefined ? {} : { templateSignature: result.templateSignature }),
         ...(result.suggestedTags === undefined ? {} : { suggestedTags: result.suggestedTags }),
         submitTriggered: result.submitTriggered,
+        ...(result.retryable === undefined ? {} : { retryable: result.retryable }),
+        ...(result.pageRecycled === undefined ? {} : { pageRecycled: result.pageRecycled }),
+        ...(result.deadlineMs === undefined ? {} : { deadlineMs: result.deadlineMs }),
+        ...(result.elapsedMs === undefined ? {} : { elapsedMs: result.elapsedMs }),
         ...(result.probeOnly === undefined ? {} : { probeOnly: result.probeOnly }),
         ...(result.loginInfo === undefined ? {} : { loginInfo: result.loginInfo }),
         ...(result.httpStatus === undefined ? {} : { httpStatus: result.httpStatus }),
@@ -642,9 +729,128 @@ export function createBrowserToolHandler(deps: BrowserToolDependencies) {
         throw new Error(`browser action must be one of ${BROWSER_ACTIONS.join(', ')}.`)
       }
       const page = readNonEmpty(args.page, 'page')
+      const explicitDeadlineMs = readPositiveInt(args.deadlineMs, 'deadlineMs')
+      const rawTimeoutMs = readPositiveInt(args.timeoutMs, 'timeoutMs')
+      const toolDeadlineMs = resolveToolDeadlineMs(action, explicitDeadlineMs, rawTimeoutMs)
       const addressed = <T extends BrowserCommand>(command: T): T => (
         page === undefined ? command : { ...command, page }
       )
+
+      const buildToolTimeoutResult = (params: {
+        readonly pageRef: string
+        readonly deadlineMs: number
+        readonly elapsedMs: number
+        readonly pageRecycled: boolean
+        readonly finalUrl?: string
+        readonly siteHint?: string
+      }): McpBrowserToolResult => {
+        const siteType = params.siteHint === 'wix_blog'
+          ? 'wix'
+          : params.siteHint === 'wordpress_comment'
+            ? 'wordpress'
+            : params.siteHint === 'typecho_comment'
+              ? 'typecho'
+              : 'other'
+        const payload = {
+          page: params.pageRef,
+          action,
+          outcome: 'timeout' as const,
+          retryable: true,
+          reason: 'tool_deadline_exceeded' as const,
+          deadlineMs: params.deadlineMs,
+          elapsedMs: params.elapsedMs,
+          pageRecycled: params.pageRecycled,
+          ...(action === 'comment_publish'
+            ? {
+                siteType,
+                submitTriggered: false,
+                ...(params.finalUrl === undefined ? {} : { finalUrl: params.finalUrl }),
+              }
+            : {}),
+          evidence: `browser ${action} 超过硬截止 ${params.deadlineMs}ms (tool_deadline_exceeded)，已自动回收卡死页签 (pageRecycled=${String(params.pageRecycled)})`,
+        }
+        return {
+          content: [{
+            type: 'text',
+            text: `[page ${params.pageRef}] ${action}: timeout (tool_deadline_exceeded after ${params.deadlineMs}ms)\n${JSON.stringify(payload)}`,
+          }],
+        }
+      }
+
+      const runWithToolDeadline = async (
+        run: (effectiveSignal: AbortSignal) => Promise<McpBrowserToolResult>,
+        meta?: { readonly finalUrl?: string; readonly siteHint?: string },
+      ): Promise<McpBrowserToolResult> => {
+        if (toolDeadlineMs === undefined) {
+          return await run(signal ?? new AbortController().signal)
+        }
+        const startedAt = Date.now()
+        const controller = new AbortController()
+        const onExternalAbort = () => {
+          controller.abort()
+        }
+        if (signal?.aborted) {
+          controller.abort()
+        } else if (signal) {
+          signal.addEventListener('abort', onExternalAbort, { once: true })
+        }
+
+        // Allow inner PlaywrightSession deadline (toolDeadlineMs) to settle & recycle first when supported,
+        // while guaranteeing an outer hard fuse for non-cooperative mocks or stalled IPC.
+        const outerGuardMs = toolDeadlineMs + 25
+        let timer: ReturnType<typeof setTimeout> | undefined
+        const timeoutMarker = Symbol('tool_deadline_exceeded')
+        const workPromise = run(controller.signal)
+        workPromise.catch(() => undefined)
+
+        try {
+          const raced = await Promise.race([
+            workPromise,
+            new Promise<typeof timeoutMarker>((resolve) => {
+              timer = setTimeout(() => resolve(timeoutMarker), outerGuardMs)
+            }),
+          ])
+          if (raced !== timeoutMarker) {
+            return raced
+          }
+          controller.abort()
+          const pageRecycled = await sessionManager.recyclePage(page)
+          return buildToolTimeoutResult({
+            pageRef: page ?? 'p1',
+            deadlineMs: toolDeadlineMs,
+            elapsedMs: Date.now() - startedAt,
+            pageRecycled,
+            ...(meta?.finalUrl === undefined ? {} : { finalUrl: meta.finalUrl }),
+            ...(meta?.siteHint === undefined ? {} : { siteHint: meta.siteHint }),
+          })
+        } catch (error) {
+          if (error instanceof BrowserDeadlineError) {
+            return buildToolTimeoutResult({
+              pageRef: error.pageRef,
+              deadlineMs: error.deadlineMs,
+              elapsedMs: error.elapsedMs,
+              pageRecycled: error.pageRecycled,
+              ...(meta?.finalUrl === undefined ? {} : { finalUrl: meta.finalUrl }),
+              ...(meta?.siteHint === undefined ? {} : { siteHint: meta.siteHint }),
+            })
+          }
+          if (error instanceof BrowserError && error.code === 'BROWSER_TIMEOUT') {
+            const pageRecycled = await sessionManager.recyclePage(page)
+            return buildToolTimeoutResult({
+              pageRef: page ?? 'p1',
+              deadlineMs: toolDeadlineMs,
+              elapsedMs: Date.now() - startedAt,
+              pageRecycled,
+              ...(meta?.finalUrl === undefined ? {} : { finalUrl: meta.finalUrl }),
+              ...(meta?.siteHint === undefined ? {} : { siteHint: meta.siteHint }),
+            })
+          }
+          throw error
+        } finally {
+          if (timer !== undefined) clearTimeout(timer)
+          if (signal) signal.removeEventListener('abort', onExternalAbort)
+        }
+      }
 
       if (action === 'closeBrowser') {
         await sessionManager.closeSession()
@@ -661,137 +867,147 @@ export function createBrowserToolHandler(deps: BrowserToolDependencies) {
         }
         const stopOnError = args.stopOnError === true
 
-        const results: Array<{
-          readonly index: number
-          readonly op: BatchFillOp
-          readonly target: string
-          readonly ok: boolean
-          readonly error?: string
-        }> = []
+        return await runWithToolDeadline(async (effectiveSignal) => {
+          const results: Array<{
+            readonly index: number
+            readonly op: BatchFillOp
+            readonly target: string
+            readonly ok: boolean
+            readonly error?: string
+          }> = []
 
-        let succeeded = 0
-        let failed = 0
+          let succeeded = 0
+          let failed = 0
 
-        for (let index = 0; index < fields.length; index++) {
-          const field = fields[index]!
-          const nthField = field.nth === undefined ? {} : { nth: field.nth }
-          let cmd: BrowserCommand
-          switch (field.op) {
-            case 'fill':
-              cmd = addressed({ kind: 'fill', selector: field.target, value: field.value ?? '', ...nthField })
-              break
-            case 'select':
-              cmd = addressed({ kind: 'select', selector: field.target, value: field.value ?? '', ...nthField })
-              break
-            case 'click':
-              cmd = addressed({ kind: 'click', selector: field.target, ...nthField })
-              break
-            case 'check':
-              cmd = addressed({ kind: 'check', selector: field.target, ...nthField })
-              break
-            default:
-              return assertNever(field.op, 'unhandled batch_fill op')
-          }
-
-          try {
-            await sessionManager.act(cmd, signal)
-            succeeded++
-            results.push({ index, op: field.op, target: field.target, ok: true })
-          } catch (error) {
-            if (signal?.aborted || (error instanceof BrowserError && error.code === 'BROWSER_ABORTED')) {
-              throw error
+          for (let index = 0; index < fields.length; index++) {
+            const field = fields[index]!
+            const nthField = field.nth === undefined ? {} : { nth: field.nth }
+            let cmd: BrowserCommand
+            switch (field.op) {
+              case 'fill':
+                cmd = addressed({ kind: 'fill', selector: field.target, value: field.value ?? '', ...nthField })
+                break
+              case 'select':
+                cmd = addressed({ kind: 'select', selector: field.target, value: field.value ?? '', ...nthField })
+                break
+              case 'click':
+                cmd = addressed({ kind: 'click', selector: field.target, ...nthField })
+                break
+              case 'check':
+                cmd = addressed({ kind: 'check', selector: field.target, ...nthField })
+                break
+              default:
+                return assertNever(field.op, 'unhandled batch_fill op')
             }
-            failed++
-            results.push({
-              index,
-              op: field.op,
-              target: field.target,
-              ok: false,
-              error: error instanceof Error ? error.message : String(error),
-            })
-            if (stopOnError) break
-          }
-        }
 
-        let submit:
-          | {
-              readonly target: string
-              readonly attempted: boolean
-              readonly ok: boolean
-              readonly error?: string
-              readonly skippedReason?: string
-            }
-          | undefined
-        let submitFeedback: unknown
-        let popupPageRef: string | undefined
-        let openedPages: unknown
-
-        if (submitTarget !== undefined) {
-          if (failed > 0) {
-            submit = {
-              target: submitTarget,
-              attempted: false,
-              ok: false,
-              skippedReason: 'skipped because one or more fields failed',
-            }
-          } else {
             try {
-              const submitRes = await sessionManager.act(
-                addressed({
-                  kind: 'click',
-                  selector: submitTarget,
-                  ...(submitNth === undefined ? {} : { nth: submitNth }),
-                  captureSubmitFeedback: true,
-                  ...(feedbackWaitMs === undefined ? {} : { feedbackWaitMs }),
-                }),
-                signal,
-              )
-              if (submitRes.kind === 'acked') {
-                if (submitRes.submitFeedback !== undefined) {
-                  submitFeedback = submitRes.submitFeedback
-                }
-                if (submitRes.popupPageRef !== undefined) {
-                  popupPageRef = submitRes.popupPageRef
-                  openedPages = submitRes.openedPages
-                }
-              }
-              submit = { target: submitTarget, attempted: true, ok: true }
+              await sessionManager.act(cmd, effectiveSignal)
+              succeeded++
+              results.push({ index, op: field.op, target: field.target, ok: true })
             } catch (error) {
-              if (signal?.aborted || (error instanceof BrowserError && error.code === 'BROWSER_ABORTED')) {
+              if (
+                effectiveSignal.aborted
+                || signal?.aborted
+                || (error instanceof BrowserError && (error.code === 'BROWSER_ABORTED' || error.code === 'BROWSER_TIMEOUT'))
+              ) {
                 throw error
               }
-              submit = {
-                target: submitTarget,
-                attempted: true,
+              failed++
+              results.push({
+                index,
+                op: field.op,
+                target: field.target,
                 ok: false,
                 error: error instanceof Error ? error.message : String(error),
+              })
+              if (stopOnError) break
+            }
+          }
+
+          let submit:
+            | {
+                readonly target: string
+                readonly attempted: boolean
+                readonly ok: boolean
+                readonly error?: string
+                readonly skippedReason?: string
+              }
+            | undefined
+          let submitFeedback: unknown
+          let popupPageRef: string | undefined
+          let openedPages: unknown
+
+          if (submitTarget !== undefined) {
+            if (failed > 0) {
+              submit = {
+                target: submitTarget,
+                attempted: false,
+                ok: false,
+                skippedReason: 'skipped because one or more fields failed',
+              }
+            } else {
+              try {
+                const submitRes = await sessionManager.act(
+                  addressed({
+                    kind: 'click',
+                    selector: submitTarget,
+                    ...(submitNth === undefined ? {} : { nth: submitNth }),
+                    captureSubmitFeedback: true,
+                    ...(feedbackWaitMs === undefined ? {} : { feedbackWaitMs }),
+                  }),
+                  effectiveSignal,
+                )
+                if (submitRes.kind === 'acked') {
+                  if (submitRes.submitFeedback !== undefined) {
+                    submitFeedback = submitRes.submitFeedback
+                  }
+                  if (submitRes.popupPageRef !== undefined) {
+                    popupPageRef = submitRes.popupPageRef
+                    openedPages = submitRes.openedPages
+                  }
+                }
+                submit = { target: submitTarget, attempted: true, ok: true }
+              } catch (error) {
+                if (
+                  effectiveSignal.aborted
+                  || signal?.aborted
+                  || (error instanceof BrowserError && (error.code === 'BROWSER_ABORTED' || error.code === 'BROWSER_TIMEOUT'))
+                ) {
+                  throw error
+                }
+                submit = {
+                  target: submitTarget,
+                  attempted: true,
+                  ok: false,
+                  error: error instanceof Error ? error.message : String(error),
+                }
               }
             }
           }
-        }
 
-        const payload = {
-          total: fields.length,
-          attempted: results.length,
-          succeeded,
-          failed,
-          results,
-          ...(submit === undefined ? {} : { submit }),
-          ...(submitFeedback === undefined ? {} : { submitFeedback }),
-          ...(popupPageRef === undefined ? {} : { popupPageRef, openedPages }),
-        }
-        const submitSummary = submit === undefined
-          ? ''
-          : submit.ok
-            ? '; submit ok'
-            : submit.attempted
-              ? '; submit FAILED'
-              : '; submit skipped'
-        const summary = `batch_fill: ${succeeded}/${fields.length} succeeded, ${failed} failed${submitSummary}`
+          const payload = {
+            total: fields.length,
+            attempted: results.length,
+            succeeded,
+            failed,
+            results,
+            ...(submit === undefined ? {} : { submit }),
+            ...(submitFeedback === undefined ? {} : { submitFeedback }),
+            ...(popupPageRef === undefined ? {} : { popupPageRef, openedPages }),
+          }
+          const submitSummary = submit === undefined
+            ? ''
+            : submit.ok
+              ? '; submit ok'
+              : submit.attempted
+                ? '; submit FAILED'
+                : '; submit skipped'
+          const summary = `batch_fill: ${succeeded}/${fields.length} succeeded, ${failed} failed${submitSummary}`
 
-        return {
-          content: [{ type: 'text', text: `${summary}\n${JSON.stringify(payload)}` }],
-        }
+          return {
+            content: [{ type: 'text', text: `${summary}\n${JSON.stringify(payload)}` }],
+          }
+        })
       }
 
       if (action === 'wait_for_login') {
@@ -923,6 +1139,7 @@ export function createBrowserToolHandler(deps: BrowserToolDependencies) {
             ...(waitUntil === undefined ? {} : { waitUntil }),
             ...(siteHint === undefined ? {} : { siteHint }),
             ...(effectiveNavTimeoutMs === undefined ? {} : { timeoutMs: effectiveNavTimeoutMs }),
+            ...(toolDeadlineMs === undefined ? {} : { deadlineMs: toolDeadlineMs }),
             maxChars: effectiveMaxChars,
           })
           break
@@ -942,6 +1159,7 @@ export function createBrowserToolHandler(deps: BrowserToolDependencies) {
             kind: 'snapshot',
             ...(selector === undefined ? {} : { selector }),
             ...(format === undefined ? {} : { format }),
+            ...(toolDeadlineMs === undefined ? {} : { deadlineMs: toolDeadlineMs }),
             maxChars: effectiveMaxChars,
             compact: !full,
           })
@@ -982,6 +1200,7 @@ export function createBrowserToolHandler(deps: BrowserToolDependencies) {
             ...(anchorText === undefined ? {} : { anchorText }),
             ...(siteHint === undefined ? {} : { siteHint }),
             timeoutMs: effectiveCommentTimeoutMs,
+            ...(toolDeadlineMs === undefined ? {} : { deadlineMs: toolDeadlineMs }),
             ...(args.verifyReload === undefined ? {} : { verifyReload: args.verifyReload }),
             ...(args.probeOnly === undefined ? {} : { probeOnly: args.probeOnly }),
             ...(args.autoGoogleSso === undefined ? {} : { autoGoogleSso: args.autoGoogleSso }),
@@ -1056,6 +1275,7 @@ export function createBrowserToolHandler(deps: BrowserToolDependencies) {
             ...(email === undefined ? {} : { email }),
             ...(waitAfterFetchMs === undefined ? {} : { waitAfterFetchMs }),
             timeoutMs: timeoutMs ?? config.browserTimeoutMs,
+            ...(toolDeadlineMs === undefined ? {} : { deadlineMs: toolDeadlineMs }),
           })
           break
         }
@@ -1069,19 +1289,27 @@ export function createBrowserToolHandler(deps: BrowserToolDependencies) {
           return assertNever(action, `browser action must be one of ${BROWSER_ACTIONS.join(', ')}.`)
       }
 
-      const result = await sessionManager.act(command, signal)
-      if (result.kind === 'screenshot') {
-        return {
-          content: [
-            { type: 'text', text: formatMcpBrowserOutput(result, effectiveMaxChars) },
-            { type: 'image', data: result.pngBase64, mimeType: 'image/png' },
-          ],
-        }
-      }
+      return await runWithToolDeadline(
+        async (effectiveSignal) => {
+          const result = await sessionManager.act(command, effectiveSignal)
+          if (result.kind === 'screenshot') {
+            return {
+              content: [
+                { type: 'text', text: formatMcpBrowserOutput(result, effectiveMaxChars) },
+                { type: 'image', data: result.pngBase64, mimeType: 'image/png' },
+              ],
+            }
+          }
 
-      return {
-        content: [{ type: 'text', text: formatMcpBrowserOutput(result, effectiveMaxChars) }],
-      }
+          return {
+            content: [{ type: 'text', text: formatMcpBrowserOutput(result, effectiveMaxChars) }],
+          }
+        },
+        {
+          ...(command.kind === 'comment_publish' ? { finalUrl: command.url } : command.kind === 'navigate' ? { finalUrl: command.url } : {}),
+          ...(siteHint === undefined ? {} : { siteHint }),
+        },
+      )
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       return {

@@ -20,6 +20,7 @@ export declare const DEFAULT_LAZY_WAIT_MAX_MS = 2500;
 export declare const DEFAULT_WIX_LAZY_WAIT_MAX_MS = 20000;
 export declare const DEFAULT_WIX_NAV_TIMEOUT_MS = 20000;
 export declare const DEFAULT_COMMENT_NAV_TIMEOUT_MS = 15000;
+export declare const DEFAULT_COMMENT_STEP_TIMEOUT_MS = 7000;
 export declare const DEFAULT_WIX_DOM_READY_WAIT_MS = 6000;
 export declare const DEFAULT_NON_WIX_DOM_READY_WAIT_MS = 7000;
 export declare const DEFAULT_LARGE_WP_FORM_WAIT_MAX_MS = 15000;
@@ -29,8 +30,15 @@ export declare const DEFAULT_WIX_POST_SUBMIT_WAIT_MS = 2500;
 export declare const DEFAULT_CONTEXT_DESTROYED_RETRY_MS = 2000;
 export declare const DEFAULT_WIX_SSO_POPUP_TIMEOUT_MS = 4000;
 export declare const DEFAULT_WIX_SSO_COMPLETE_WAIT_MS = 8000;
+/**
+ * Clamp a single Playwright interaction timeout (`fill`/`click`/`waitFor`) to an
+ * explicit short cap (default 7,000ms) and any remaining tool deadline, preventing
+ * Playwright's 30,000ms default from stacking across steps.
+ */
+export declare function resolveStepTimeoutMs(timeoutMs: number, deadlineAt?: number, capMs?: number): number;
 export interface WordPressInspection {
     readonly found: boolean;
+    readonly reviewsTabSelector?: string;
     readonly collapsedTriggerSelector?: string;
     readonly formSelector?: string;
     readonly commentSelector?: string;
@@ -50,7 +58,7 @@ export interface WordPressInspection {
 }
 export interface GenericCommentInspection {
     readonly found: boolean;
-    readonly kind?: 'typecho' | 'valine' | 'custom_blog';
+    readonly kind?: 'typecho' | 'valine' | 'opencart' | 'custom_blog';
     readonly formSelector?: string;
     readonly commentSelector?: string;
     readonly authorSelector?: string;
@@ -129,6 +137,8 @@ export interface CommentVerifyOutcome {
     readonly wpErrorMessage?: string;
     readonly hasWpDieDom?: boolean;
     readonly captchaDetected?: boolean;
+    readonly openCartSuccessNotice?: string;
+    readonly openCartErrorNotice?: string;
     readonly snippet?: string;
 }
 export interface WixPostSubmitInspection {
@@ -145,6 +155,8 @@ export declare const WIX_SIGNUP_RECAPTCHA_ALWAYS_PATTERN: RegExp;
 export declare function hasWixSignupRecaptchaAlways(raw: string): boolean;
 /** Strip unapproved/moderation query parameters before public reload verification (preserving `#comment-ID`). */
 export declare function stripWpModerationParams(rawUrl: string): string;
+/** Check whether a URL or redirect Location contains WordPress `unapproved=` or `moderation-hash=` query params. */
+export declare function hasWpModerationUrlParams(rawUrl: string | undefined): boolean;
 /** Extract positive numeric WordPress comment ID from a URL hash (`#comment-123`) or token (`comment-123`). */
 export declare function extractCommentNumericId(raw: string | undefined): number | undefined;
 /** Append a lightweight cache-busting query parameter while preserving any `#comment-ID` hash. */
@@ -157,12 +169,31 @@ export declare function appendCacheBustParam(rawUrl: string, nonce?: number): st
 export declare function shouldAbortCommentPublishRequest(url: string, resourceType: string): boolean;
 export declare const WIX_GOOGLE_SSO_TECHNICAL_ISSUE_PATTERN: RegExp;
 /**
- * Multilingual Google SSO button matcher (EN, KO, JA, ZH, ES, FR, DE, IT, PT, RU, TR, NL, PL, TH; case-insensitive).
+ * Multilingual Google SSO button matcher (EN, KO, JA, ZH, ES, FR, DE, IT, PT, RU, TR, NL, PL, TH, ID; case-insensitive).
  * Shared as a single source of truth between `INSPECT_WIX_SSO_DIALOG_SCRIPT` and unit tests.
  */
 export declare const WIX_GOOGLE_SSO_BUTTON_PATTERN: RegExp;
 /** Check whether a visible button label/attribute matches a multilingual Google SSO button. */
 export declare function matchesGoogleSsoButtonLabel(label: string): boolean;
+/**
+ * Multilingual Wix member login-entry trigger matcher (EN, ES, PT, FR, DE, IT, JA, RU, KO, ZH, FI, PL, NL, TR, ID, TH).
+ * Shared between `INSPECT_COMMENT_PAGE_SCRIPT`, `INSPECT_WIX_SSO_DIALOG_SCRIPT`, and unit tests.
+ */
+export declare const WIX_LOGIN_TRIGGER_BUTTON_PATTERN: RegExp;
+/** Check whether a visible Wix login-wall button label matches a multilingual login trigger. */
+export declare function matchesWixLoginTriggerLabel(label: string): boolean;
+/** Multilingual Wix RCE toolbar Link button matcher (matches camelCase/underscore hooks like `LinkButton`/`textInlineStyleButton_LINK` & localized aria-labels). */
+export declare const WIX_RCE_LINK_BUTTON_PATTERN: RegExp;
+export declare const WIX_RCE_UNLINK_BUTTON_PATTERN: RegExp;
+/** Check whether a toolbar button signature (`data-hook`/`aria-label`/`title`/`data-testid`) is a Wix RCE Insert-Link button. */
+export declare function matchesWixRceLinkButton(signature: string): boolean;
+/**
+ * Multilingual WordPress / blog / OpenCart moderation-pending notice matcher
+ * covering EN, FR, DE, CS, SK, ES, RU, PL, ID, PT, IT, TR, NL, JA, KO, VI, FA, TH, ZH.
+ */
+export declare const MULTILINGUAL_MODERATION_PATTERN: RegExp;
+/** Match any multilingual moderation-pending notice from visible text. */
+export declare function matchModerationNotice(text: string): string | undefined;
 /** Build plain/HTML comment body: plain text when `url` field exists, HTML `<a>` otherwise. */
 export declare function buildWpCommentContent(commentText: string, websiteUrl: string | undefined, anchorText: string | undefined, hasUrlField: boolean): string;
 /** Strip raw `<a>` markup before typing into a `contenteditable` rich editor. */
@@ -199,6 +230,7 @@ export declare function verifyCommentResultInDom(params: {
 }): CommentVerifyOutcome;
 export interface ExecuteCommentPublishOptions {
     readonly defaultTimeoutMs: number;
+    readonly deadlineMs?: number;
     readonly lazyWaitMaxMs?: number;
     readonly wixLazyWaitMaxMs?: number;
     readonly wixDomReadyWaitMs?: number;
@@ -275,4 +307,21 @@ export declare function navigateCommentPageWithCommit(page: Page, url: string, o
 /** Collect max existing numeric `#comment-<ID>` currently present in the DOM before WordPress comment submit. */
 export declare function collectMaxExistingCommentId(page: Page): Promise<number>;
 export declare function inspectChildFrames(page: Page): Promise<ChildFramesInspection>;
+/**
+ * Inspect visible Wix RCE toolbar Link button (including floating/portal toolbars
+ * that only mount after focusing the editor or selecting anchor text).
+ */
+export declare const FIND_WIX_RCE_TOOLBAR_LINK_SCRIPT: string;
+export interface StarRatingEnsureResult {
+    readonly detected: boolean;
+    readonly alreadySelected: boolean;
+    readonly selected: boolean;
+    readonly method?: 'star_link' | 'select' | 'radio' | 'custom_star';
+    readonly value?: string;
+}
+/**
+ * Inspect and automatically select a 5-star rating inside a WordPress / WooCommerce /
+ * OpenCart comment or review form when a star rating control exists and is currently unselected.
+ */
+export declare function ensureWordPressStarRating(page: Page, formSelector: string | undefined, stepTimeoutMs: number): Promise<StarRatingEnsureResult>;
 export declare function executeCommentPublish(page: Page, ref: string, command: BrowserCommentPublishCommand, options: ExecuteCommentPublishOptions): Promise<BrowserCommentPublishResult>;

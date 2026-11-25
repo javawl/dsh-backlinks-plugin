@@ -46,6 +46,7 @@ export declare const INSPECT_DIRECTORY_AUTOFILL_SCRIPT: string;
 export declare const INSPECT_AUTOFILL_CONFIRM_DIALOG_SCRIPT: string;
 export interface ExecuteDirectoryAutofillOptions {
     readonly defaultTimeoutMs: number;
+    readonly deadlineMs?: number;
     readonly waitAfterFetchMs?: number;
     readonly sleepImpl?: SleepLike;
     readonly signal?: AbortSignal;

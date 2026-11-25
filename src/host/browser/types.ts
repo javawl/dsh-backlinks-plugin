@@ -24,6 +24,7 @@ export type BrowserCommand =
 
 export interface BrowserPageAddress {
   readonly page?: string
+  readonly deadlineMs?: number
 }
 
 export interface BrowserNavigateCommand extends BrowserPageAddress {
@@ -108,7 +109,7 @@ export interface BrowserProbeCommand extends BrowserPageAddress {
   readonly selector?: string
 }
 
-export type CommentPublishSiteType = 'wordpress' | 'wix' | 'typecho' | 'blogger' | 'valine' | 'other'
+export type CommentPublishSiteType = 'wordpress' | 'wix' | 'typecho' | 'blogger' | 'valine' | 'opencart' | 'other'
 
 export type CommentPublishOutcome =
   | 'live'
@@ -122,6 +123,7 @@ export type CommentPublishOutcome =
   | 'no_form'
   | 'needs_llm_fallback'
   | 'form_ready'
+  | 'timeout'
 
 export interface CommentPublishLoginInfo {
   readonly loginButtons: readonly string[]
@@ -298,6 +300,10 @@ export interface BrowserCommentPublishResult {
   readonly templateSignature?: string
   readonly suggestedTags?: readonly string[]
   readonly submitTriggered: boolean
+  readonly retryable?: boolean
+  readonly pageRecycled?: boolean
+  readonly deadlineMs?: number
+  readonly elapsedMs?: number
   readonly probeOnly?: boolean
   readonly loginInfo?: CommentPublishLoginInfo
   readonly httpStatus?: number
@@ -313,6 +319,7 @@ export interface BrowserSession {
   act(command: BrowserCommand, signal?: AbortSignal): Promise<BrowserResult>
   close(): Promise<void>
   isClosed?(): boolean
+  recyclePage?(page?: string): Promise<boolean>
 }
 
 export interface BrowserAutomationProvider {
@@ -329,6 +336,7 @@ export type BrowserErrorCode =
   | 'BROWSER_PROVIDER_AMBIGUOUS'
   | 'BROWSER_LAUNCH_FAILED'
   | 'BROWSER_ABORTED'
+  | 'BROWSER_TIMEOUT'
   | 'BROWSER_ACTION_FAILED'
 
 export class BrowserError extends CodedError<BrowserErrorCode> {}

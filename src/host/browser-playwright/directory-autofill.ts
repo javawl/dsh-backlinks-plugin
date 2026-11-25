@@ -19,6 +19,7 @@ import { dismissBlockingOverlays } from './overlay.ts'
 
 export const DEFAULT_AUTOFILL_WAIT_MS = 4_000
 const AUTOFILL_POLL_INTERVAL_MS = 400
+const DEFAULT_DIRECTORY_STEP_TIMEOUT_MS = 7_000
 
 interface RawDirectoryField {
   readonly role: 'url' | 'name' | 'tagline' | 'description' | 'email'
@@ -482,6 +483,7 @@ export const INSPECT_AUTOFILL_CONFIRM_DIALOG_SCRIPT = String.raw`(() => {
 
 export interface ExecuteDirectoryAutofillOptions {
   readonly defaultTimeoutMs: number
+  readonly deadlineMs?: number
   readonly waitAfterFetchMs?: number
   readonly sleepImpl?: SleepLike
   readonly signal?: AbortSignal
@@ -562,6 +564,15 @@ export async function executeDirectoryAutofill(
   options: ExecuteDirectoryAutofillOptions,
 ): Promise<BrowserDirectoryAutofillResult> {
   const timeoutMs = command.timeoutMs ?? options.defaultTimeoutMs
+  const deadlineMs = command.deadlineMs ?? options.deadlineMs
+  const deadlineAt = deadlineMs !== undefined && deadlineMs > 0 ? Date.now() + deadlineMs : undefined
+  const stepTimeout = (): number => {
+    let budget = Math.min(timeoutMs, DEFAULT_DIRECTORY_STEP_TIMEOUT_MS)
+    if (deadlineAt !== undefined) {
+      budget = Math.min(budget, Math.max(1, deadlineAt - Date.now()))
+    }
+    return Math.max(1, Math.floor(budget))
+  }
   const waitAfterFetchMs = Math.min(
     command.waitAfterFetchMs ?? options.waitAfterFetchMs ?? DEFAULT_AUTOFILL_WAIT_MS,
     Math.max(timeoutMs, 10_000),
@@ -571,11 +582,14 @@ export async function executeDirectoryAutofill(
   throwIfAborted(options.signal)
 
   if (command.url !== undefined) {
-    await page.goto(command.url, { timeout: timeoutMs, waitUntil: 'domcontentloaded' })
+    const navTimeout = deadlineAt !== undefined
+      ? Math.max(1, Math.min(timeoutMs, deadlineAt - Date.now()))
+      : timeoutMs
+    await page.goto(command.url, { timeout: navTimeout, waitUntil: 'domcontentloaded' })
     throwIfAborted(options.signal)
   }
 
-  await dismissBlockingOverlays(page, timeoutMs)
+  await dismissBlockingOverlays(page, stepTimeout())
 
   let inspection = await page.evaluate<DirectoryPageInspection>(INSPECT_DIRECTORY_AUTOFILL_SCRIPT)
 
@@ -643,12 +657,12 @@ export async function executeDirectoryAutofill(
   const urlField = inspection.fields.find(f => f.role === 'url')
   if (urlField && command.websiteUrl.trim().length > 0) {
     const urlLocator = await resolveFirstVisibleDirectoryLocator(page, urlField.selector)
-    await urlLocator.fill(command.websiteUrl.trim(), { timeout: timeoutMs })
+    await urlLocator.fill(command.websiteUrl.trim(), { timeout: stepTimeout() })
     filledFields.push('url')
     // Re-inspect right after filling URL so buttons that unlock after URL entry (e.g. StartupTrusted Fetch / MkDirs AI Autofill) become discoverable.
     inspection = await page.evaluate<DirectoryPageInspection>(INSPECT_DIRECTORY_AUTOFILL_SCRIPT)
     if (!inspection.autofillButtonSelector && inspection.autofillButtonDisabled) {
-      await sleep(Math.min(250, timeoutMs), options.signal)
+      await sleep(Math.min(250, stepTimeout()), options.signal)
       inspection = await page.evaluate<DirectoryPageInspection>(INSPECT_DIRECTORY_AUTOFILL_SCRIPT)
     }
   }
@@ -660,11 +674,11 @@ export async function executeDirectoryAutofill(
     if (!dialog?.detected || !dialog.buttonSelector) return false
     if (dialog.urlInputSelector && (!dialog.urlInputValue || dialog.urlInputValue.length === 0) && command.websiteUrl.trim().length > 0) {
       const dialogUrlLocator = await resolveFirstVisibleDirectoryLocator(page, dialog.urlInputSelector)
-      await dialogUrlLocator.fill(command.websiteUrl.trim(), { timeout: timeoutMs }).catch(() => undefined)
+      await dialogUrlLocator.fill(command.websiteUrl.trim(), { timeout: stepTimeout() }).catch(() => undefined)
       if (!filledFields.includes('url')) filledFields.push('url')
     }
     const dialogBtnLocator = await resolveFirstVisibleDirectoryLocator(page, dialog.buttonSelector)
-    await dialogBtnLocator.click({ timeout: timeoutMs })
+    await dialogBtnLocator.click({ timeout: stepTimeout() })
     autofillConfirmClicked = true
     autofillConfirmLabel = dialog.buttonLabel || 'Confirm'
     return true
@@ -678,9 +692,9 @@ export async function executeDirectoryAutofill(
         .map(f => [f.role, f.value]),
     )
 
-    await dismissBlockingOverlays(page, timeoutMs)
+    await dismissBlockingOverlays(page, stepTimeout())
     const autofillBtnLocator = await resolveFirstVisibleDirectoryLocator(page, inspection.autofillButtonSelector)
-    await autofillBtnLocator.click({ timeout: timeoutMs })
+    await autofillBtnLocator.click({ timeout: stepTimeout() })
     autofillTriggered = true
 
     // Immediately handle synchronous secondary confirmation modal (e.g. MkDirs `AI Autofill` -> `Analyze`).
@@ -738,7 +752,7 @@ export async function executeDirectoryAutofill(
     const field = inspection.fields.find(f => f.role === role)
     if (field && field.value.length === 0) {
       const fieldLocator = await resolveFirstVisibleDirectoryLocator(page, field.selector)
-      await fieldLocator.fill(value, { timeout: timeoutMs })
+      await fieldLocator.fill(value, { timeout: stepTimeout() })
       filledFields.push(role)
     }
   }

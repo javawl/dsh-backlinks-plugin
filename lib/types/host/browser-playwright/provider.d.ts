@@ -9,6 +9,20 @@ export declare const DEFAULT_SNAPSHOT_MAX_CHARS = 60000;
 export declare const STRICT_MODE_INSPECT_TIMEOUT_MS = 1500;
 export declare const STRICT_MODE_MAX_CANDIDATES = 5;
 export declare const DEFAULT_SUBMIT_FEEDBACK_WAIT_MS = 2000;
+export declare class BrowserDeadlineError extends BrowserError {
+    readonly action: string;
+    readonly pageRef: string;
+    readonly deadlineMs: number;
+    readonly elapsedMs: number;
+    readonly pageRecycled: boolean;
+    constructor(params: {
+        readonly action: string;
+        readonly pageRef: string;
+        readonly deadlineMs: number;
+        readonly elapsedMs: number;
+        readonly pageRecycled: boolean;
+    });
+}
 export interface StrictModeCandidate {
     readonly index: number;
     readonly tag: string;
@@ -62,6 +76,8 @@ export declare class PlaywrightSession implements BrowserSession {
     isClosed(): boolean;
     act(command: BrowserCommand, signal?: AbortSignal): Promise<BrowserResult>;
     private chained;
+    recyclePage(ref?: string): Promise<boolean>;
+    private executeWithDeadline;
     private execute;
     private runLocatorAction;
     close(): Promise<void>;

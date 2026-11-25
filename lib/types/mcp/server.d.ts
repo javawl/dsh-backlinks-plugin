@@ -10,7 +10,7 @@ import { type FetchLike, type SleepLike } from './backlinks-tool.ts';
 import { BrowserSessionManager } from './browser-tool.ts';
 import { type McpConfig } from './config.ts';
 export declare const MCP_SERVER_NAME = "backlinks-publisher";
-export declare const MCP_SERVER_VERSION = "1.0.0";
+export declare const MCP_SERVER_VERSION = "2.3.2";
 export interface BacklinksMcpServerOptions {
     readonly config?: McpConfig;
     readonly sessionManager?: BrowserSessionManager;

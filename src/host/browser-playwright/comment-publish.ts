@@ -30,6 +30,7 @@ export const DEFAULT_LAZY_WAIT_MAX_MS = 2_500
 export const DEFAULT_WIX_LAZY_WAIT_MAX_MS = 20_000
 export const DEFAULT_WIX_NAV_TIMEOUT_MS = 20_000
 export const DEFAULT_COMMENT_NAV_TIMEOUT_MS = 15_000
+export const DEFAULT_COMMENT_STEP_TIMEOUT_MS = 7_000
 export const DEFAULT_WIX_DOM_READY_WAIT_MS = 6_000
 export const DEFAULT_NON_WIX_DOM_READY_WAIT_MS = 7_000
 export const DEFAULT_LARGE_WP_FORM_WAIT_MAX_MS = 15_000
@@ -46,8 +47,28 @@ const POST_SUBMIT_POLL_INTERVAL_MS = 500
 const FRAME_INSPECT_TIMEOUT_MS = 1_000
 const BOTTOM_SNAPSHOT_MAX_CHARS = 1_200
 
+/**
+ * Clamp a single Playwright interaction timeout (`fill`/`click`/`waitFor`) to an
+ * explicit short cap (default 7,000ms) and any remaining tool deadline, preventing
+ * Playwright's 30,000ms default from stacking across steps.
+ */
+export function resolveStepTimeoutMs(
+  timeoutMs: number,
+  deadlineAt?: number,
+  capMs = DEFAULT_COMMENT_STEP_TIMEOUT_MS,
+): number {
+  let budget = Math.min(Math.max(1, timeoutMs), capMs)
+  if (deadlineAt !== undefined) {
+    const remaining = deadlineAt - Date.now()
+    if (remaining <= 0) return 1
+    budget = Math.min(budget, remaining)
+  }
+  return Math.max(1, Math.floor(budget))
+}
+
 export interface WordPressInspection {
   readonly found: boolean
+  readonly reviewsTabSelector?: string
   readonly collapsedTriggerSelector?: string
   readonly formSelector?: string
   readonly commentSelector?: string
@@ -68,7 +89,7 @@ export interface WordPressInspection {
 
 export interface GenericCommentInspection {
   readonly found: boolean
-  readonly kind?: 'typecho' | 'valine' | 'custom_blog'
+  readonly kind?: 'typecho' | 'valine' | 'opencart' | 'custom_blog'
   readonly formSelector?: string
   readonly commentSelector?: string
   readonly authorSelector?: string
@@ -151,6 +172,8 @@ export interface CommentVerifyOutcome {
   readonly wpErrorMessage?: string
   readonly hasWpDieDom?: boolean
   readonly captchaDetected?: boolean
+  readonly openCartSuccessNotice?: string
+  readonly openCartErrorNotice?: string
   readonly snippet?: string
 }
 
@@ -200,6 +223,12 @@ export function stripWpModerationParams(rawUrl: string): string {
   } catch {
     return rawUrl
   }
+}
+
+/** Check whether a URL or redirect Location contains WordPress `unapproved=` or `moderation-hash=` query params. */
+export function hasWpModerationUrlParams(rawUrl: string | undefined): boolean {
+  if (!rawUrl) return false
+  return /[?&](?:unapproved|moderation-hash)=/iu.test(rawUrl)
 }
 
 /** Extract positive numeric WordPress comment ID from a URL hash (`#comment-123`) or token (`comment-123`). */
@@ -257,7 +286,7 @@ export const WIX_GOOGLE_SSO_TECHNICAL_ISSUE_PATTERN =
   /looks\s+like\s+there\s+was\s+a\s+technical\s+issue|there\s+was\s+a\s+technical\s+issue|something\s+went\s+wrong[\s\S]{0,80}try\s+again\s+later/iu
 
 /**
- * Multilingual Google SSO button matcher (EN, KO, JA, ZH, ES, FR, DE, IT, PT, RU, TR, NL, PL, TH; case-insensitive).
+ * Multilingual Google SSO button matcher (EN, KO, JA, ZH, ES, FR, DE, IT, PT, RU, TR, NL, PL, TH, ID; case-insensitive).
  * Shared as a single source of truth between `INSPECT_WIX_SSO_DIALOG_SCRIPT` and unit tests.
  */
 export const WIX_GOOGLE_SSO_BUTTON_PATTERN = new RegExp(
@@ -268,17 +297,20 @@ export const WIX_GOOGLE_SSO_BUTTON_PATTERN = new RegExp(
     'google\\s*(?:회원\\s*)?가입',
     '구글(?:으?로|\\s*계정으로)?\\s*(?:로그인|계속(?:하기)?|(?:회원\\s*)?가입)',
     'google\\s*(?:アカウント)?で(?:ログイン|続行|登録|サインイン)',
+    'google\\s*ログイン',
     '(?:使用|通过|通過|用|继续使用|繼續使用)\\s*google\\s*(?:账号|帳號|账户|帳戶)?(?:登录|登入|注册|註冊)?',
     'google\\s*(?:账号|帳號)(?:登录|登入)',
-    '(?:continuar|iniciar\\s+sesi[oó]n|registrarse|acceder)\\s+con\\s+google',
-    '(?:continuer|se\\s+connecter|s[\'’]inscrire|connexion)\\s+avec\\s+google',
-    'mit\\s+google\\s+(?:anmelden|fortfahren|einloggen|registrieren)',
+    '(?:continuar|inicia(?:r)?\\s+sesi[oó]n|registrarse|reg[ií]strate|acceder|ingresar)\\s+con\\s+google',
+    '(?:continuer|se\\s+connecter|connectez-vous|identifiez-vous|s[\'’]inscrire|connexion)\\s+avec\\s+google',
+    '(?:mit|[üu]ber)\\s+google\\s+(?:anmelden|fortfahren|einloggen|registrieren)',
+    'weiter\\s+mit\\s+google',
     '(?:accedi|continua|registrati)\\s+con\\s+google',
-    '(?:continuar|entrar|fazer\\s+login|inscrever-se)\\s+com\\s+(?:o\\s+)?google',
-    '(?:войти|продолжить)\\s+(?:через|с(?:\\s+помощью)?)\\s+google',
-    'google\\s+ile\\s+(?:devam|giriş|oturum)',
+    '(?:continuar|entrar|fazer\\s+login|fa[çc]a\\s+login|iniciar\\s+sess[ãa]o|inscrever-se|cadastre-se)\\s+com\\s+(?:o\\s+)?google',
+    '(?:войти|вход|продолжить|зарегистрироваться)\\s+(?:через|с(?:\\s+помощью)?)\\s+google',
+    'google\\s+ile\\s+(?:devam|giri[şs]|oturum)',
     '(?:inloggen|doorgaan)\\s+met\\s+google',
     '(?:zaloguj\\s+si[eę]|kontynuuj)\\s+(?:przez|z)\\s+google',
+    '(?:masuk|lanjutkan|daftar)\\s+dengan\\s+google',
     '(?:เข้าสู่ระบบ|ดำเนินการต่อ)ด้วย\\s*google',
   ].join('|'),
   'i',
@@ -290,6 +322,122 @@ export function matchesGoogleSsoButtonLabel(label: string): boolean {
   if (clean.length === 0) return false
   return WIX_GOOGLE_SSO_BUTTON_PATTERN.test(clean)
     || /(?:google[-_]?sso|google[-_]?login|google[-_]?sign|socialAuth.*google)/iu.test(clean)
+}
+
+/**
+ * Multilingual Wix member login-entry trigger matcher (EN, ES, PT, FR, DE, IT, JA, RU, KO, ZH, FI, PL, NL, TR, ID, TH).
+ * Shared between `INSPECT_COMMENT_PAGE_SCRIPT`, `INSPECT_WIX_SSO_DIALOG_SCRIPT`, and unit tests.
+ */
+export const WIX_LOGIN_TRIGGER_BUTTON_PATTERN = new RegExp(
+  [
+    '\\b(?:log\\s*in|sign\\s*in|sign\\s*up)(?:\\s+to\\s+(?:comment|publish|reply|post))?\\b',
+    '\\binicia(?:r)?\\s+sesi[oó]n(?:\\s+para\\s+(?:comentar|publicar))?\\b',
+    '\\b(?:acceder|ingresar|reg[ií]strate|registrarse)\\b',
+    '\\b(?:entrar|fazer\\s+login|fa[çc]a\\s+login|iniciar\\s+sess[ãa]o|cadastre-se|registrar-se)\\b',
+    '\\b(?:se\\s+connecter|connectez-vous|connexion|s[\'’]inscrire|identifiez-vous)\\b',
+    '\\b(?:anmelden|einloggen|registrieren|jetzt\\s+anmelden)\\b',
+    '\\b(?:accedi|registrati)\\b',
+    '\\b(?:kirjaudu(?:\\s+sis[äa][äa]n)?|zaloguj(?:\\s+si[eę])?|inloggen|aanmelden|giri[şs]\\s+yap|oturum\\s+a[çc]|masuk)\\b',
+    'войти|вход|зарегистрироваться|авторизоваться',
+    'ログイン|サインイン|会員登録|新規登録',
+    'google\\s*(?:으?로\\s*)?로그인|구글\\s*로그인|로그인|회원\\s*가입',
+    'เข้าสู่ระบบ|ลงทะเบียน',
+    '登录|登入',
+  ].join('|'),
+  'i',
+)
+
+/** Check whether a visible Wix login-wall button label matches a multilingual login trigger. */
+export function matchesWixLoginTriggerLabel(label: string): boolean {
+  const clean = label.replace(/\s+/gu, ' ').trim()
+  if (clean.length === 0) return false
+  return WIX_LOGIN_TRIGGER_BUTTON_PATTERN.test(clean)
+}
+
+/** Multilingual Wix RCE toolbar Link button matcher (matches camelCase/underscore hooks like `LinkButton`/`textInlineStyleButton_LINK` & localized aria-labels). */
+export const WIX_RCE_LINK_BUTTON_PATTERN =
+  /(?:^|[^a-z])link(?:$|[^a-z])|link[-_]?btn|link[-_]?button|add[-_]?link|insert[-_]?link|inlineStyleButton_LINK|enlace|v[ií]nculo|hiperv[ií]nculo|\blien\b|verkn[üu]pfung|collegamento|odno[śs]nik|ba[ğg]lant[ıi]|링크|リンク|ссылк|插入链接|超链接|超連結|链接|連結/iu
+
+export const WIX_RCE_UNLINK_BUTTON_PATTERN =
+  /unlink|remove[-_ ]?link|delete[-_ ]?link|eliminar[-_ ]?enlace|quitar[-_ ]?enlace|supprimer[-_ ]?lien|링크\s*제거|取消链接|移除链接|삭제/iu
+
+/** Check whether a toolbar button signature (`data-hook`/`aria-label`/`title`/`data-testid`) is a Wix RCE Insert-Link button. */
+export function matchesWixRceLinkButton(signature: string): boolean {
+  const clean = signature.replace(/\s+/gu, ' ').trim()
+  if (clean.length === 0) return false
+  if (WIX_RCE_UNLINK_BUTTON_PATTERN.test(clean)) return false
+  return WIX_RCE_LINK_BUTTON_PATTERN.test(clean)
+}
+
+/**
+ * Multilingual WordPress / blog / OpenCart moderation-pending notice matcher
+ * covering EN, FR, DE, CS, SK, ES, RU, PL, ID, PT, IT, TR, NL, JA, KO, VI, FA, TH, ZH.
+ */
+export const MULTILINGUAL_MODERATION_PATTERN = new RegExp(
+  [
+    'your\\s+comment\\s+is\\s+awaiting\\s+moderation',
+    'awaiting\\s+(?:moderation|approval)',
+    'pending\\s+(?:approval|moderation|review)',
+    'held\\s+for\\s+moderation',
+    'submitted\\s+(?:for\\s+review|to\\s+the\\s+webmaster\\s+for\\s+approval)',
+    'waiting\\s+for\\s+(?:moderation|approval)',
+    'comment\\s+is\\s+under\\s+review',
+    'will\\s+be\\s+(?:published|visible|shown)\\s+(?:once|after)\\s+(?:it\\s+is\\s+)?approved',
+    'esperando\\s+(?:moderaci[oó]n|(?:a\\s+ser\\s+)?(?:moderado|aprobado))',
+    'pendiente\\s+de\\s+(?:moderaci[oó]n|aprobaci[oó]n)',
+    '(?:en|a\\s+la)\\s+espera\\s+de\\s+(?:moderaci[oó]n|aprobaci[oó]n)',
+    'en\\s+attente\\s+de\\s+(?:mod[ée]ration|validation|approbation)',
+    'attente\\s+de\\s+mod[ée]ration',
+    'votre\\s+commentaire\\s+est\\s+en\\s+attente',
+    'wartet\\s+auf\\s+(?:eine\\s+)?(?:freischaltung|freigabe|moderation|genehmigung|[üu]berpr[üu]fung)',
+    'muss\\s+(?:noch\\s+)?(?:freigeschaltet|moderiert|gepr[üu]ft)(?:\\s+werden)?',
+    'zur\\s+moderation\\s+zur[üu]ckgehalten',
+    '(?:v[áa][šs]\\s+koment[áa][řr]\\s+)?[čc]ek[áa]\\s+na\\s+(?:schv[áa]len[íi]|moderov[áa]n[íi]|moderaci)',
+    '[čc]ak[áa]\\s+na\\s+schv[áa]lenie',
+    'in\\s+attesa\\s+di\\s+(?:moderazione|approvazione)',
+    'aguardando\\s+(?:por\\s+)?(?:modera[çc][ãa]o|aprova[çc][ãa]o)',
+    'a\\s+aguardar\\s+modera[çc][ãa]o',
+    'aguarda\\s+modera[çc][ãa]o',
+    'esperando\\s+modera[çc][ãa]o',
+    'pendente\\s+de\\s+(?:modera[çc][ãa]o|aprova[çc][ãa]o)',
+    '(?:tw[óo]j\\s+komentarz\\s+)?oczekuje\\s+na\\s+(?:moderacj[ęe]|zatwierdzenie|akceptacj[ęe])',
+    '(?:komentar\\s+anda\\s+)?(?:sedang\\s+)?menunggu\\s+(?:moderasi|persetujuan)',
+    'wacht\\s+op\\s+(?:moderatie|goedkeuring)',
+    '(?:yorumunuz\\s+)?onay\\s+bekliyor',
+    'moderasyon\\s+bekliyor',
+    'ожидает\\s+(?:проверки|модерации|одобрения|подтверждения)',
+    'на\\s+(?:модерации|проверке)',
+    'находится\\s+на\\s+модерации',
+    '承認待ち',
+    '審査中',
+    '승인\\s*대기',
+    '검토\\s*중',
+    '[đd]ang\\s+ch[ờo]\\s+(?:duy[ệe]t|ki[ểe]m\\s+duy[ệe]t)',
+    'دیدگاه\\s+شما\\s+در\\s+انتظار\\s+(?:بررسی|تایید|تأیید)',
+    'در\\s+انتظار\\s+(?:بررسی|تایید|تأیید)',
+    'در\\s+صف\\s+بررسی',
+    'پس\\s+از\\s+(?:تایید|تأیید)\\s+نمایش',
+    'รอการอนุมัติ',
+    'รอการตรวจสอบ',
+    'รอตรวจสอบ',
+    'กำลังรอการอนุมัติ',
+    'อยู่ระหว่างการตรวจสอบ',
+    'ได้รับการอนุมัติ',
+    '等待审核',
+    '待审核',
+    '审核通过后显示',
+    '正在等待审核',
+    '审核后显示',
+  ].join('|'),
+  'iu',
+)
+
+/** Match any multilingual moderation-pending notice from visible text. */
+export function matchModerationNotice(text: string): string | undefined {
+  const clean = text.replace(/\s+/gu, ' ').trim()
+  if (clean.length === 0) return undefined
+  const match = MULTILINGUAL_MODERATION_PATTERN.exec(clean)
+  return match?.[0]
 }
 
 /** Build plain/HTML comment body: plain text when `url` field exists, HTML `<a>` otherwise. */
@@ -689,8 +837,29 @@ export const INSPECT_COMMENT_PAGE_SCRIPT = String.raw`(() => {
     }
   }
 
+  // If #commentform is hidden inside a WooCommerce Reviews tab (e.g. /product/* #tab-title-reviews a),
+  // locate the visible Reviews tab trigger so we can expand it before WordPress form detection.
+  if (!wordpress.found && (wpAnyTextarea || wpFormCandidate || document.querySelector('#tab-reviews, #reviews, .woocommerce-tabs, .reviews_tab, #tab-title-reviews'))) {
+    const reviewsTabTextRegex = /\b(?:reviews?|ratings?|opiniones|rese[ñn]as|avis|bewertungen|avalia[çc][õo]es|recensioni|отзывы|ulasan)\b|评价|评论|レビュー|리뷰/i;
+    const reviewsTabEl =
+      Array.from(document.querySelectorAll('#tab-title-reviews a, #tab-title-reviews button, #tab-title-reviews, .reviews_tab a, .reviews_tab button, li.reviews_tab > a, a[href="#tab-reviews"], a[href="#reviews"], [aria-controls="tab-reviews"], [data-target="#tab-reviews"], [data-bs-target="#tab-reviews"]'))
+        .find(el => isVisible(el) && !el.closest('header, nav, [role="navigation"]'))
+      || Array.from(document.querySelectorAll('.woocommerce-tabs [role="tab"], .woocommerce-tabs a, .wc-tabs a, [role="tablist"] [role="tab"], [role="tablist"] a'))
+        .find(el => {
+          if (!isVisible(el) || el.closest('header, nav, [role="navigation"]')) return false;
+          const t = clean(el.innerText || el.textContent || el.getAttribute('aria-label') || el.getAttribute('href'));
+          return reviewsTabTextRegex.test(t);
+        });
+    if (reviewsTabEl) {
+      const tabSel = selectorFor(reviewsTabEl) || safeFallbackSelectorFor(reviewsTabEl);
+      if (tabSel) {
+        wordpress = { found: false, reviewsTabSelector: tabSel };
+      }
+    }
+  }
+
   // If #comment exists in DOM but is hidden (collapsed theme such as SmartMag), find expand trigger.
-  if (!wordpress.found && (wpAnyTextarea || wpFormCandidate)) {
+  if (!wordpress.found && !wordpress.reviewsTabSelector && (wpAnyTextarea || wpFormCandidate)) {
     const collapsedTriggerRegex = /\b(?:add\s+a\s+comment|leave\s+a\s+comment|leave\s+a\s+reply|show\s+comments|view\s+comments|load\s+comments|write\s+a\s+comment|post\s+a\s+comment)\b|发表评论|展开评论|写评论|查看评论/i;
     const collapsedTrigger =
       Array.from(document.querySelectorAll('a.ts-button, .comments-show-btn, .show-comments, [data-target*="comment" i], [aria-controls*="comment" i]'))
@@ -779,6 +948,72 @@ export const INSPECT_COMMENT_PAGE_SCRIPT = String.raw`(() => {
             } : {}),
             ...(submitEl && isVisible(submitEl) ? {
               submitSelector: selectorFor(submitEl, form),
+            } : {}),
+            ...(captcha.detected ? { captcha } : {}),
+          };
+          break;
+        }
+      }
+    }
+
+    // 1b) OpenCart blog/product comment & review forms (#button-comment / #button-review / #form-review + name/text).
+    if (!genericComment.found) {
+      const ocSubmitCandidates = Array.from(document.querySelectorAll(
+        'button#button-comment, input#button-comment, a#button-comment, button#button-review, input#button-review, a#button-review'
+      )).filter(isVisible);
+      const ocScopes = [];
+      for (const btn of ocSubmitCandidates) {
+        const container = btn.closest('form, #form-review, #form-comment, #comment-form, #blog-comment, #tab-review, .comment-form, #comments, section, article, main') || btn.parentElement?.parentElement || document;
+        if (container && !ocScopes.includes(container)) ocScopes.push(container);
+      }
+      for (const formEl of Array.from(document.querySelectorAll('form#form-review, form#form-comment, form#comment-form, #form-review, #form-comment')).filter(isVisible)) {
+        if (!ocScopes.includes(formEl)) ocScopes.push(formEl);
+      }
+      for (const scope of ocScopes) {
+        const textEl = Array.from(scope.querySelectorAll(
+          'textarea[name="text"], textarea#input-review, textarea#input-comment, textarea[name="comment"]'
+        )).find(isVisible);
+        if (!textEl) continue;
+        const nameEl = Array.from(scope.querySelectorAll(
+          'input[name="name"], input#input-name, input[name="author"]'
+        )).find(isVisible);
+        const emailEl = Array.from(scope.querySelectorAll(
+          'input[name="email"], input#input-email, input[type="email"]'
+        )).find(isVisible);
+        const urlEl = Array.from(scope.querySelectorAll(
+          'input[name="website"], input[name="url"], input[type="url"]'
+        )).find(isVisible);
+        const submitEl = Array.from(scope.querySelectorAll(
+          'button#button-comment, input#button-comment, a#button-comment, button#button-review, input#button-review, a#button-review, button[type="submit"], input[type="submit"]'
+        )).find(isVisible);
+        const hasExplicitOcMarker = Boolean(
+          (submitEl && /^button-(?:comment|review)$/i.test(submitEl.id || ''))
+          || /^form-(?:review|comment)$|^comment-form$/i.test(scope.id || '')
+          || /route=.*(?:blog|comment|review|article)/i.test(clean(scope.getAttribute && scope.getAttribute('action')) + ' ' + location.href)
+        );
+        const looksLikeDirectory = /\b(?:submit\s+(?:tool|site|product|listing)|tool\s+name|site_title|site_url)\b/i.test(
+          clean(scope.outerHTML || '').slice(0, 1200)
+        );
+        if (hasExplicitOcMarker && !looksLikeDirectory && (nameEl || submitEl)) {
+          const captcha = scope !== document ? detectFormCaptcha(scope, 'opencart') : { detected: false };
+          genericComment = {
+            found: true,
+            kind: 'opencart',
+            ...(scope !== document ? { formSelector: selectorFor(scope) || (scope.id ? '#' + escapeCss(scope.id) : '') } : {}),
+            commentSelector: selectorFor(textEl, scope),
+            ...(nameEl ? {
+              authorSelector: selectorFor(nameEl, scope),
+              authorRequired: !!(nameEl.required || nameEl.getAttribute('aria-required') === 'true'),
+            } : {}),
+            ...(emailEl ? {
+              emailSelector: selectorFor(emailEl, scope),
+              emailRequired: !!(emailEl.required || emailEl.getAttribute('aria-required') === 'true'),
+            } : {}),
+            ...(urlEl ? {
+              urlSelector: selectorFor(urlEl, scope),
+            } : {}),
+            ...(submitEl ? {
+              submitSelector: selectorFor(submitEl, scope),
             } : {}),
             ...(captcha.detected ? { captcha } : {}),
           };
@@ -1001,8 +1236,8 @@ export const INSPECT_COMMENT_PAGE_SCRIPT = String.raw`(() => {
   }) : null;
 
   const wixHasCommentSection = isWix && (wixCommentRoots.length > 0 || !!wixEditorEl);
-  const wixLoginRegex = /\b(?:log\s*in|sign\s*in)\s+to\s+(?:comment|publish|reply|post)\b|\b(?:log\s*in|sign\s*in)\s+to\s+publish\s+as\s+a\s+member\b|\bsign\s*up\s+to\s+comment\b|faça\s+login\s+para\s+(?:comentar|publicar)|inicia(?:r)?\s+sesi[oó]n\s+para\s+(?:comentar|publicar)|connectez-vous\s+pour\s+(?:commenter|publier)|댓글.*로그인|로그인.*댓글|회원으로\s*로그인|登录.*(?:评论|发表)/i;
-  const wixShortLoginBtnRegex = /^\s*(?:log\s*in|sign\s*in|sign\s*up|faça\s+login|fazer\s+login|entrar|iniciar\s+sesi[oó]n|inicia\s+sesi[oó]n|se\s+connecter|connexion|anmelden|einloggen|accedi|войти|kirjaudu(?:\s+sisään)?|google\s*(?:으?로\s*)?로그인|구글\s*로그인|로그인|회원\s*가입|가입|ログイン|登录|登入)\b/i;
+  const wixLoginRegex = /\b(?:log\s*in|sign\s*in)\s+to\s+(?:comment|publish|reply|post)\b|\b(?:log\s*in|sign\s*in)\s+to\s+publish\s+as\s+a\s+member\b|\bsign\s*up\s+to\s+comment\b|fa[çc]a\s+login\s+para\s+(?:comentar|publicar)|fazer\s+login\s+para\s+(?:comentar|publicar)|entrar\s+para\s+(?:comentar|publicar)|inicia(?:r)?\s+sesi[oó]n\s+para\s+(?:comentar|publicar)|connectez-vous\s+pour\s+(?:commenter|publier)|se\s+connecter\s+pour\s+(?:commenter|publier)|anmelden.*komment|войти.*коммент|ログイン.*コメント|댓글.*로그인|로그인.*댓글|회원으로\s*로그인|登录.*(?:评论|发表)/i;
+  const wixShortLoginBtnRegex = new RegExp(${JSON.stringify(WIX_LOGIN_TRIGGER_BUTTON_PATTERN.source)}, 'i');
 
   const wixContainerText = wixCommentRoots.map(r => extractVisibleText(r)).join(' ');
   const pageVisibleCaptcha = !!document.querySelector(
@@ -1149,7 +1384,13 @@ export const INSPECT_COMMENT_PAGE_SCRIPT = String.raw`(() => {
       const nameEl = Array.from(boxScope.querySelectorAll('input[type="text"], input:not([type])')).find(el => isVisible(el) && /name|nick|author|昵称|姓名/i.test(clean((el.getAttribute('name') || '') + ' ' + (el.getAttribute('placeholder') || '') + ' ' + (el.getAttribute('aria-label') || ''))));
       const emailEl = Array.from(boxScope.querySelectorAll('input[type="email"], input[name*="email" i]')).find(isVisible);
       const websiteEl = Array.from(boxScope.querySelectorAll('input[type="url"], input[name*="website" i], input[name*="url" i], input[placeholder*="website" i]')).find(isVisible);
-      const findLinkBtn = (scope) => Array.from(scope.querySelectorAll('button, [role="button"]')).find(el => isVisible(el) && /\blink\b|插入链接|链接/i.test(clean((el.getAttribute('aria-label') || '') + ' ' + (el.getAttribute('title') || '') + ' ' + (el.getAttribute('data-hook') || '') + ' ' + (el.getAttribute('data-testid') || ''))));
+      const wixRceLinkRegex = new RegExp(${JSON.stringify(WIX_RCE_LINK_BUTTON_PATTERN.source)}, 'i');
+      const wixRceUnlinkRegex = new RegExp(${JSON.stringify(WIX_RCE_UNLINK_BUTTON_PATTERN.source)}, 'i');
+      const findLinkBtn = (scope) => Array.from(scope.querySelectorAll('button, [role="button"]')).find(el => {
+        if (!isVisible(el)) return false;
+        const sig = clean((el.getAttribute('aria-label') || '') + ' ' + (el.getAttribute('title') || '') + ' ' + (el.getAttribute('data-hook') || '') + ' ' + (el.getAttribute('data-testid') || ''));
+        return sig.length > 0 && !wixRceUnlinkRegex.test(sig) && wixRceLinkRegex.test(sig);
+      });
       const findSubmitBtn = (scope) => Array.from(scope.querySelectorAll('[data-hook="submit-comment-button"], [data-hook="publish-comment-button"], [data-hook*="publish" i], [data-hook="primary-btn"], button[type="submit"], button, [role="button"]')).find(el => {
         if (!isVisible(el)) return false;
         const hook = clean(el.getAttribute('data-hook'));
@@ -1737,30 +1978,43 @@ export function verifyCommentResultInDom(params: {
   const modPattern = new RegExp(
     [
       'your\\s+comment\\s+is\\s+awaiting\\s+moderation',
-      'awaiting\\s+moderation',
-      'pending\\s+approval',
-      'pending\\s+moderation',
-      'pending\\s+review',
+      'awaiting\\s+(?:moderation|approval)',
+      'pending\\s+(?:approval|moderation|review)',
       'held\\s+for\\s+moderation',
-      'submitted\\s+for\\s+review',
+      'submitted\\s+(?:for\\s+review|to\\s+the\\s+webmaster\\s+for\\s+approval)',
       'waiting\\s+for\\s+(?:moderation|approval)',
       'comment\\s+is\\s+under\\s+review',
-      'esperando\\s+moderaci[oó]n',
+      'will\\s+be\\s+(?:published|visible|shown)\\s+(?:once|after)\\s+(?:it\\s+is\\s+)?approved',
+      'esperando\\s+(?:moderaci[oó]n|(?:a\\s+ser\\s+)?(?:moderado|aprobado))',
       'pendiente\\s+de\\s+(?:moderaci[oó]n|aprobaci[oó]n)',
-      'esperando\\s+ser\\s+moderado',
+      '(?:en|a\\s+la)\\s+espera\\s+de\\s+(?:moderaci[oó]n|aprobaci[oó]n)',
       'en\\s+attente\\s+de\\s+(?:mod[ée]ration|validation|approbation)',
-      'wartet\\s+auf\\s+(?:freischaltung|moderation)',
-      'muss\\s+noch\\s+freigeschaltet(?:\\s+werden)?',
+      'attente\\s+de\\s+mod[ée]ration',
+      'votre\\s+commentaire\\s+est\\s+en\\s+attente',
+      'wartet\\s+auf\\s+(?:eine\\s+)?(?:freischaltung|freigabe|moderation|genehmigung|[üu]berpr[üu]fung)',
+      'muss\\s+(?:noch\\s+)?(?:freigeschaltet|moderiert|gepr[üu]ft)(?:\\s+werden)?',
+      'zur\\s+moderation\\s+zur[üu]ckgehalten',
+      '(?:v[áa][šs]\\s+koment[áa][řr]\\s+)?[čc]ek[áa]\\s+na\\s+(?:schv[áa]len[íi]|moderov[áa]n[íi]|moderaci)',
+      '[čc]ak[áa]\\s+na\\s+schv[áa]lenie',
       'in\\s+attesa\\s+di\\s+(?:moderazione|approvazione)',
-      'aguardando\\s+(?:modera[çc][ãa]o|aprova[çc][ãa]o)',
+      'aguardando\\s+(?:por\\s+)?(?:modera[çc][ãa]o|aprova[çc][ãa]o)',
+      'a\\s+aguardar\\s+modera[çc][ãa]o',
       'aguarda\\s+modera[çc][ãa]o',
+      'esperando\\s+modera[çc][ãa]o',
       'pendente\\s+de\\s+(?:modera[çc][ãa]o|aprova[çc][ãa]o)',
+      '(?:tw[óo]j\\s+komentarz\\s+)?oczekuje\\s+na\\s+(?:moderacj[ęe]|zatwierdzenie|akceptacj[ęe])',
+      '(?:komentar\\s+anda\\s+)?(?:sedang\\s+)?menunggu\\s+(?:moderasi|persetujuan)',
+      'wacht\\s+op\\s+(?:moderatie|goedkeuring)',
       '(?:yorumunuz\\s+)?onay\\s+bekliyor',
       'moderasyon\\s+bekliyor',
-      'ожидает\\s+(?:проверки|модерации)',
-      'на\\s+модерации',
+      'ожидает\\s+(?:проверки|модерации|одобрения|подтверждения)',
+      'на\\s+(?:модерации|проверке)',
+      'находится\\s+на\\s+модерации',
       '承認待ち',
       '審査中',
+      '승인\\s*대기',
+      '검토\\s*중',
+      '[đd]ang\\s+ch[ờo]\\s+(?:duy[ệe]t|ki[ểe]m\\s+duy[ệe]t)',
       'دیدگاه\\s+شما\\s+در\\s+انتظار\\s+(?:بررسی|تایید|تأیید)',
       'در\\s+انتظار\\s+(?:بررسی|تایید|تأیید)',
       'در\\s+صف\\s+بررسی',
@@ -1781,6 +2035,11 @@ export function verifyCommentResultInDom(params: {
   )
   const modMatch = modPattern.exec(modText || bodyText)
   const moderationNotice = modText || (modMatch ? modMatch[0] : undefined)
+
+  const ocSuccessEl = dom.document.querySelector('.alert-success, .alert.alert-success, #form-review .alert-success, #form-comment .alert-success')
+  const openCartSuccessNotice = clean(ocSuccessEl ? (ocSuccessEl.innerText || ocSuccessEl.textContent) : '') || undefined
+  const ocErrorEl = dom.document.querySelector('.alert-danger, .alert.alert-danger, #form-review .alert-danger, #form-comment .alert-danger')
+  const openCartErrorNotice = clean(ocErrorEl ? (ocErrorEl.innerText || ocErrorEl.textContent) : '') || undefined
 
   // Check if visible text contains literal escaped `<a href=...>` pointing to our URL.
   const escapedPattern = /<a\s+[^>]*href\s*=\s*["']?([^"'\s>]+)/giu
@@ -1893,12 +2152,15 @@ export function verifyCommentResultInDom(params: {
     ...(wpErrorMessage === undefined ? {} : { wpErrorMessage }),
     ...(errEl ? { hasWpDieDom: true } : {}),
     ...(captchaDetected ? { captchaDetected: true } : {}),
+    ...(openCartSuccessNotice === undefined ? {} : { openCartSuccessNotice }),
+    ...(openCartErrorNotice === undefined ? {} : { openCartErrorNotice }),
     ...(snippet === undefined ? {} : { snippet }),
   }
 }
 
 export interface ExecuteCommentPublishOptions {
   readonly defaultTimeoutMs: number
+  readonly deadlineMs?: number
   readonly lazyWaitMaxMs?: number
   readonly wixLazyWaitMaxMs?: number
   readonly wixDomReadyWaitMs?: number
@@ -2049,24 +2311,28 @@ export function detectPostSubmitWafBlock(input: PostSubmitWafDetectionInput): Po
 }
 
 /** Check whether a Playwright locator is disabled via `isDisabled()`, `aria-disabled="true"`, or `disabled`. */
-async function isLocatorDisabled(locator: ReturnType<Page['locator']>): Promise<boolean> {
+async function isLocatorDisabled(
+  locator: ReturnType<Page['locator']>,
+  timeoutMs = 3_000,
+): Promise<boolean> {
   const probe = locator as unknown as {
-    isDisabled?: () => Promise<boolean>
-    getAttribute?: (name: string) => Promise<string | null>
-    evaluate?: <R>(fn: (node: unknown) => R) => Promise<R>
+    isDisabled?: (opts?: { timeout?: number }) => Promise<boolean>
+    getAttribute?: (name: string, opts?: { timeout?: number }) => Promise<string | null>
+    evaluate?: <R>(fn: (node: unknown) => R, arg?: unknown, opts?: { timeout?: number }) => Promise<R>
   }
+  const shortTimeout = Math.max(1, Math.min(timeoutMs, 3_000))
   try {
     if (typeof probe.isDisabled === 'function') {
-      if (await probe.isDisabled()) return true
+      if (await probe.isDisabled({ timeout: shortTimeout })) return true
     }
   } catch {
     // fall through to attribute/evaluate checks
   }
   try {
     if (typeof probe.getAttribute === 'function') {
-      const ariaDisabled = await probe.getAttribute('aria-disabled')
+      const ariaDisabled = await probe.getAttribute('aria-disabled', { timeout: shortTimeout })
       if (ariaDisabled !== null && ariaDisabled.toLowerCase() === 'true') return true
-      const disabledAttr = await probe.getAttribute('disabled')
+      const disabledAttr = await probe.getAttribute('disabled', { timeout: shortTimeout })
       if (disabledAttr !== null) return true
     }
   } catch {
@@ -2082,7 +2348,7 @@ async function isLocatorDisabled(locator: ReturnType<Page['locator']>): Promise<
         if (aria && aria.toLowerCase() === 'true') return true
         const raw = el.getAttribute?.('disabled')
         return raw !== null && raw !== undefined
-      })
+      }, undefined, { timeout: shortTimeout })
       if (evalDisabled === true) return true
     }
   } catch {
@@ -3046,6 +3312,7 @@ export async function inspectChildFrames(page: Page): Promise<ChildFramesInspect
 function hasActionableCommentSurface(inspection: CommentPageInspection): boolean {
   return (
     inspection.wordpress.found
+    || Boolean(inspection.wordpress.reviewsTabSelector)
     || Boolean(inspection.wordpress.collapsedTriggerSelector)
     || Boolean(inspection.genericComment?.found)
     || inspection.commentsClosed.matched
@@ -3238,28 +3505,38 @@ const INSPECT_WIX_SSO_DIALOG_SCRIPT = String.raw`(() => {
 
   let googleBtn = null;
   for (const scope of effectiveScopes) {
+    const isInAuthDialog = dialogScopes.includes(scope);
     googleBtn = Array.from(scope.querySelectorAll('button, a, [role="button"], [data-testid*="google" i], [data-hook*="google" i]')).find(el => {
       if (!isVisible(el)) return false;
+      const visibleLabel = clean((el.innerText || el.textContent || '') + ' ' + (el.getAttribute('aria-label') || '') + ' ' + (el.getAttribute('title') || ''));
       const lbl = clean(
-        (el.innerText || el.textContent || '') + ' '
-        + (el.getAttribute('aria-label') || '') + ' '
-        + (el.getAttribute('title') || '') + ' '
+        visibleLabel + ' '
         + (el.getAttribute('data-testid') || '') + ' '
         + (el.getAttribute('data-hook') || '')
       );
-      return googleBtnRegex.test(lbl) || /(?:google[-_]?sso|google[-_]?login|google[-_]?sign|socialAuth.*google)/i.test(lbl);
+      if (googleBtnRegex.test(lbl) || /(?:google[-_]?sso|google[-_]?login|google[-_]?sign|socialAuth.*google|googleAuth)/i.test(lbl)) {
+        return true;
+      }
+      return isInAuthDialog && /^google$/i.test(visibleLabel);
     });
     if (googleBtn) break;
   }
 
-  const loginTriggerRegex = /\b(?:log\s*in|sign\s*in|sign\s*up)(?:\s+to\s+(?:comment|publish|reply|post))?\b|faça\s+login|fazer\s+login|iniciar\s+sesi[oó]n|se\s+connecter|anmelden|accedi|kirjaudu|войти|로그인|회원\s*가입|ログイン|登录|登入/i;
+  const loginTriggerRegex = new RegExp(${JSON.stringify(WIX_LOGIN_TRIGGER_BUTTON_PATTERN.source)}, 'i');
+  const isNavElement = el => Boolean(el.closest && el.closest('header, nav, footer, [role="banner"], [role="navigation"], [role="contentinfo"]'));
   const loginTrigger =
-    Array.from(document.querySelectorAll('[data-hook="login-as-member-text-button"], [data-hook*="login" i]'))
-      .find(el => isVisible(el) && el !== googleBtn)
-    || Array.from(document.querySelectorAll('[data-hook*="comment" i] button, [data-hook*="comment" i] a, [data-hook*="comment" i] [role="button"]'))
+    Array.from(document.querySelectorAll('[data-hook="login-as-member-text-button"], [data-hook*="login" i], [data-testid="switchToLogin"], [data-testid*="login-button" i]'))
+      .find(el => isVisible(el) && el !== googleBtn && !isNavElement(el))
+    || Array.from(document.querySelectorAll('[data-hook*="comment" i] button, [data-hook*="comment" i] a, [data-hook*="comment" i] [role="button"], [data-testid*="comment" i] button, [data-testid*="comment" i] a, [data-testid*="comment" i] [role="button"], #comments button, #comments a, #comments [role="button"], [id^="SM_ROOT_COMP"] button, [id^="SM_ROOT_COMP"] a, [role="dialog"] button, [role="dialog"] a'))
       .find(el => {
-        if (!isVisible(el) || el === googleBtn) return false;
-        const lbl = clean(el.innerText || el.textContent || el.getAttribute('aria-label'));
+        if (!isVisible(el) || el === googleBtn || isNavElement(el)) return false;
+        const lbl = clean(el.innerText || el.textContent || el.getAttribute('aria-label') || el.getAttribute('title'));
+        return loginTriggerRegex.test(lbl);
+      })
+    || Array.from(document.querySelectorAll('main button, main a, main [role="button"], article button, article a, article [role="button"]'))
+      .find(el => {
+        if (!isVisible(el) || el === googleBtn || isNavElement(el)) return false;
+        const lbl = clean(el.innerText || el.textContent || el.getAttribute('aria-label') || el.getAttribute('title'));
         return loginTriggerRegex.test(lbl);
       });
 
@@ -3782,9 +4059,640 @@ async function checkRichEditorHasLink(
   }, { selector: editorSelector, targetUrl: websiteUrl }).catch(() => false)
 }
 
+/**
+ * Inspect visible Wix RCE toolbar Link button (including floating/portal toolbars
+ * that only mount after focusing the editor or selecting anchor text).
+ */
+export const FIND_WIX_RCE_TOOLBAR_LINK_SCRIPT = String.raw`(() => {
+  const clean = value => String(value ?? '').replace(/\s+/g, ' ').trim();
+  const escapeCss = value => (typeof CSS !== 'undefined' && typeof CSS.escape === 'function')
+    ? CSS.escape(value)
+    : String(value).replace(/([^\w-])/g, '\\$1');
+  const docRect = document.documentElement && typeof document.documentElement.getBoundingClientRect === 'function'
+    ? document.documentElement.getBoundingClientRect()
+    : null;
+  const hasRealLayout = !!(docRect && (docRect.width > 0 || docRect.height > 0));
+  const isVisible = (el) => {
+    if (!el || el.nodeType !== 1) return false;
+    for (let cur = el; cur && cur.nodeType === 1; cur = cur.parentElement) {
+      if (cur.hidden) return false;
+      if (cur.getAttribute && cur.getAttribute('aria-hidden') === 'true') return false;
+      const style = typeof getComputedStyle === 'function' ? getComputedStyle(cur) : null;
+      if (style && (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0')) return false;
+    }
+    if (hasRealLayout && typeof el.getBoundingClientRect === 'function') {
+      const rect = el.getBoundingClientRect();
+      if (rect && rect.width <= 0 && rect.height <= 0) return false;
+    }
+    return true;
+  };
+  const unique = (el, sel) => {
+    if (!sel) return false;
+    try {
+      const list = document.querySelectorAll(sel);
+      return list.length === 1 && list[0] === el;
+    } catch {
+      return false;
+    }
+  };
+  const selectorFor = (el) => {
+    if (!el) return '';
+    if (el.id) {
+      const byId = '#' + escapeCss(el.id);
+      if (unique(el, byId)) return byId;
+    }
+    const hook = el.getAttribute('data-hook');
+    if (hook) {
+      const byHook = '[data-hook="' + hook.replace(/"/g, '\\"') + '"]';
+      if (unique(el, byHook)) return byHook;
+    }
+    const testId = el.getAttribute('data-testid');
+    if (testId) {
+      const byTestId = '[data-testid="' + testId.replace(/"/g, '\\"') + '"]';
+      if (unique(el, byTestId)) return byTestId;
+    }
+    const aria = el.getAttribute('aria-label');
+    if (aria) {
+      const byAria = el.localName + '[aria-label="' + aria.replace(/"/g, '\\"') + '"]';
+      if (unique(el, byAria)) return byAria;
+    }
+    let path = '';
+    for (let node = el, depth = 0; node && node.nodeType === 1 && depth < 14; node = node.parentElement, depth++) {
+      const tag = node.localName;
+      const parent = node.parentNode;
+      if (!parent) break;
+      const siblings = Array.from(parent.children || []).filter(s => s.localName === tag);
+      const seg = siblings.length > 1 ? tag + ':nth-of-type(' + (siblings.indexOf(node) + 1) + ')' : tag;
+      path = path ? seg + ' > ' + path : seg;
+      if (unique(el, path)) return path;
+    }
+    return '';
+  };
+
+  const linkRegex = new RegExp(${JSON.stringify(WIX_RCE_LINK_BUTTON_PATTERN.source)}, 'i');
+  const unlinkRegex = new RegExp(${JSON.stringify(WIX_RCE_UNLINK_BUTTON_PATTERN.source)}, 'i');
+  const isNav = el => Boolean(el.closest && el.closest('header, nav, footer, [role="banner"], [role="navigation"], [role="contentinfo"]'));
+  const scopes = [
+    ...Array.from(document.querySelectorAll('[data-hook*="toolbar" i], [role="toolbar"], [data-hook*="ricos" i], [data-hook*="comment-box" i], [data-hook*="comments-section" i], [data-hook*="comment" i], [class*="toolbar" i]')).filter(isVisible),
+  ];
+  const seen = new Set();
+  const orderedScopes = [];
+  for (const s of scopes) {
+    if (!seen.has(s)) {
+      seen.add(s);
+      orderedScopes.push(s);
+    }
+  }
+  if (document.body) orderedScopes.push(document.body);
+
+  for (const scope of orderedScopes) {
+    const candidates = Array.from(scope.querySelectorAll('button, [role="button"], [data-hook*="link" i]'));
+    for (const el of candidates) {
+      if (!isVisible(el) || isNav(el)) continue;
+      if (el.localName === 'a' && el.getAttribute('href')) continue;
+      const sig = clean(
+        (el.getAttribute('data-hook') || '') + ' '
+        + (el.getAttribute('data-testid') || '') + ' '
+        + (el.getAttribute('aria-label') || '') + ' '
+        + (el.getAttribute('title') || '') + ' '
+        + (el.innerText || el.textContent || '')
+      );
+      if (!sig || unlinkRegex.test(sig) || !linkRegex.test(sig)) continue;
+      const sel = selectorFor(el);
+      if (sel) return { found: true, selector: sel };
+    }
+  }
+  return { found: false };
+})()`
+
+const WIX_LINK_URL_INPUT_SELECTOR = [
+  '[data-hook="linkPanelInput"] input',
+  'input[data-hook*="linkPanel" i]',
+  'input[data-hook*="link" i]',
+  '[data-hook*="linkPanel" i] input',
+  '[data-hook*="link-modal" i] input',
+  'input[type="url"]',
+  'input[placeholder*="http" i]',
+  'input[placeholder*="url" i]',
+  'input[placeholder*="link" i]',
+  'input[placeholder*="enlace" i]',
+  'input[placeholder*="lien" i]',
+  'input[placeholder*="링크" i]',
+  'input[placeholder*="ссылк" i]',
+  'input[placeholder*="链接" i]',
+  'input[aria-label*="url" i]',
+  'input[aria-label*="link" i]',
+  'input[aria-label*="enlace" i]',
+  'input[aria-label*="lien" i]',
+  'input[aria-label*="링크" i]',
+  'input[aria-label*="ссылк" i]',
+  'input[aria-label*="链接" i]',
+].join(', ')
+
+const WIX_LINK_APPLY_BUTTON_SELECTOR = [
+  '[data-hook*="linkPanelConfirm" i]',
+  '[data-hook*="link-panel-confirm" i]',
+  '[data-hook*="save" i]',
+  '[data-hook*="apply" i]',
+  '[data-hook*="confirm" i]',
+  'button[aria-label*="save" i]',
+  'button[aria-label*="apply" i]',
+  'button[aria-label*="guardar" i]',
+  'button[aria-label*="salvar" i]',
+  'button[aria-label*="enregistrer" i]',
+  'button[aria-label*="speichern" i]',
+  'button[aria-label*="저장" i]',
+  'button[aria-label*="保存" i]',
+  'button[aria-label*="сохранить" i]',
+  '[data-hook*="linkPanel" i] button[type="submit"]',
+  '[role="dialog"] button[type="submit"]',
+].join(', ')
+
+/** Select an anchor substring inside a contenteditable editor and notify selection listeners. */
+async function selectTextInRichEditor(
+  page: Page,
+  editorSelector: string,
+  anchor: string,
+): Promise<boolean> {
+  return await page.evaluate(({ selector, needle }) => {
+    const dom = globalThis as unknown as BrowserDomGlobalLike & {
+      readonly Event?: new (type: string, init?: { bubbles?: boolean }) => unknown
+    }
+    const el = dom.document.querySelector(selector) as (BrowserDomElementLike & {
+      dispatchEvent?(ev: unknown): void
+    }) | null
+    if (!el || !needle) return false
+    const walker = dom.document.createTreeWalker(el, dom.NodeFilter?.SHOW_TEXT ?? 4)
+    let node = walker.nextNode()
+    while (node) {
+      const text = node.textContent ?? ''
+      const idx = text.toLowerCase().indexOf(needle.toLowerCase())
+      if (idx >= 0) {
+        const range = dom.document.createRange()
+        range.setStart(node, idx)
+        range.setEnd(node, idx + needle.length)
+        const sel = dom.window.getSelection?.()
+        if (sel) {
+          sel.removeAllRanges()
+          sel.addRange(range)
+        }
+        if (typeof dom.Event === 'function' && typeof el.dispatchEvent === 'function') {
+          try {
+            el.dispatchEvent(new dom.Event('mouseup', { bubbles: true }))
+            el.dispatchEvent(new dom.Event('keyup', { bubbles: true }))
+          } catch {
+            // ignore synthetic event errors in mocks
+          }
+        }
+        return true
+      }
+      node = walker.nextNode()
+    }
+    return false
+  }, { selector: editorSelector, needle: anchor }).catch(() => false)
+}
+
+async function applyWixLinkPopover(
+  page: Page,
+  targetUrl: string,
+  stepTimeoutMs: number,
+  excludeSubmitSelector?: string,
+): Promise<boolean> {
+  const urlInputLocator = page.locator(WIX_LINK_URL_INPUT_SELECTOR)
+  const urlInputCount = await urlInputLocator.count().catch(() => 0)
+  if (urlInputCount <= 0) return false
+  const urlInput = await resolveFirstVisibleLocator(page, WIX_LINK_URL_INPUT_SELECTOR)
+  await urlInput.fill(targetUrl, { timeout: stepTimeoutMs })
+
+  const applyLocator = page.locator(WIX_LINK_APPLY_BUTTON_SELECTOR)
+  const applyCount = await applyLocator.count().catch(() => 0)
+  if (applyCount > 0) {
+    const applyBtn = await resolveFirstVisibleLocator(page, WIX_LINK_APPLY_BUTTON_SELECTOR)
+    const isCommentPublishBtn = excludeSubmitSelector
+      ? await (applyBtn as unknown as { evaluate?: (fn: (el: unknown, sel: string) => boolean, arg: string) => Promise<boolean> })
+        .evaluate?.((el, sel) => {
+          const node = el as { matches?(s: string): boolean } | null
+          try {
+            return Boolean(node?.matches?.(sel))
+          } catch {
+            return false
+          }
+        }, excludeSubmitSelector)
+        .catch(() => false)
+      : false
+    if (!isCommentPublishBtn) {
+      await applyBtn.click({ timeout: stepTimeoutMs })
+      return true
+    }
+  }
+
+  // Fallback: look for a visible localized Save/Apply/Insert button inside a popover/dialog, or press Enter.
+  const localizedConfirmSel = await page.evaluate((submitSel: string) => {
+    interface DomNode {
+      readonly nodeType?: number
+      readonly localName?: string
+      readonly id?: string
+      readonly hidden?: boolean
+      readonly parentElement?: DomNode | null
+      readonly innerText?: string
+      readonly textContent?: string | null
+      getAttribute?(k: string): string | null
+      matches?(sel: string): boolean
+      querySelectorAll?(sel: string): ArrayLike<DomNode>
+    }
+    const g = globalThis as unknown as {
+      readonly document: { querySelectorAll(sel: string): ArrayLike<DomNode> }
+      readonly getComputedStyle?: (el: DomNode) => { display?: string; visibility?: string; opacity?: string } | null
+    }
+    const clean = (v: unknown) => String(v ?? '').replace(/\s+/gu, ' ').trim()
+    const isVisible = (el: DomNode | null | undefined): boolean => {
+      if (!el || el.nodeType !== 1) return false
+      for (let cur: DomNode | null | undefined = el; cur && cur.nodeType === 1; cur = cur.parentElement) {
+        if (cur.hidden) return false
+        if (cur.getAttribute?.('aria-hidden') === 'true') return false
+        const style = typeof g.getComputedStyle === 'function' ? g.getComputedStyle(cur) : null
+        if (style && (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0')) return false
+      }
+      return true
+    }
+    const labelRegex = /^(?:save|apply|done|ok|insert|add|confirm|guardar|aplicar|insertar|salvar|inserir|enregistrer|appliquer|ins[ée]rer|speichern|[üu]bernehmen|einf[üu]gen|salva|applica|저장|적용|확인|保存|適用|сохранить|применить|确定|应用|插入)$/iu
+    const scopes = Array.from(g.document.querySelectorAll('[data-hook*="linkPanel" i], [data-hook*="link-modal" i], [role="dialog"], [class*="linkPanel" i], [class*="popover" i]'))
+      .filter(isVisible)
+    for (const scope of scopes) {
+      for (const btn of Array.from(scope.querySelectorAll?.('button, [role="button"]') ?? [])) {
+        if (!isVisible(btn)) continue
+        try {
+          if (submitSel && btn.matches?.(submitSel)) continue
+        } catch {
+          // ignore
+        }
+        const lbl = clean(btn.innerText || btn.textContent || btn.getAttribute?.('aria-label'))
+        if (labelRegex.test(lbl)) {
+          const hook = btn.getAttribute?.('data-hook')
+          if (hook) return `[data-hook="${hook.replace(/"/g, '\\"')}"]`
+          if (btn.id) return `#${btn.id}`
+          const aria = btn.getAttribute?.('aria-label')
+          if (aria) return `${btn.localName ?? 'button'}[aria-label="${aria.replace(/"/g, '\\"')}"]`
+        }
+      }
+    }
+    return ''
+  }, excludeSubmitSelector ?? '').catch(() => '')
+
+  if (localizedConfirmSel) {
+    await page.locator(localizedConfirmSel).first().click({ timeout: stepTimeoutMs })
+  } else if (typeof urlInput.press === 'function') {
+    await urlInput.press('Enter', { timeout: stepTimeoutMs })
+  } else if (typeof page.keyboard?.press === 'function') {
+    await page.keyboard.press('Enter').catch(() => undefined)
+  }
+  return true
+}
+
+export interface StarRatingEnsureResult {
+  readonly detected: boolean
+  readonly alreadySelected: boolean
+  readonly selected: boolean
+  readonly method?: 'star_link' | 'select' | 'radio' | 'custom_star'
+  readonly value?: string
+}
+
+/**
+ * Inspect and automatically select a 5-star rating inside a WordPress / WooCommerce /
+ * OpenCart comment or review form when a star rating control exists and is currently unselected.
+ */
+export async function ensureWordPressStarRating(
+  page: Page,
+  formSelector: string | undefined,
+  stepTimeoutMs: number,
+): Promise<StarRatingEnsureResult> {
+  if (typeof page.evaluate !== 'function') {
+    return { detected: false, alreadySelected: false, selected: false }
+  }
+
+  interface RatingInspectPayload {
+    readonly detected: boolean
+    readonly alreadySelected: boolean
+    readonly starLinkSelector?: string
+    readonly selectSelector?: string
+    readonly selectVisible?: boolean
+    readonly selectValue?: string
+    readonly radioSelector?: string
+    readonly radioLabelSelector?: string
+    readonly radioVisible?: boolean
+    readonly customStarSelector?: string
+  }
+
+  const inspection = await page.evaluate((targetFormSel: string): RatingInspectPayload => {
+    interface RatingDomEl {
+      readonly nodeType?: number
+      readonly localName?: string
+      readonly id?: string
+      readonly type?: string
+      readonly value?: string
+      readonly checked?: boolean
+      readonly hidden?: boolean
+      readonly parentElement?: RatingDomEl | null
+      readonly children?: ArrayLike<RatingDomEl>
+      readonly options?: ArrayLike<{ readonly value?: string }>
+      readonly classList?: { contains?(cls: string): boolean }
+      getAttribute?(k: string): string | null
+      closest?(sel: string): RatingDomEl | null
+      querySelector?(sel: string): RatingDomEl | null
+      querySelectorAll?(sel: string): ArrayLike<RatingDomEl>
+    }
+    const g = globalThis as unknown as {
+      readonly CSS?: { escape?(v: string): string }
+      readonly document: {
+        querySelector(sel: string): RatingDomEl | null
+        querySelectorAll(sel: string): ArrayLike<RatingDomEl>
+      }
+      readonly getComputedStyle?: (el: RatingDomEl) => { display?: string; visibility?: string; opacity?: string } | null
+    }
+    const escapeCss = (value: string) => (typeof g.CSS !== 'undefined' && typeof g.CSS.escape === 'function')
+      ? g.CSS.escape(value)
+      : String(value).replace(/([^\w-])/g, '\\$1')
+    const isVisible = (el: RatingDomEl | null | undefined): boolean => {
+      if (!el || el.nodeType !== 1) return false
+      if (el.localName === 'input' && (el.type || '').toLowerCase() === 'hidden') return false
+      for (let cur: RatingDomEl | null | undefined = el; cur && cur.nodeType === 1; cur = cur.parentElement) {
+        if (cur.hidden) return false
+        if (cur.getAttribute?.('aria-hidden') === 'true') return false
+        const style = typeof g.getComputedStyle === 'function' ? g.getComputedStyle(cur) : null
+        if (style && (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0')) return false
+      }
+      return true
+    }
+    const unique = (el: RatingDomEl, sel: string): boolean => {
+      if (!sel) return false
+      try {
+        const list = g.document.querySelectorAll(sel)
+        return list.length === 1 && list[0] === el
+      } catch {
+        return false
+      }
+    }
+    const selectorFor = (el: RatingDomEl | null | undefined, scopeEl: RatingDomEl | null): string => {
+      if (!el) return ''
+      if (el.id) {
+        const byId = '#' + escapeCss(el.id)
+        if (unique(el, byId)) return byId
+      }
+      const tagName = el.localName ?? 'div'
+      const nameAttr = el.getAttribute?.('name')
+      const valAttr = el.getAttribute?.('value')
+      if (nameAttr && valAttr) {
+        const byNameVal = `${tagName}[name="${nameAttr.replace(/"/g, '\\"')}"][value="${valAttr.replace(/"/g, '\\"')}"]`
+        if (unique(el, byNameVal)) return byNameVal
+      }
+      if (nameAttr) {
+        const byName = `${tagName}[name="${nameAttr.replace(/"/g, '\\"')}"]`
+        if (unique(el, byName)) return byName
+      }
+      const scopePrefix = scopeEl?.id ? `#${escapeCss(scopeEl.id)} ` : ''
+      if (tagName === 'a' && el.classList?.contains?.('star-5')) {
+        const sel = `${scopePrefix}a.star-5`
+        if (unique(el, sel)) return sel
+      }
+      if (tagName === 'label') {
+        const forAttr = el.getAttribute?.('for')
+        if (forAttr) {
+          const byFor = `label[for="${forAttr.replace(/"/g, '\\"')}"]`
+          if (unique(el, byFor)) return byFor
+        }
+      }
+      let path = ''
+      for (let node: RatingDomEl | null | undefined = el, depth = 0; node && node.nodeType === 1 && depth < 14; node = node.parentElement, depth++) {
+        const tag = node.localName ?? 'div'
+        const parent = node.parentElement
+        if (!parent) break
+        const siblings = Array.from(parent.children ?? []).filter(s => s.localName === tag)
+        const seg = siblings.length > 1 ? `${tag}:nth-of-type(${siblings.indexOf(node) + 1})` : tag
+        path = path ? `${seg} > ${path}` : seg
+        if (unique(el, path)) return path
+      }
+      return ''
+    }
+
+    let scope: RatingDomEl | null = null
+    if (targetFormSel) {
+      try {
+        scope = g.document.querySelector(targetFormSel)
+      } catch {
+        scope = null
+      }
+    }
+    scope = scope
+      || g.document.querySelector('form#commentform, form[action*="wp-comments-post.php"], form#form-review, #form-review, #respond form, #respond')
+    if (!scope) {
+      return { detected: false, alreadySelected: false }
+    }
+
+    // 1. WooCommerce / WP star link (`.comment-form-rating a.star-5`, `.stars a.star-5`)
+    const starLink = Array.from(scope.querySelectorAll?.('.comment-form-rating a.star-5, .stars a.star-5, p.stars a.star-5') ?? [])
+      .find(isVisible) ?? null
+    const starsContainer = scope.querySelector?.('.comment-form-rating .stars, p.stars, .stars') ?? null
+    const starAlreadyActive = Boolean(
+      starsContainer?.classList?.contains?.('selected')
+      || starsContainer?.querySelector?.('a.active'),
+    )
+
+    // 2. `<select name="rating">` or `<select name*="rating" i>`
+    const selectEl = scope.querySelector?.('select[name="rating"], select#rating, select[name*="rating" i]') ?? null
+    let selectAlreadySelected = false
+    let bestSelectVal = '5'
+    if (selectEl) {
+      const curVal = String(selectEl.value || '').trim()
+      selectAlreadySelected = curVal.length > 0 && curVal !== '0'
+      const opts = Array.from(selectEl.options ?? [])
+      const hasFive = opts.some(o => String(o.value ?? '').trim() === '5')
+      if (!hasFive) {
+        const numericOpts = opts
+          .map(o => ({ val: String(o.value ?? '').trim(), num: Number(o.value) }))
+          .filter(o => o.val.length > 0 && Number.isFinite(o.num) && o.num > 0)
+          .sort((a, b) => b.num - a.num)
+        if (numericOpts[0]) {
+          bestSelectVal = numericOpts[0].val
+        } else {
+          const nonEmpty = opts.filter(o => String(o.value ?? '').trim().length > 0)
+          if (nonEmpty.length > 0) bestSelectVal = String(nonEmpty[nonEmpty.length - 1]!.value ?? '').trim()
+        }
+      }
+    }
+
+    // 3. Radio inputs (`input[type="radio"][name="rating"]`, `input[type="radio"][name*="rating" i]`, `input[type="radio"][name*="star" i]`)
+    const radioInputs = Array.from(
+      scope.querySelectorAll?.('input[type="radio"][name="rating"], input[type="radio"][name*="rating" i], input[type="radio"][name*="star" i]') ?? [],
+    )
+    const radioAlreadySelected = radioInputs.some(r => r.checked === true)
+    let targetRadio: RatingDomEl | null = null
+    if (radioInputs.length > 0) {
+      targetRadio = radioInputs.find(r => String(r.value ?? '').trim() === '5') ?? null
+      if (!targetRadio) {
+        const sorted = [...radioInputs]
+          .map(r => ({ el: r, num: Number(r.value) }))
+          .filter(x => Number.isFinite(x.num) && x.num > 0)
+          .sort((a, b) => b.num - a.num)
+        targetRadio = sorted[0]?.el ?? radioInputs[radioInputs.length - 1] ?? null
+      }
+    }
+    let radioLabel: RatingDomEl | null = null
+    if (targetRadio) {
+      if (targetRadio.id) {
+        try {
+          const explicitLbl = scope.querySelector?.(`label[for="${targetRadio.id.replace(/"/g, '\\"')}"]`)
+            ?? g.document.querySelector(`label[for="${targetRadio.id.replace(/"/g, '\\"')}"]`)
+          if (explicitLbl && isVisible(explicitLbl)) radioLabel = explicitLbl
+        } catch {
+          // ignore
+        }
+      }
+      if (!radioLabel) {
+        const wrapLbl = targetRadio.closest?.('label') ?? null
+        if (wrapLbl && isVisible(wrapLbl)) radioLabel = wrapLbl
+      }
+    }
+
+    // 4. Custom clickable 5-star widget (`[data-rating="5"]` / `[data-value="5"]`)
+    const customStar = Array.from(
+      scope.querySelectorAll?.('.comment-form-rating [data-rating="5"], [class*="rating" i] [data-rating="5"], [class*="rating" i] [data-value="5"], [class*="star" i][data-rating="5"]') ?? [],
+    ).find(isVisible) ?? null
+    const hiddenRatingInput = scope.querySelector?.('input[type="hidden"][name="rating"], input[type="hidden"][name*="rating" i]') ?? null
+    const hiddenAlreadySelected = Boolean(hiddenRatingInput && String(hiddenRatingInput.value || '').trim().length > 0 && String(hiddenRatingInput.value).trim() !== '0')
+
+    const detected = Boolean(starLink || selectEl || radioInputs.length > 0 || customStar)
+    if (!detected) {
+      return { detected: false, alreadySelected: false }
+    }
+
+    const alreadySelected = Boolean(
+      (selectEl && selectAlreadySelected)
+      || (radioInputs.length > 0 && radioAlreadySelected)
+      || (starLink && !selectEl && starAlreadyActive)
+      || (customStar && hiddenAlreadySelected),
+    )
+
+    return {
+      detected: true,
+      alreadySelected,
+      ...(starLink ? { starLinkSelector: selectorFor(starLink, scope) } : {}),
+      ...(selectEl ? { selectSelector: selectorFor(selectEl, scope), selectVisible: isVisible(selectEl), selectValue: bestSelectVal } : {}),
+      ...(targetRadio ? { radioSelector: selectorFor(targetRadio, scope), radioVisible: isVisible(targetRadio) } : {}),
+      ...(radioLabel ? { radioLabelSelector: selectorFor(radioLabel, scope) } : {}),
+      ...(customStar ? { customStarSelector: selectorFor(customStar, scope) } : {}),
+    }
+  }, formSelector ?? '').catch((): RatingInspectPayload => ({ detected: false, alreadySelected: false }))
+
+  if (!inspection.detected) {
+    return { detected: false, alreadySelected: false, selected: false }
+  }
+  if (inspection.alreadySelected) {
+    return { detected: true, alreadySelected: true, selected: false }
+  }
+
+  // Prefer real Playwright interaction on visible controls, then verify/sync underlying select/radio state.
+  if (inspection.starLinkSelector && typeof page.locator === 'function') {
+    const starLoc = await resolveFirstVisibleLocator(page, inspection.starLinkSelector)
+    await starLoc.click({ timeout: stepTimeoutMs }).catch(() => undefined)
+    if (inspection.selectSelector) {
+      await page.evaluate(({ sel, val }) => {
+        const g = globalThis as unknown as {
+          readonly document: { querySelector(s: string): { value: string; dispatchEvent?(e: unknown): void } | null }
+          readonly Event?: new (type: string, init?: { bubbles?: boolean }) => unknown
+        }
+        const select = g.document.querySelector(sel)
+        if (select && (!select.value || select.value === '0')) {
+          select.value = val
+          if (typeof g.Event === 'function' && typeof select.dispatchEvent === 'function') {
+            select.dispatchEvent(new g.Event('input', { bubbles: true }))
+            select.dispatchEvent(new g.Event('change', { bubbles: true }))
+          }
+        }
+      }, { sel: inspection.selectSelector, val: inspection.selectValue ?? '5' }).catch(() => undefined)
+    }
+    return { detected: true, alreadySelected: false, selected: true, method: 'star_link', value: inspection.selectValue ?? '5' }
+  }
+
+  if (inspection.selectSelector) {
+    const val = inspection.selectValue ?? '5'
+    let selectedViaPlaywright = false
+    if (inspection.selectVisible && typeof page.locator === 'function') {
+      const selLoc = page.locator(inspection.selectSelector).first()
+      if (typeof selLoc.selectOption === 'function') {
+        await selLoc.selectOption(val, { timeout: stepTimeoutMs })
+          .then(() => { selectedViaPlaywright = true })
+          .catch(() => undefined)
+      }
+    }
+    if (!selectedViaPlaywright) {
+      await page.evaluate(({ sel, v }) => {
+        const g = globalThis as unknown as {
+          readonly document: { querySelector(s: string): { value: string; dispatchEvent?(e: unknown): void } | null }
+          readonly Event?: new (type: string, init?: { bubbles?: boolean }) => unknown
+        }
+        const select = g.document.querySelector(sel)
+        if (select) {
+          select.value = v
+          if (typeof g.Event === 'function' && typeof select.dispatchEvent === 'function') {
+            select.dispatchEvent(new g.Event('input', { bubbles: true }))
+            select.dispatchEvent(new g.Event('change', { bubbles: true }))
+          }
+        }
+      }, { sel: inspection.selectSelector, v: val }).catch(() => undefined)
+    }
+    return { detected: true, alreadySelected: false, selected: true, method: 'select', value: val }
+  }
+
+  if (inspection.radioSelector) {
+    let checkedViaUi = false
+    if (inspection.radioVisible && typeof page.locator === 'function') {
+      const radioLoc = page.locator(inspection.radioSelector).first() as ReturnType<Page['locator']> & {
+        check?: (opts?: { timeout?: number }) => Promise<void>
+      }
+      if (typeof radioLoc.check === 'function') {
+        await radioLoc.check({ timeout: stepTimeoutMs })
+          .then(() => { checkedViaUi = true })
+          .catch(() => undefined)
+      }
+      if (!checkedViaUi && typeof radioLoc.click === 'function') {
+        await radioLoc.click({ timeout: stepTimeoutMs })
+          .then(() => { checkedViaUi = true })
+          .catch(() => undefined)
+      }
+    } else if (inspection.radioLabelSelector && typeof page.locator === 'function') {
+      await page.locator(inspection.radioLabelSelector).first().click({ timeout: stepTimeoutMs })
+        .then(() => { checkedViaUi = true })
+        .catch(() => undefined)
+    }
+    await page.evaluate((sel: string) => {
+      const g = globalThis as unknown as {
+        readonly document: { querySelector(s: string): { checked: boolean; dispatchEvent?(e: unknown): void } | null }
+        readonly Event?: new (type: string, init?: { bubbles?: boolean }) => unknown
+      }
+      const input = g.document.querySelector(sel)
+      if (input && !input.checked) {
+        input.checked = true
+        if (typeof g.Event === 'function' && typeof input.dispatchEvent === 'function') {
+          input.dispatchEvent(new g.Event('input', { bubbles: true }))
+          input.dispatchEvent(new g.Event('change', { bubbles: true }))
+        }
+      }
+    }, inspection.radioSelector).catch(() => undefined)
+    return { detected: true, alreadySelected: false, selected: true, method: 'radio', value: '5' }
+  }
+
+  if (inspection.customStarSelector && typeof page.locator === 'function') {
+    await page.locator(inspection.customStarSelector).first().click({ timeout: stepTimeoutMs }).catch(() => undefined)
+    return { detected: true, alreadySelected: false, selected: true, method: 'custom_star', value: '5' }
+  }
+
+  return { detected: true, alreadySelected: false, selected: false }
+}
+
 function inferSiteType(inspection: CommentPageInspection): CommentPublishSiteType {
   if (inspection.wordpress.found || inspection.isWordPress) return 'wordpress'
   if (inspection.genericComment?.kind === 'valine') return 'valine'
+  if (inspection.genericComment?.kind === 'opencart') return 'opencart'
   if (inspection.genericComment?.kind === 'typecho' || inspection.isTypecho) return 'typecho'
   if (inspection.hasBloggerCommentIframe || inspection.childFrames?.bloggerFrameUrl) return 'blogger'
   if (inspection.isWix) return 'wix'
@@ -3797,6 +4705,7 @@ function buildFallbackResult(
   inspection: CommentPageInspection,
   evidence?: string,
   reason?: string,
+  templateSignature?: string,
 ): BrowserCommentPublishResult {
   return {
     kind: 'comment_publish',
@@ -3807,6 +4716,7 @@ function buildFallbackResult(
     finalUrl: inspection.finalUrl,
     ...(evidence === undefined ? {} : { evidence }),
     ...(reason === undefined ? {} : { reason }),
+    ...(templateSignature === undefined ? {} : { templateSignature }),
     submitTriggered: false,
     formSummary: inspection.formSummary,
     ...(inspection.bottomSnapshot === undefined ? {} : { bottomSnapshot: inspection.bottomSnapshot }),
@@ -3880,7 +4790,7 @@ function buildWixNoFormDiagnosis(inspection: CommentPageInspection): string {
   return 'Wix 页面未定位到确定性评论入口，附带底部快照转交 LLM 二次确认（未触发提交）'
 }
 
-/** Shared submission + Jetpack Verbum guest-flow + 403/WAF detection + 302-resilient post-submit/reload verification for WP, Typecho, and custom blog forms. */
+/** Shared submission + Jetpack Verbum guest-flow + WP star-rating auto-select + OpenCart AJAX + 403/WAF detection + 302-resilient post-submit/reload verification for WP, Typecho, OpenCart, Valine, and custom blog forms. */
 async function submitAndVerifyStandardForm(
   page: Page,
   ref: string,
@@ -3888,6 +4798,7 @@ async function submitAndVerifyStandardForm(
   siteLabel: string,
   inspection: CommentPageInspection,
   form: {
+    readonly formSelector?: string
     readonly commentSelector?: string
     readonly commentIsContentEditable?: boolean
     readonly authorSelector?: string
@@ -3906,13 +4817,16 @@ async function submitAndVerifyStandardForm(
   command: BrowserCommentPublishCommand,
   options: {
     readonly timeoutMs: number
+    readonly deadlineAt?: number
     readonly verifyReload: boolean
     readonly probeOnly: boolean
     readonly sleep: SleepLike
     readonly signal?: AbortSignal
   },
 ): Promise<BrowserCommentPublishResult> {
-  const { timeoutMs, verifyReload, probeOnly, sleep, signal } = options
+  const { timeoutMs, deadlineAt, verifyReload, probeOnly, sleep, signal } = options
+  const stepTimeout = (capMs = DEFAULT_COMMENT_STEP_TIMEOUT_MS): number =>
+    resolveStepTimeoutMs(timeoutMs, deadlineAt, capMs)
 
   if (form.captcha?.detected || inspection.childFrames?.captchaDetected) {
     return {
@@ -3954,18 +4868,18 @@ async function submitAndVerifyStandardForm(
   }
 
   const hasUrlField = form.urlSelector !== undefined
-  await dismissBlockingOverlays(page, timeoutMs)
+  await dismissBlockingOverlays(page, stepTimeout())
 
   const commentLocator = await resolveFirstVisibleLocator(page, form.commentSelector!)
   if (form.commentIsContentEditable) {
     const stripped = stripHtmlLinkForRichEditor(command.commentText, command.anchorText, command.websiteUrl)
     if (typeof commentLocator.click === 'function') {
-      await commentLocator.click({ timeout: timeoutMs }).catch(() => undefined)
+      await commentLocator.click({ timeout: stepTimeout() }).catch(() => undefined)
     }
-    await commentLocator.fill(stripped.plainText, { timeout: timeoutMs })
+    await commentLocator.fill(stripped.plainText, { timeout: stepTimeout() })
   } else {
     const commentBody = buildWpCommentContent(command.commentText, command.websiteUrl, command.anchorText, hasUrlField)
-    await commentLocator.fill(commentBody, { timeout: timeoutMs })
+    await commentLocator.fill(commentBody, { timeout: stepTimeout() })
   }
 
   let authorFilled = false
@@ -3974,18 +4888,23 @@ async function submitAndVerifyStandardForm(
 
   if (form.authorSelector !== undefined && command.authorName?.trim()) {
     const authorLoc = await resolveFirstVisibleLocator(page, form.authorSelector)
-    await authorLoc.fill(command.authorName.trim(), { timeout: timeoutMs })
+    await authorLoc.fill(command.authorName.trim(), { timeout: stepTimeout() })
     authorFilled = true
   }
   if (form.emailSelector !== undefined && command.authorEmail?.trim()) {
     const emailLoc = await resolveFirstVisibleLocator(page, form.emailSelector)
-    await emailLoc.fill(command.authorEmail.trim(), { timeout: timeoutMs })
+    await emailLoc.fill(command.authorEmail.trim(), { timeout: stepTimeout() })
     emailFilled = true
   }
   if (form.urlSelector !== undefined && command.websiteUrl?.trim()) {
     const urlLoc = await resolveFirstVisibleLocator(page, form.urlSelector)
-    await urlLoc.fill(command.websiteUrl.trim(), { timeout: timeoutMs })
+    await urlLoc.fill(command.websiteUrl.trim(), { timeout: stepTimeout() })
     urlFilled = true
+  }
+
+  // Automatically select 5-star rating on WordPress / WooCommerce / OpenCart review forms if unselected.
+  if (siteType === 'wordpress' || siteType === 'opencart') {
+    await ensureWordPressStarRating(page, form.formSelector, stepTimeout())
   }
 
   let activeSubmitSelector = form.submitSelector
@@ -4000,26 +4919,26 @@ async function submitAndVerifyStandardForm(
     )
   }
 
-  await dismissBlockingOverlays(page, timeoutMs)
+  await dismissBlockingOverlays(page, stepTimeout())
 
   // Check if submit button is disabled; on WordPress Jetpack Verbum (Gutenberg comment box),
   // automatically expand guest flow ("Add your name" / "Continue as a guest") and fill name/email/url.
   let submitLocator = await resolveFirstVisibleLocator(page, activeSubmitSelector)
-  if (await isLocatorDisabled(submitLocator)) {
+  if (await isLocatorDisabled(submitLocator, stepTimeout())) {
     const guestToggleSel = siteType === 'wordpress'
       ? (form.guestToggleSelector ?? await findDynamicJetpackGuestToggle(page))
       : undefined
 
     if (guestToggleSel) {
       const toggleLocator = page.locator(guestToggleSel).first()
-      if (!(await isLocatorDisabled(toggleLocator))) {
-        await toggleLocator.click({ timeout: timeoutMs }).catch(() => undefined)
+      if (!(await isLocatorDisabled(toggleLocator, stepTimeout()))) {
+        await toggleLocator.click({ timeout: stepTimeout() }).catch(() => undefined)
 
-        const expandDeadline = Date.now() + Math.min(2_000, timeoutMs)
+        const expandDeadline = Date.now() + Math.min(2_000, stepTimeout())
         let refreshedWp = activeInspection.wordpress
         for (let poll = 0; poll < 8; poll++) {
           throwIfAborted(signal)
-          await sleep(Math.min(250, timeoutMs), signal)
+          await sleep(Math.min(250, stepTimeout()), signal)
           const nextInspection = await inspectCommentPageWithFrames(page).catch(() => activeInspection)
           activeInspection = nextInspection
           refreshedWp = nextInspection.wordpress
@@ -4032,15 +4951,15 @@ async function submitAndVerifyStandardForm(
         }
 
         if (!authorFilled && refreshedWp.authorSelector && command.authorName?.trim()) {
-          await page.locator(refreshedWp.authorSelector).first().fill(command.authorName.trim(), { timeout: timeoutMs })
+          await page.locator(refreshedWp.authorSelector).first().fill(command.authorName.trim(), { timeout: stepTimeout() })
           authorFilled = true
         }
         if (!emailFilled && refreshedWp.emailSelector && command.authorEmail?.trim()) {
-          await page.locator(refreshedWp.emailSelector).first().fill(command.authorEmail.trim(), { timeout: timeoutMs })
+          await page.locator(refreshedWp.emailSelector).first().fill(command.authorEmail.trim(), { timeout: stepTimeout() })
           emailFilled = true
         }
         if (!urlFilled && refreshedWp.urlSelector && command.websiteUrl?.trim()) {
-          await page.locator(refreshedWp.urlSelector).first().fill(command.websiteUrl.trim(), { timeout: timeoutMs })
+          await page.locator(refreshedWp.urlSelector).first().fill(command.websiteUrl.trim(), { timeout: stepTimeout() })
           urlFilled = true
         }
         if (refreshedWp.submitSelector) {
@@ -4048,16 +4967,16 @@ async function submitAndVerifyStandardForm(
           submitLocator = page.locator(activeSubmitSelector).first()
         }
 
-        const enableDeadline = Date.now() + Math.min(2_000, timeoutMs)
-        for (let poll = 0; poll < 8 && (await isLocatorDisabled(submitLocator)); poll++) {
+        const enableDeadline = Date.now() + Math.min(2_000, stepTimeout())
+        for (let poll = 0; poll < 8 && (await isLocatorDisabled(submitLocator, stepTimeout())); poll++) {
           if (Date.now() >= enableDeadline) break
           throwIfAborted(signal)
-          await sleep(Math.min(200, timeoutMs), signal)
+          await sleep(Math.min(200, stepTimeout()), signal)
         }
       }
     }
 
-    if (await isLocatorDisabled(submitLocator)) {
+    if (await isLocatorDisabled(submitLocator, stepTimeout())) {
       const loginProbe = await inspectDisabledSubmitLoginPrompt(page)
       if (loginProbe.hasLoginPrompt) {
         return buildNeedsLoginResult(
@@ -4078,7 +4997,7 @@ async function submitAndVerifyStandardForm(
     }
   }
 
-  // Capture POST/navigation HTTP status, headers, raw wp_die HTML, 302 Location, and LeanCloud Valine 201 cleanly.
+  // Capture POST/navigation HTTP status, headers, raw wp_die HTML, 302 Location, OpenCart JSON, and LeanCloud Valine 201 cleanly.
   interface CapturedPostResponse {
     readonly url: string
     readonly status: number
@@ -4122,7 +5041,8 @@ async function submitAndVerifyStandardForm(
       isValineLeanCloud,
     }
     capturedResponses.push(entry)
-    if ((status === 403 || status === 406 || status === 429) && typeof r.text === 'function') {
+    const shouldReadOpenCartJson = siteType === 'opencart' && (isPost || resourceType === 'xhr' || resourceType === 'fetch') && status >= 200 && status < 400
+    if (((status === 403 || status === 406 || status === 429) || shouldReadOpenCartJson) && typeof r.text === 'function') {
       pendingBodyReads.push(
         r.text()
           .then(raw => {
@@ -4147,11 +5067,11 @@ async function submitAndVerifyStandardForm(
   const preSubmitUrl = page.url()
   const preSubmitCommentIdNum = extractCommentNumericId(preSubmitUrl)
   const maxExistingCommentId = siteType === 'wordpress' ? await collectMaxExistingCommentId(page) : 0
-  const navWaitTimeout = Math.min(10_000, timeoutMs)
+  const navWaitTimeout = Math.min(10_000, timeoutMs, deadlineAt !== undefined ? Math.max(1, deadlineAt - Date.now()) : 10_000)
   let navResponse: unknown = null
   let clickTimeoutError: unknown
   try {
-    const navPromise = siteType === 'valine'
+    const navPromise = (siteType === 'valine' || siteType === 'opencart')
       ? Promise.resolve(null)
       : typeof page.waitForNavigation === 'function'
         ? page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: navWaitTimeout }).catch(() => null)
@@ -4161,7 +5081,7 @@ async function submitAndVerifyStandardForm(
 
     const [navRes] = await Promise.all([
       navPromise,
-      submitLocator.click({ timeout: timeoutMs }).catch((error: unknown) => {
+      submitLocator.click({ timeout: stepTimeout() }).catch((error: unknown) => {
         if (isNavigationContextError(error)) return null
         if (isTimeoutError(error)) {
           clickTimeoutError = error
@@ -4171,14 +5091,14 @@ async function submitAndVerifyStandardForm(
       }),
     ])
     navResponse = navRes
-    if (siteType === 'valine') {
-      await sleep(Math.min(800, timeoutMs), signal)
+    if (siteType === 'valine' || siteType === 'opencart') {
+      await sleep(Math.min(800, stepTimeout()), signal)
     } else if (clickTimeoutError !== undefined) {
       throwIfAborted(signal)
       if (typeof page.waitForLoadState === 'function') {
-        await page.waitForLoadState('domcontentloaded', { timeout: Math.min(2_000, timeoutMs) }).catch(() => undefined)
+        await page.waitForLoadState('domcontentloaded', { timeout: Math.min(2_000, stepTimeout()) }).catch(() => undefined)
       }
-      await sleep(Math.min(500, timeoutMs), signal)
+      await sleep(Math.min(500, stepTimeout()), signal)
     }
     if (pendingBodyReads.length > 0) {
       await Promise.all(pendingBodyReads)
@@ -4418,9 +5338,127 @@ async function submitAndVerifyStandardForm(
     }
   }
 
+  // OpenCart AJAX feedback fast-path: inspect JSON `{ success / error }` responses & `.alert-success` / `.alert-danger` DOM notices.
+  if (siteType === 'opencart') {
+    let ocAjaxSuccess: string | undefined
+    let ocAjaxError: string | undefined
+    for (const resp of capturedResponses) {
+      const raw = resp.rawBodySnippet?.trim()
+      if (!raw || (!raw.startsWith('{') && !raw.startsWith('['))) continue
+      try {
+        const parsed = JSON.parse(raw) as { success?: unknown; error?: unknown }
+        if (typeof parsed.error === 'string' && parsed.error.trim().length > 0) {
+          ocAjaxError = parsed.error.trim().slice(0, 220)
+        } else if (typeof parsed.success === 'string' && parsed.success.trim().length > 0) {
+          ocAjaxSuccess = parsed.success.trim().slice(0, 220)
+        }
+      } catch {
+        // non-JSON response
+      }
+    }
+    const effectiveError = ocAjaxError ?? postVerify.openCartErrorNotice
+    const effectiveSuccess = ocAjaxSuccess ?? postVerify.openCartSuccessNotice
+    if (effectiveError && !effectiveSuccess) {
+      const mentionsCaptcha = /captcha|verification\s+code|验证码/iu.test(effectiveError)
+      if (mentionsCaptcha) {
+        return {
+          kind: 'comment_publish',
+          page: ref,
+          outcome: 'blocked_captcha',
+          siteType: 'opencart',
+          title: postTitle,
+          finalUrl: postSubmitUrl,
+          postSubmitUrl,
+          postSubmitSnippet: effectiveError,
+          templateSignature: 'opencart:captcha_error',
+          suggestedTags: ['has_captcha'],
+          evidence: `OpenCart 提交返回验证码校验失败: ${effectiveError}`,
+          submitTriggered: false,
+        }
+      }
+      return {
+        kind: 'comment_publish',
+        page: ref,
+        outcome: 'uncertain_after_submit',
+        siteType: 'opencart',
+        title: postTitle,
+        finalUrl: postSubmitUrl,
+        postSubmitUrl,
+        postSubmitSnippet: effectiveError,
+        evidence: `OpenCart 评论提交返回错误提示: ${effectiveError}`,
+        submitTriggered: true,
+      }
+    }
+    if (effectiveSuccess) {
+      const modNotice = matchModerationNotice(effectiveSuccess)
+        ?? (/webmaster|approval|moderation|pending|review|审核/iu.test(effectiveSuccess) ? effectiveSuccess : undefined)
+      if (modNotice) {
+        return {
+          kind: 'comment_publish',
+          page: ref,
+          outcome: 'submitted',
+          siteType: 'opencart',
+          title: postTitle,
+          finalUrl: postSubmitUrl || command.url,
+          publicUrl: postSubmitUrl || command.url,
+          postSubmitUrl,
+          postSubmitSnippet: effectiveSuccess,
+          evidence: `OpenCart 评论已提交等待审核 (${modNotice})`,
+          submitTriggered: true,
+        }
+      }
+      let finalOcVerify = postVerify
+      let finalOcUrl = postSubmitUrl || command.url
+      if (verifyReload) {
+        try {
+          await navigateCommentPageWithCommit(page, command.url, { timeoutMs, domReadyWaitMs: Math.min(3_000, timeoutMs), sleep, signal })
+          await scrollPageStep(page, 1.0)
+          const reloadCheck = await safeVerifyResult(page, command, timeoutMs, sleep, signal)
+          finalOcUrl = reloadCheck.currentUrl
+          finalOcVerify = reloadCheck.verify
+        } catch (error) {
+          throwIfAborted(signal)
+          if (!isTimeoutError(error)) throw error
+        }
+      }
+      const finalOcTitle = await page.title().catch(() => postTitle)
+      if (finalOcVerify.liveLinkFound) {
+        return {
+          kind: 'comment_publish',
+          page: ref,
+          outcome: 'live',
+          siteType: 'opencart',
+          title: finalOcTitle,
+          finalUrl: finalOcUrl,
+          publicUrl: finalOcUrl,
+          postSubmitUrl,
+          postSubmitSnippet: effectiveSuccess,
+          evidence: `OpenCart 评论公开页核验通过: ${finalOcVerify.matchedAnchor || finalOcVerify.matchedHref || finalOcUrl}`,
+          submitTriggered: true,
+        }
+      }
+      return {
+        kind: 'comment_publish',
+        page: ref,
+        outcome: 'submitted',
+        siteType: 'opencart',
+        title: finalOcTitle,
+        finalUrl: finalOcUrl,
+        publicUrl: finalOcUrl,
+        postSubmitUrl,
+        postSubmitSnippet: effectiveSuccess,
+        evidence: `OpenCart 评论提交已收到站方成功回执 (${effectiveSuccess})`,
+        submitTriggered: true,
+      }
+    }
+  }
+
   const redirectedLocationWithCommentId = capturedResponses
     .map(c => c.headers.location ?? c.headers.Location ?? '')
     .find(loc => /#comment-\d+\b/iu.test(loc))
+  const redirectedModerationUrl = capturedResponses
+    .flatMap(c => [c.url, c.headers.location ?? c.headers.Location ?? ''])
+    .find(u => hasWpModerationUrlParams(u))
   const assignedCommentUrl = /#comment-\d+\b/iu.test(postSubmitUrl)
     ? postSubmitUrl
     : redirectedLocationWithCommentId
@@ -4449,13 +5487,15 @@ async function submitAndVerifyStandardForm(
     ? (assignedCommentUrl ? stripWpModerationParams(assignedCommentUrl) : command.url)
     : stripWpModerationParams(postSubmitUrl)
 
-  const sawModeration = Boolean(
-    postVerify.moderationNotice || /[?&](?:unapproved|moderation-hash)=/iu.test(postSubmitUrl),
-  )
+  const hasModerationUrlParam = hasWpModerationUrlParams(postSubmitUrl) || Boolean(redirectedModerationUrl)
+  const sawModeration = Boolean(postVerify.moderationNotice || hasModerationUrlParam)
 
-  // Definitive moderation signal right after submit -> immediately return `submitted` keeping `#comment-ID` URL.
+  // Definitive moderation signal right after submit (multilingual text OR `unapproved=` / `moderation-hash=` redirect param) -> immediately return `submitted`.
   if (sawModeration) {
     const modTitle = await page.title().catch(() => inspection.title)
+    const modReason = postVerify.moderationNotice
+      ? undefined
+      : 'wp_unapproved_redirect'
     return {
       kind: 'comment_publish',
       page: ref,
@@ -4464,9 +5504,10 @@ async function submitAndVerifyStandardForm(
       title: modTitle,
       finalUrl: cleanPublicUrl,
       publicUrl: cleanPublicUrl,
+      ...(modReason === undefined ? {} : { reason: modReason }),
       postSubmitUrl,
       ...(postSubmitSnippet === undefined ? {} : { postSubmitSnippet }),
-      evidence: `${siteLabel} 评论已提交等待审核 (${postVerify.moderationNotice ?? 'unapproved'})`,
+      evidence: `${siteLabel} 评论已提交等待审核 (${postVerify.moderationNotice ?? 'unapproved/moderation-hash redirect'})`,
       submitTriggered: true,
     }
   }
@@ -4564,17 +5605,19 @@ async function submitAndVerifyStandardForm(
     }
   }
 
-  if (finalVerify.moderationNotice) {
+  if (finalVerify.moderationNotice || hasWpModerationUrlParams(finalUrl)) {
+    const cleanFinalUrl = stripWpModerationParams(finalUrl)
     return {
       kind: 'comment_publish',
       page: ref,
       outcome: 'submitted',
       siteType,
       title: finalTitle,
-      finalUrl,
-      publicUrl: finalUrl,
+      finalUrl: cleanFinalUrl,
+      publicUrl: cleanFinalUrl,
+      ...(finalVerify.moderationNotice ? {} : { reason: 'wp_unapproved_redirect' }),
       postSubmitUrl,
-      evidence: `${siteLabel} 评论已提交等待审核 (${finalVerify.moderationNotice})`,
+      evidence: `${siteLabel} 评论已提交等待审核 (${finalVerify.moderationNotice ?? 'unapproved/moderation-hash redirect'})`,
       submitTriggered: true,
     }
   }
@@ -4640,6 +5683,7 @@ async function executeBloggerCommentIframe(
   command: BrowserCommentPublishCommand,
   options: {
     readonly timeoutMs: number
+    readonly deadlineAt?: number
     readonly verifyReload: boolean
     readonly probeOnly: boolean
     readonly sleep: SleepLike
@@ -4731,11 +5775,13 @@ async function executeBloggerCommentIframe(
   }
 
   // Select Name/URL identity if available and authorName/websiteUrl provided.
+  const stepTimeout = (capMs = DEFAULT_COMMENT_STEP_TIMEOUT_MS): number =>
+    resolveStepTimeoutMs(options.timeoutMs, options.deadlineAt, capMs)
   let activeDetail = detail
   if (detail.identitySelectSelector && detail.supportsNameUrlIdentity && (command.authorName || command.websiteUrl)) {
     const idLocator = bloggerFrame.locator(detail.identitySelectSelector).first()
     if (typeof idLocator.selectOption === 'function') {
-      await idLocator.selectOption('NAMEURL', { timeout: options.timeoutMs }).catch(() => undefined)
+      await idLocator.selectOption('NAMEURL', { timeout: stepTimeout() }).catch(() => undefined)
       const refreshed = await bloggerFrame.evaluate<BloggerFrameInspection>(INSPECT_BLOGGER_FRAME_SCRIPT).catch(() => null)
       if (refreshed) activeDetail = refreshed
     }
@@ -4749,19 +5795,19 @@ async function executeBloggerCommentIframe(
       ? `${stripped.plainText} ${stripped.websiteUrl}`.trim()
       : stripped.plainText
     if (typeof commentLocator.click === 'function') {
-      await commentLocator.click({ timeout: options.timeoutMs }).catch(() => undefined)
+      await commentLocator.click({ timeout: stepTimeout() }).catch(() => undefined)
     }
-    await commentLocator.fill(bodyText, { timeout: options.timeoutMs })
+    await commentLocator.fill(bodyText, { timeout: stepTimeout() })
   } else {
     const body = buildWpCommentContent(command.commentText, command.websiteUrl, command.anchorText, hasAnonUrl)
-    await commentLocator.fill(body, { timeout: options.timeoutMs })
+    await commentLocator.fill(body, { timeout: stepTimeout() })
   }
 
   if (activeDetail.anonNameSelector && command.authorName?.trim()) {
-    await bloggerFrame.locator(activeDetail.anonNameSelector).first().fill(command.authorName.trim(), { timeout: options.timeoutMs })
+    await bloggerFrame.locator(activeDetail.anonNameSelector).first().fill(command.authorName.trim(), { timeout: stepTimeout() })
   }
   if (activeDetail.anonUrlSelector && command.websiteUrl?.trim()) {
-    await bloggerFrame.locator(activeDetail.anonUrlSelector).first().fill(command.websiteUrl.trim(), { timeout: options.timeoutMs })
+    await bloggerFrame.locator(activeDetail.anonUrlSelector).first().fill(command.websiteUrl.trim(), { timeout: stepTimeout() })
   }
 
   // Re-inspect Blogger iframe after filling so dynamically enabled/rendered `role="button"` Publish controls are picked up.
@@ -4780,7 +5826,7 @@ async function executeBloggerCommentIframe(
   }
 
   const bloggerSubmitLocator = bloggerFrame.locator(activeDetail.submitSelector).first()
-  if (await isLocatorDisabled(bloggerSubmitLocator)) {
+  if (await isLocatorDisabled(bloggerSubmitLocator, stepTimeout())) {
     return buildFallbackResult(
       ref,
       'blogger',
@@ -4790,7 +5836,7 @@ async function executeBloggerCommentIframe(
     )
   }
 
-  await bloggerSubmitLocator.click({ timeout: options.timeoutMs })
+  await bloggerSubmitLocator.click({ timeout: stepTimeout() })
   await options.sleep(Math.min(1_500, options.timeoutMs), options.signal)
 
   const postFrame = await bloggerFrame.evaluate<BloggerFrameInspection>(INSPECT_BLOGGER_FRAME_SCRIPT).catch(() => null)
@@ -4892,6 +5938,10 @@ export async function executeCommentPublish(
   options: ExecuteCommentPublishOptions,
 ): Promise<BrowserCommentPublishResult> {
   const timeoutMs = command.timeoutMs ?? options.defaultTimeoutMs
+  const deadlineMs = command.deadlineMs ?? options.deadlineMs
+  const deadlineAt = deadlineMs !== undefined && deadlineMs > 0 ? Date.now() + deadlineMs : undefined
+  const stepTimeout = (capMs = DEFAULT_COMMENT_STEP_TIMEOUT_MS): number =>
+    resolveStepTimeoutMs(timeoutMs, deadlineAt, capMs)
   const isWixHint = command.siteHint === 'wix_blog' || /\.wixsite\.com\b/iu.test(command.url)
   const navTimeoutMs = isWixHint
     ? Math.max(timeoutMs, DEFAULT_WIX_NAV_TIMEOUT_MS)
@@ -4977,6 +6027,15 @@ export async function executeCommentPublish(
     let inspection = await safeInspectCommentPageWithFrames(page, inspectOpts)
     let completedFullLazyWait = false
 
+    // WooCommerce product pages hide `#commentform` inside `#tab-title-reviews` — click to expand immediately before WordPress detection/lazy-wait.
+    if (!inspection.wordpress.found && inspection.wordpress.reviewsTabSelector) {
+      await dismissBlockingOverlays(page, stepTimeout())
+      const reviewsTab = await resolveFirstVisibleLocator(page, inspection.wordpress.reviewsTabSelector)
+      await reviewsTab.click({ timeout: stepTimeout() }).catch(() => undefined)
+      await sleep(Math.min(350, stepTimeout()), options.signal)
+      inspection = await safeInspectCommentPageWithFrames(page, inspectOpts)
+    }
+
     // Progressive multi-step scroll + explicit bottom/End scroll (chasing dynamic scrollHeight growth) + up to 20s Wix lazy-load polling (immediate early exit once actionable).
     if (!hasActionableCommentSurface(inspection)) {
       let activeWaitMaxMs = (inspection.isWix || isWixHint) ? wixLazyWaitMaxMs : baseLazyWaitMaxMs
@@ -5019,12 +6078,19 @@ export async function executeCommentPublish(
       completedFullLazyWait = !exitedEarly && maxPolls > 0
     }
 
-    // Expand collapsed WordPress comment form (e.g. SmartMag `a.ts-button`, `ADD A COMMENT`).
+    // Expand WooCommerce reviews tab or collapsed WordPress comment form (e.g. SmartMag `a.ts-button`, `ADD A COMMENT`).
+    if (!inspection.wordpress.found && inspection.wordpress.reviewsTabSelector) {
+      await dismissBlockingOverlays(page, stepTimeout())
+      const reviewsTab = await resolveFirstVisibleLocator(page, inspection.wordpress.reviewsTabSelector)
+      await reviewsTab.click({ timeout: stepTimeout() }).catch(() => undefined)
+      await sleep(Math.min(350, stepTimeout()), options.signal)
+      inspection = await safeInspectCommentPageWithFrames(page, inspectOpts)
+    }
     if (!inspection.wordpress.found && inspection.wordpress.collapsedTriggerSelector) {
-      await dismissBlockingOverlays(page, timeoutMs)
+      await dismissBlockingOverlays(page, stepTimeout())
       const collapsedTrigger = await resolveFirstVisibleLocator(page, inspection.wordpress.collapsedTriggerSelector)
-      await collapsedTrigger.click({ timeout: timeoutMs }).catch(() => undefined)
-      await sleep(Math.min(400, timeoutMs), options.signal)
+      await collapsedTrigger.click({ timeout: stepTimeout() }).catch(() => undefined)
+      await sleep(Math.min(400, stepTimeout()), options.signal)
       inspection = await safeInspectCommentPageWithFrames(page, inspectOpts)
     }
 
@@ -5040,6 +6106,7 @@ export async function executeCommentPublish(
         command,
         {
           timeoutMs,
+          ...(deadlineAt === undefined ? {} : { deadlineAt }),
           verifyReload,
           probeOnly,
           sleep,
@@ -5048,19 +6115,23 @@ export async function executeCommentPublish(
       )
     }
 
-    // 1b. Valine, Typecho (author/mail/url/text) & custom blog comment forms (name/email/website/body).
+    // 1b. Valine, Typecho (author/mail/url/text), OpenCart (`#button-comment`/`#form-review`) & custom blog comment forms.
     if (inspection.genericComment?.found) {
       const gc = inspection.genericComment
       const siteType: CommentPublishSiteType = gc.kind === 'valine'
         ? 'valine'
         : gc.kind === 'typecho'
           ? 'typecho'
-          : 'other'
+          : gc.kind === 'opencart'
+            ? 'opencart'
+            : 'other'
       const label = gc.kind === 'valine'
         ? 'Valine'
         : gc.kind === 'typecho'
           ? 'Typecho'
-          : '博客评论'
+          : gc.kind === 'opencart'
+            ? 'OpenCart'
+            : '博客评论'
       return await submitAndVerifyStandardForm(
         page,
         ref,
@@ -5071,6 +6142,7 @@ export async function executeCommentPublish(
         command,
         {
           timeoutMs,
+          ...(deadlineAt === undefined ? {} : { deadlineAt }),
           verifyReload,
           probeOnly,
           sleep,
@@ -5088,6 +6160,7 @@ export async function executeCommentPublish(
         command,
         {
           timeoutMs,
+          ...(deadlineAt === undefined ? {} : { deadlineAt }),
           verifyReload,
           probeOnly,
           sleep,
@@ -5190,7 +6263,7 @@ export async function executeCommentPublish(
           if (typeof scrollableTrigger.scrollIntoViewIfNeeded === 'function') {
             await scrollableTrigger.scrollIntoViewIfNeeded({ timeout: Math.min(3_000, timeoutMs) }).catch(() => undefined)
           }
-          await triggerLocator.click({ timeout: timeoutMs })
+          await triggerLocator.click({ timeout: stepTimeout() })
         } catch (error) {
           clickError = error
         }
@@ -5381,38 +6454,15 @@ export async function executeCommentPublish(
     const hasWebsiteField = wix.websiteSelector !== undefined
     if (wix.editorIsContentEditable) {
       const stripped = stripHtmlLinkForRichEditor(command.commentText, command.anchorText, command.websiteUrl)
-      await dismissBlockingOverlays(page, timeoutMs)
+      await dismissBlockingOverlays(page, stepTimeout())
       const editorLocator = await resolveFirstVisibleLocator(page, editorSelector)
 
       if (stripped.websiteUrl && !hasWebsiteField && wix.linkButtonSelector) {
-        await editorLocator.click({ timeout: timeoutMs })
-        await editorLocator.fill(stripped.plainText, { timeout: timeoutMs })
+        await editorLocator.click({ timeout: stepTimeout() })
+        await editorLocator.fill(stripped.plainText, { timeout: stepTimeout() })
 
         const anchorToSelect = stripped.anchorText ?? stripped.websiteUrl
-        const selectedOk = await page.evaluate(({ selector, anchor }) => {
-          const dom = globalThis as unknown as BrowserDomGlobalLike
-          const el = dom.document.querySelector(selector)
-          if (!el) return false
-          const walker = dom.document.createTreeWalker(el, dom.NodeFilter?.SHOW_TEXT ?? 4)
-          let node = walker.nextNode()
-          while (node) {
-            const text = node.textContent ?? ''
-            const idx = text.toLowerCase().indexOf(anchor.toLowerCase())
-            if (idx >= 0) {
-              const range = dom.document.createRange()
-              range.setStart(node, idx)
-              range.setEnd(node, idx + anchor.length)
-              const sel = dom.window.getSelection?.()
-              if (sel) {
-                sel.removeAllRanges()
-                sel.addRange(range)
-              }
-              return true
-            }
-            node = walker.nextNode()
-          }
-          return false
-        }, { selector: editorSelector, anchor: anchorToSelect })
+        const selectedOk = await selectTextInRichEditor(page, editorSelector, anchorToSelect)
 
         if (!selectedOk) {
           return buildFallbackResult(
@@ -5423,10 +6473,9 @@ export async function executeCommentPublish(
           )
         }
 
-        await page.locator(wix.linkButtonSelector).first().click({ timeout: timeoutMs })
-        const urlInputSelector = 'input[type="url"], input[placeholder*="http" i], input[placeholder*="url" i], input[placeholder*="link" i], input[aria-label*="url" i], input[aria-label*="link" i]'
-        const urlInputCount = await page.locator(urlInputSelector).count().catch(() => 0)
-        if (urlInputCount <= 0) {
+        await page.locator(wix.linkButtonSelector).first().click({ timeout: stepTimeout() })
+        const applied = await applyWixLinkPopover(page, stripped.websiteUrl, stepTimeout(), wix.submitSelector)
+        if (!applied) {
           return buildFallbackResult(
             ref,
             'wix',
@@ -5434,57 +6483,98 @@ export async function executeCommentPublish(
             '点击 Wix 链接按钮后未检测到链接 URL 输入框，转交 LLM 处理（未触发提交）',
           )
         }
-        const urlInput = page.locator(urlInputSelector).first()
-        await urlInput.fill(stripped.websiteUrl, { timeout: timeoutMs })
-        const applyBtnSelector = '[data-hook*="save" i], [data-hook*="apply" i], button[aria-label*="save" i], button[aria-label*="apply" i]'
-        const applyCount = await page.locator(applyBtnSelector).count().catch(() => 0)
-        if (applyCount > 0) {
-          await page.locator(applyBtnSelector).first().click({ timeout: timeoutMs })
-        } else {
-          await urlInput.press('Enter', { timeout: timeoutMs })
-        }
       } else if (stripped.websiteUrl && !hasWebsiteField) {
-        // Wix Ricos/Tiptap without toolbar link button: fill text + URL, send Space to trigger autolink,
-        // and confirm `<a href>` appeared in the editor before clicking Publish.
+        // Wix Ricos/Tiptap without upfront toolbar link button: first try URL + Space autolink,
+        // and if no `<a href>` is created, fall back to Wix RCE toolbar Link button / Ctrl+K shortcut insertion.
         const textWithUrl = stripped.plainText.toLowerCase().includes(stripped.websiteUrl.toLowerCase())
           ? stripped.plainText
           : `${stripped.plainText} ${stripped.websiteUrl}`.trim()
-        await editorLocator.click({ timeout: timeoutMs })
-        await editorLocator.fill(textWithUrl, { timeout: timeoutMs })
+        await editorLocator.click({ timeout: stepTimeout() })
+        await editorLocator.fill(textWithUrl, { timeout: stepTimeout() })
         if (typeof editorLocator.press === 'function') {
-          await editorLocator.press('Space', { timeout: timeoutMs }).catch(() => undefined)
+          await editorLocator.press('Space', { timeout: stepTimeout() }).catch(() => undefined)
         } else if (typeof page.keyboard?.press === 'function') {
           await page.keyboard.press('Space').catch(() => undefined)
         }
-        await sleep(Math.min(250, timeoutMs), options.signal)
+        await sleep(Math.min(250, stepTimeout()), options.signal)
 
-        const autoLinked = await checkRichEditorHasLink(page, editorSelector, stripped.websiteUrl)
-        if (!autoLinked) {
+        let linked = await checkRichEditorHasLink(page, editorSelector, stripped.websiteUrl)
+        if (!linked) {
+          // RCE toolbar / shortcut link insertion fallback:
+          // Prefer clean anchor text if present in plainText; otherwise select the URL text in the editor.
+          const hasAnchorInPlain = Boolean(
+            stripped.anchorText
+            && stripped.plainText.toLowerCase().includes(stripped.anchorText.toLowerCase()),
+          )
+          let anchorToSelect = stripped.websiteUrl
+          if (hasAnchorInPlain && stripped.anchorText) {
+            await editorLocator.fill(stripped.plainText, { timeout: stepTimeout() })
+            anchorToSelect = stripped.anchorText
+          }
+          const selectedForToolbar = await selectTextInRichEditor(page, editorSelector, anchorToSelect)
+          if (selectedForToolbar) {
+            await sleep(Math.min(150, stepTimeout()), options.signal)
+            const toolbarProbe = await page
+              .evaluate<{ readonly found: boolean; readonly selector?: string }>(FIND_WIX_RCE_TOOLBAR_LINK_SCRIPT)
+              .catch(() => ({ found: false as const, selector: undefined }))
+            let popoverOpened = false
+            if (toolbarProbe.found && toolbarProbe.selector) {
+              const linkBtnLoc = await resolveFirstVisibleLocator(page, toolbarProbe.selector)
+              await linkBtnLoc.click({ timeout: stepTimeout() }).catch(() => undefined)
+              await sleep(Math.min(150, stepTimeout()), options.signal)
+              popoverOpened = (await page.locator(WIX_LINK_URL_INPUT_SELECTOR).count().catch(() => 0)) > 0
+            }
+            if (!popoverOpened) {
+              for (const shortcut of ['Control+k', 'Meta+k'] as const) {
+                if (typeof editorLocator.press === 'function') {
+                  await editorLocator.press(shortcut, { timeout: stepTimeout() }).catch(() => undefined)
+                } else if (typeof page.keyboard?.press === 'function') {
+                  await page.keyboard.press(shortcut).catch(() => undefined)
+                }
+                await sleep(Math.min(150, stepTimeout()), options.signal)
+                if ((await page.locator(WIX_LINK_URL_INPUT_SELECTOR).count().catch(() => 0)) > 0) {
+                  popoverOpened = true
+                  break
+                }
+              }
+            }
+            if (popoverOpened) {
+              const applied = await applyWixLinkPopover(page, stripped.websiteUrl, stepTimeout(), wix.submitSelector)
+              if (applied) {
+                await sleep(Math.min(200, stepTimeout()), options.signal)
+                linked = await checkRichEditorHasLink(page, editorSelector, stripped.websiteUrl)
+              }
+            }
+          }
+        }
+        if (!linked) {
           return buildFallbackResult(
             ref,
             'wix',
             inspection,
-            'Wix 富文本评论框输入目标 URL 并补发 Space 后未确认 <a href> 自动转超链（避免发布无链评论，未触发提交）',
+            'Wix 富文本评论框输入目标 URL 并补发 Space 及尝试 RCE 工具栏插链后仍未确认 <a href> 超链（避免发布无链评论，未触发提交）',
+            'wix_rce_no_autolink',
+            'wix:rce_no_autolink',
           )
         }
       } else {
-        await editorLocator.click({ timeout: timeoutMs })
-        await editorLocator.fill(stripped.plainText, { timeout: timeoutMs })
+        await editorLocator.click({ timeout: stepTimeout() })
+        await editorLocator.fill(stripped.plainText, { timeout: stepTimeout() })
       }
     } else {
       const body = buildWpCommentContent(command.commentText, command.websiteUrl, command.anchorText, hasWebsiteField)
       const editorLocator = await resolveFirstVisibleLocator(page, editorSelector)
-      await editorLocator.fill(body, { timeout: timeoutMs })
+      await editorLocator.fill(body, { timeout: stepTimeout() })
     }
 
     if (wix.nameSelector && command.authorName?.trim()) {
-      await page.locator(wix.nameSelector).first().fill(command.authorName.trim(), { timeout: timeoutMs })
+      await page.locator(wix.nameSelector).first().fill(command.authorName.trim(), { timeout: stepTimeout() })
     }
     if (wix.emailSelector && command.authorEmail?.trim()) {
-      await page.locator(wix.emailSelector).first().fill(command.authorEmail.trim(), { timeout: timeoutMs })
+      await page.locator(wix.emailSelector).first().fill(command.authorEmail.trim(), { timeout: stepTimeout() })
     }
     if (wix.websiteSelector && command.websiteUrl?.trim()) {
-      await page.locator(wix.websiteSelector).first().fill(command.websiteUrl.trim(), { timeout: timeoutMs })
+      await page.locator(wix.websiteSelector).first().fill(command.websiteUrl.trim(), { timeout: stepTimeout() })
     }
 
     if (!wix.submitSelector) {
@@ -5496,11 +6586,11 @@ export async function executeCommentPublish(
       )
     }
 
-    await dismissBlockingOverlays(page, timeoutMs)
+    await dismissBlockingOverlays(page, stepTimeout())
 
     // Guard against disabled submit buttons (e.g. migrated React comment boxes requiring login without login UI).
     const wixSubmitLocator = await resolveFirstVisibleLocator(page, wix.submitSelector)
-    if (await isLocatorDisabled(wixSubmitLocator)) {
+    if (await isLocatorDisabled(wixSubmitLocator, stepTimeout())) {
       const loginProbe = await inspectDisabledSubmitLoginPrompt(page)
       if (loginProbe.hasLoginPrompt) {
         if (inspection.wix.signupRecaptchaAlways) {
@@ -5528,7 +6618,7 @@ export async function executeCommentPublish(
     }
 
     // Point of no return: click Publish, then wait 2-3s inspecting role=dialog before reloading.
-    await wixSubmitLocator.click({ timeout: timeoutMs })
+    await wixSubmitLocator.click({ timeout: stepTimeout() })
 
     const postSubmitDeadline = Date.now() + wixPostSubmitWaitMs
     const postSubmitMaxPolls = wixPostSubmitWaitMs > 0
