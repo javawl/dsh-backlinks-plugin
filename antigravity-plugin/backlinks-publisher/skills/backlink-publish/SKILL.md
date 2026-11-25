@@ -10,33 +10,54 @@ description: 本工作区所有"发外链/发布外链/发布批次/跑批次/�
 1. **幂等**：一个条目只允许一次"最终提交"动作，一个来源对一个网站只发一次——发布前先验证发布记录和状态（见单条目循环第 1 步），已提交/已上线的条目自己跳过，绝不重复发布。提交后拿不到明确回执（结果未知 / `uncertain_after_submit`）时，回写 `failed + manual_required`，**绝不自动重试**。
 2. **诚实回写**：`live` 必须是你亲自抓取公开页面并确认包含可点击目标链接后的结论；"提交成功但待审核"只能回写 `submitted`。
 
-## 一页式高效执行速查卡（v2.2.1 快路径 · 常规站点禁止 `read_file` 翻参考文档）
+## 一页式高效执行速查卡（v2.3 快路径 · 启动严禁 `ls` 扫目录或全量 `read_file`）
 
-> **零 `read_file` 原则**：本速查卡与下方主流程已覆盖全部常规目录、博客、表单规则；**常规站点无需调用 `read_file` 翻阅 `references/*` 多个参考手册**，仅在遇到异常登录态或特殊模板问题时按需查阅。
+> **零启动冗余原则**：本速查卡与下方主流程已覆盖全部常规目录、博客、表单规则与参数。**启动时禁止反复 `ls` 目录，也禁止 `read_file` 庞大的 schema JSON 或 `references/*` 参考手册**，直接按下方极简参数表调用工具；仅在遇到异常登录态或特殊模板问题时按需查阅参考文档。
 
-1. **前置预检（1 次）**：`backlinks action="batch_preflight"`（`batchId`、`autoSkip: true`、`autoSkipTagged: true`、`autoFailWaf: true`）。
-   - HTML 嗅探全读 ≤128KB 或首 32KB + 尾 64KB；识别 `/go/` 外跳（输出 `rootSubmitHint`）与 ≥3 条同路径前缀/中段 slug 词元超时聚类（`timeoutClusters`，自动合并 `/nano-banana-pro-*` 与 `/how-nano-banana-pro-*` 等同类超时站）。
-   - 默认自动排除已带 `waf_403` 的条目（进 `heldForManual` / `skippedByTag.softItemIds`），`autoFailWaf: true` 直接标新老 `waf_403` 为 `failed(manual_required)`。
-   - 拿到存活清单 `runnableItems: [{ itemId, domain, siteHint, rootSubmitHint? }]`（`wordpress_comment` / `typecho_comment` / `wix_blog` / `comments_closed_hint` / `directory_or_form` / `other`）。
-2. **读取批次（仅 1 次）**：`batch_list` 支持 `websiteId` 精准过滤；`batch_get`（`compact: true`, `pendingOnly: true`）一次拿齐 `website` 6 字段、`anchors` 与 `publishedSourceIds`。
-3. **分片认领**：仅从 `runnableItemIds` 挑 **5–6 条** `batch_claim`（同域 `sourceHost` 串行；单会话 10–12 条 / 2 片）。
+### 极简参数速查
+
+| 工具动作 | 核心参数 |
+| --- | --- |
+| `backlinks batch_list` | `onlyPending: true`, `compact: true`, `websiteId?`, `limit: 20` |
+| `backlinks batch_preflight` | `batchId`, `autoSkip: true`, `autoSkipTagged: true`, `autoSkipToxic: true`（默认开启）, `autoFailWaf: true` |
+| `backlinks batch_get` | `batchId`, `compact: true`, `pendingOnly: true` |
+| `backlinks batch_claim` | `batchId`, `itemIds: [...]`（5–6 条存活 ID） |
+| `backlinks item_result` | `itemId`, `status` (`live`/`submitted`/`failed`/`skipped`), `publicUrl?`, `anchorText?`, `targetUrl?`, `failureMode?`, `failureReason?`, `skipReason?`, `templateSignature?`, `evidence` |
+| `backlinks source_tags` | `sourceId`, `tags: [...]` |
+| `browser comment_publish` | `url`, `commentText`, `authorName?`, `authorEmail?`, `websiteUrl?`, `anchorText?`, `siteHint?`, `autoGoogleSso?: true`, `verifyReload?: true`, `page?` |
+| `browser directory_autofill` | `url?`, `websiteUrl`, `name?`, `tagline?`, `description?`, `email?`, `page?` |
+| `browser batch_fill` | `fields: [{ target, op?, value?, nth? }]`, `submitTarget?`, `submitNth?`, `page?` |
+
+1. **前置预检（1 次）**：`backlinks action="batch_preflight"`（`batchId`、`autoSkip: true`、`autoSkipTagged: true`、`autoSkipToxic: true`、`autoFailWaf: true`）。
+   - **毒性外链前置拦截（`autoSkipToxic: true` 默认开启）**：基于域名、URL 路径与页面 `<title>` 精准拦截成人/赌博高危站（严格单词边界，不误伤 `vue slot` / `essex`），统计在 `toxicBlocked` 并自动 `skipped(toxic_site: ...)` + 容错打标 `low_quality`。
+   - HTML 嗅探全读 ≤128KB 或首 32KB + 尾 64KB；识别 `/go/` 外跳（`rootSubmitHint`）、HTTP 507 死站、`wixSignupRecaptchaAlways` 与同路径前缀/中段 slug 词元超时聚类（`timeoutClusters`）。
+   - 默认隔离已带 `waf_403` 条目（`heldForManual`），`autoFailWaf: true` 自动标新老 `waf_403` 为 `failed(manual_required)`。
+   - 拿到存活清单 `runnableItems: [{ itemId, domain, siteHint, rootSubmitHint?, wixSignupRecaptchaAlways? }]`。
+2. **读取批次（仅 1 次）与低存活多批接力**：`batch_list` 支持 `websiteId` 过滤；`batch_get`（`compact: true`, `pendingOnly: true`）一次拿齐 `website` 6 字段、`anchors` 与 `publishedSourceIds`。
+   - **低 `runnable <= 5` 多批接力规则**：若当前批次预检后 `runnable <= 5`，跑完这几条并 `lease_release` 后，可在同一会话（10–12 条预算内）直接接力预检并认领下一个待发批次，避免只发 1–3 条就结束会话。
+3. **分片认领**：仅从 `runnableItemIds` 挑 **5–6 条** `batch_claim`（同域 `sourceHost` 串行；单会话 10–12 条 / 2 片，允许低存活小批接力）。
 4. **博客与目录确定性快路径（`comment_publish` / `directory_autofill`）**：
-   - 博客评论（`wordpress_comment` / `typecho_comment` / `wix_blog` / `comments_closed_hint` / Blogger / 自定义博客）：**直接调用 `browser action="comment_publish"`**（`url`、`commentText`、`authorName`、`authorEmail`、`websiteUrl`、`anchorText`、可选 `siteHint` / `page`）。内置 Wix 14–15s 渐进早退懒加载（`siteHint: "wix_blog"` 首次导航放宽至 15s）、已登录 `comment-box-rce-wrapper` 优先填发、关评空占位安全直判 `no_form`、disabled 按钮降级、泰语 `'รับทราบ'` 审核弹窗识别关闭；WP 302 自恢复、Jetpack Verbum 访客流自动展开、POST 403/WAF 直判 `blocked_waf`；Typecho 与 Blogger `#comment-editor` `role="button"` Publish 支持。
+   - 博客评论（`wordpress_comment` / `typecho_comment` / `wix_blog` / `comments_closed_hint` / Valine / Blogger / 自定义博客）：**直接调用 `browser action="comment_publish"`**。
+     - **非 Wix `commit` 导航 + 轻量资源拦截**：非 Wix 站改为 `waitUntil: 'commit'`（默认 15s，尊重更高 `timeoutMs`）并拦截 `image`/`media`/`font`/广告统计域（严禁拦截 `document`/`stylesheet`/`xhr`/`fetch` 与 Wix/OAuth/CAPTCHA 域，`finally` 自动解除）。首探遇 `Execution context was destroyed` 自动等 2000ms 重试 1 次。
+     - **WordPress 新 `#comment-ID` 判定与 `wp_die` 403 区分**：提交前采集页面最大 `#comment-ID`，提交后若分配全新更大 `#comment-<newId>` 且无报错（即便受全页缓存或审核队列影响），返回 `submitted`（`wp_new_comment_id_assigned`，保留 `#comment-<newId>` 链接），并扩展英/法/西/德/意/葡/土/俄/日/中/波斯/泰语待审词库与轻量 cache-bust 复检。若 HTTP 403 为 `wp_die` 表单校验（如缺评分），返回 `needs_llm_fallback`（`wp_die_validation_error`）而非 `blocked_waf`。
+     - **Wix 一键 Google SSO（`autoGoogleSso: true` 默认开启）**：无 CAPTCHA / `signupRecaptchaOption=ALWAYS` 的 Wix `needs_login` 自动点击登录 → 复检 CAPTCHA → 点多语言 Google SSO → 自动接管账号选择/授权同意弹窗 → 登录成功后自动填评发布与重载核验。遇 `"Looks like there was a technical issue"` 立即返回 `manual_required`（`templateSignature: "wix:google_sso_technical_issue"`，快速熔断严禁重试）。
+     - **Valine 与多语言提交按钮**：支持 Valine（`input.vnick`/`vmail`/`vlink`、`textarea.veditor`、`button.vsubmit`，捕获 LeanCloud `POST .../classes/Comment` 201 或重载 `.first()` 核验 `a.vnick`）及土/西/法/德/意/葡/俄/日/中提交按钮（如 `GÖNDER`）。
    - 返回 `outcome` 映射：
      - `live` → `item_result(live, publicUrl)`
-     - `submitted` → `item_result(submitted, publicUrl)`（含多语种/泰语待审与 `post_submit_comment_id_cached`）
+     - `submitted` → `item_result(submitted, publicUrl)`（含 `wp_new_comment_id_assigned`、`post_submit_comment_id_cached` 与多语种待审）
      - `comments_closed` → `item_result(skipped, skipReason)` + `source_tags(["评论关闭"])`
      - `no_form` → `item_result(skipped, skipReason)` + `source_tags(["no_form"])`
      - `blocked_captcha` → `bringToFront`，`item_result(failed, manual_required, templateSignature)` + `source_tags(["has_captcha"])`（绝不绕过验证码）
      - `blocked_waf` → `item_result(failed, manual_required, templateSignature)` + `source_tags(["waf_403"])`（提交被 HTTP 403/406/429 WAF 拦截，绝不重试提交）
-     - `needs_login` → Wix/Blogger 会员墙（未盲点 Publish）；按 `loginInfo` + `snapshot format="interactive"` 走 Google SSO 或邮箱注册
+     - `manual_required` → `item_result(failed, manual_required, templateSignature)`（如 `wix:google_sso_technical_issue` 快速熔断，严禁重试）
+     - `needs_login` → Wix/Blogger 会员墙（未自动登录或遇密码/MFA）；按 `loginInfo` + `snapshot format="interactive"` 处理
      - `uncertain_after_submit` → **`item_result(failed, manual_required)`（严守幂等，绝不重发；查看 `reason`/`postSubmitUrl`/`postSubmitSnippet`）**
-     - `needs_llm_fallback` → 页面已打开且附 `formSummary` + `bottomSnapshot`（留意 `reason` 如 `submit_button_disabled`），直接接着操作勿重复 `navigate`！
-   - 目录站（MkDirs / AI-Autofill 提交页）：先调 **`browser action="directory_autofill"`**（`url`、`websiteUrl`、`name`、`tagline`、`description`、`email`）自动抓取并补齐缺失字段，再补齐剩余必填项用 `batch_fill` 提交。
-5. **非博客/弹窗/回退站点**：
-   - `snapshot` 默认**紧凑模式（4,500 字符）**：`>15` 项 `<select>` 自动折叠为前 3 + `... (共 N 项)` + 末 2，状态/成功/错误文案豁免裁剪，`interactive` 补齐 `input[type=url]`，`[forms]` 区分 `#id` 与 `[name=]`；按需传 `full: true`。
-   - `batch_fill` 传 `submitTarget` 自动返回 `submitFeedback`（原生 `alert` 弹窗、XHR/fetch 响应摘要、新出现 toast/modal）。
-   - OAuth 弹窗（`window.open`）：`click` 返回 `popupPageRef` / `openedPages`，`listPages` 列出所有页签与弹窗；关闭弹窗不影响原页签，关最后页签自动保留 `about:blank`。`navigate` 默认 `domcontentloaded` 就绪。人工登录用 `wait_for_login`。
+     - `needs_llm_fallback` → 页面已打开且附 `formSummary` + `bottomSnapshot`（留意 `reason` 如 `wp_die_validation_error` / `submit_button_disabled`），直接接着操作勿重复 `navigate`！
+   - 目录站（MkDirs / AI-Autofill 提交页）：先调 **`browser action="directory_autofill"`**（自动过滤 `:visible` 元素，避开隐藏弹窗与验证码隐藏域）。
+5. **非博客/`:visible` 安全/弹窗/回退站点**：
+   - `batch_fill` 默认跳过不可见元素与 `g-recaptcha-response`/`h-captcha-response`，传 `submitTarget` 自动返回 `submitFeedback`。
+   - `snapshot` 默认**紧凑模式（4,500 字符）**：`>15` 项 `<select>` 自动折叠，状态/成功/错误文案豁免裁剪，`interactive` 补齐 `input[type=url]`；按需传 `full: true`。
+   - OAuth 弹窗（`window.open`）：`click` 返回 `popupPageRef` / `openedPages`，`listPages` 列出所有页签与弹窗；关闭弹窗不影响原页签。人工登录用 `wait_for_login`。
 6. **回写与打标**：调用 `item_result` + `source_tags`（自动映射 `comments_closed` → `评论关闭` 且 5xx 非致命降级）。每 1–2 条 `lease_heartbeat`，片尾 `lease_release`。
 
 ## 工具纪律与降 Token 规范（适用于所有 Antigravity 客户端）

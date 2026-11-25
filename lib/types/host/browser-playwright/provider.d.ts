@@ -33,6 +33,13 @@ export interface ResolvedPlaywrightConfig {
     readonly windowPosition: string | undefined;
     readonly executablePath?: string;
 }
+/**
+ * Resolve a visible, non-CAPTCHA-response locator when `nth` is omitted so hidden
+ * modals and hidden `textarea[name="g-recaptcha-response"]` fields never trigger
+ * strict-mode conflicts while preserving exact unique visible selectors and
+ * multi-visible strict-mode diagnostics.
+ */
+export declare function resolvePreferredVisibleLocator(locator: Locator, nth: number | undefined): Promise<Locator>;
 export declare function inspectStrictModeCandidates(locator: Locator, timeoutMs?: number): Promise<StrictModeInspection | undefined>;
 export declare function enrichStrictModeError(commandKind: BrowserCommand['kind'], locator: Locator, error: unknown, timeoutMs?: number): Promise<BrowserError | undefined>;
 export declare class PlaywrightSession implements BrowserSession {

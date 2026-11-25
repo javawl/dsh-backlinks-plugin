@@ -10,6 +10,24 @@ export declare const PREFLIGHT_FULL_READ_CAP_BYTES = 131072;
 export declare const PREFLIGHT_STREAM_SCAN_CAP_BYTES = 524288;
 export type PreflightDeadReason = 'invalid_url' | 'http_404' | 'http_410' | 'http_507' | 'http_5xx_persistent' | 'dns_error' | 'tls_error' | 'connection_error' | 'parked_or_suspended';
 export type PreflightRetryableReason = 'timeout' | 'http_408' | 'http_429' | 'network_error';
+export type ToxicSiteCategory = 'adult' | 'gambling';
+export interface ToxicSiteDetection {
+    readonly toxic: boolean;
+    readonly category?: ToxicSiteCategory;
+    readonly matchedKeyword?: string;
+    readonly matchedIn?: 'domain' | 'path' | 'title';
+    readonly reason?: string;
+}
+export interface PreflightToxicItem {
+    readonly id: number;
+    readonly sourceId: number;
+    readonly host: string;
+    readonly url: string;
+    readonly category: ToxicSiteCategory;
+    readonly matchedKeyword: string;
+    readonly matchedIn: 'domain' | 'path' | 'title';
+    readonly reason: string;
+}
 export type WafProvider = 'cloudfront' | 'cloudflare' | 'waf';
 export type PreflightSiteHint = 'wordpress_comment' | 'typecho_comment' | 'wix_blog' | 'comments_closed_hint' | 'directory_or_form' | 'other';
 export interface PreflightRunnableItem {
@@ -81,6 +99,7 @@ export interface BatchPreflightOptions {
     readonly concurrency?: number;
     readonly autoSkip?: boolean;
     readonly autoSkipTagged?: boolean;
+    readonly autoSkipToxic?: boolean;
     readonly skipSoftTagged?: boolean;
     readonly autoFailWaf?: boolean;
     readonly skipTags?: readonly string[];
@@ -93,6 +112,7 @@ export interface BatchPreflightResult {
     readonly summary: string;
     readonly skippedDeadItemIds: readonly number[];
     readonly skippedTaggedItemIds: readonly number[];
+    readonly skippedToxicItemIds: readonly number[];
     readonly failedWafItemIds: readonly number[];
     readonly data: {
         readonly batchId: number;
@@ -103,6 +123,7 @@ export interface BatchPreflightResult {
             readonly considered: number;
             readonly alreadyPublished: number;
             readonly taggedBlocked: number;
+            readonly toxicBlocked: number;
             readonly heldForManual: number;
             readonly probed: number;
             readonly runnable: number;
@@ -117,6 +138,7 @@ export interface BatchPreflightResult {
         readonly runnableItems: readonly PreflightRunnableItem[];
         readonly cautionItems?: readonly PreflightCautionItem[];
         readonly taggedBlocked?: readonly PreflightTaggedBlockedItem[];
+        readonly toxicBlocked?: readonly PreflightToxicItem[];
         readonly heldForManual?: readonly PreflightHeldForManualItem[];
         readonly skippedByTag?: {
             readonly hardItemIds: readonly number[];
@@ -155,6 +177,16 @@ export declare function readBoundedBodyText(response: Response, options?: {
     readonly fullReadCapBytes?: number;
     readonly streamScanCapBytes?: number;
 }): Promise<string>;
+/**
+ * High-confidence Toxic Backlink detector covering adult/porn and gambling/betting
+ * domains, URL paths, and page `<title>` strings with strict word-boundary guards
+ * (never false-positives `essex`, `class`, `analytics`, `vue slot`, or `time slot`).
+ */
+export declare function detectToxicSite(input: {
+    readonly host?: string;
+    readonly url?: string;
+    readonly title?: string;
+}): ToxicSiteDetection;
 /** Non-destructive sniff for Wix `"signupRecaptchaOption": "ALWAYS"` (never auto-fails in cookieless HTTP preflight). */
 export declare function detectWixSignupRecaptchaAlways(body: string): boolean;
 /** Extract a lightweight site-type hint from a single HTTP preflight response (0 Chrome cost). */

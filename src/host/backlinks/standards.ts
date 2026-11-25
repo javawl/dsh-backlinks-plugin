@@ -80,6 +80,7 @@ export const SUPERMANAGER_SAFE_ZH_TAG_FALLBACK: Readonly<Record<string, string>>
   waf_403: '有盾',
   submitmatic_verify_fail: '徽标校验失败',
   comments_closed: '评论关闭',
+  low_quality: '低质量',
 }
 
 /** Map outbound source tags to Supermanager wire-compatible names (deduped). */

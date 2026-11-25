@@ -13,6 +13,8 @@ import type {
 import {
   DEFAULT_PREFLIGHT_CONCURRENCY,
   DEFAULT_PREFLIGHT_TIMEOUT_MS,
+  isSupermanager5xxError,
+  mapTagsToSafeChineseFallback,
   matchBlockingTags,
 } from '../host/backlinks/standards.ts'
 import { collectPublishedSourceIds, isPublishedItem } from '../host/backlinks/validation.ts'
@@ -102,6 +104,27 @@ export type PreflightDeadReason =
 
 export type PreflightRetryableReason = 'timeout' | 'http_408' | 'http_429' | 'network_error'
 
+export type ToxicSiteCategory = 'adult' | 'gambling'
+
+export interface ToxicSiteDetection {
+  readonly toxic: boolean
+  readonly category?: ToxicSiteCategory
+  readonly matchedKeyword?: string
+  readonly matchedIn?: 'domain' | 'path' | 'title'
+  readonly reason?: string
+}
+
+export interface PreflightToxicItem {
+  readonly id: number
+  readonly sourceId: number
+  readonly host: string
+  readonly url: string
+  readonly category: ToxicSiteCategory
+  readonly matchedKeyword: string
+  readonly matchedIn: 'domain' | 'path' | 'title'
+  readonly reason: string
+}
+
 export type WafProvider = 'cloudfront' | 'cloudflare' | 'waf'
 
 export type PreflightSiteHint =
@@ -190,6 +213,7 @@ export interface BatchPreflightOptions {
   readonly concurrency?: number
   readonly autoSkip?: boolean
   readonly autoSkipTagged?: boolean
+  readonly autoSkipToxic?: boolean
   readonly skipSoftTagged?: boolean
   readonly autoFailWaf?: boolean
   readonly skipTags?: readonly string[]
@@ -203,6 +227,7 @@ export interface BatchPreflightResult {
   readonly summary: string
   readonly skippedDeadItemIds: readonly number[]
   readonly skippedTaggedItemIds: readonly number[]
+  readonly skippedToxicItemIds: readonly number[]
   readonly failedWafItemIds: readonly number[]
   readonly data: {
     readonly batchId: number
@@ -213,6 +238,7 @@ export interface BatchPreflightResult {
       readonly considered: number
       readonly alreadyPublished: number
       readonly taggedBlocked: number
+      readonly toxicBlocked: number
       readonly heldForManual: number
       readonly probed: number
       readonly runnable: number
@@ -227,6 +253,7 @@ export interface BatchPreflightResult {
     readonly runnableItems: readonly PreflightRunnableItem[]
     readonly cautionItems?: readonly PreflightCautionItem[]
     readonly taggedBlocked?: readonly PreflightTaggedBlockedItem[]
+    readonly toxicBlocked?: readonly PreflightToxicItem[]
     readonly heldForManual?: readonly PreflightHeldForManualItem[]
     readonly skippedByTag?: {
       readonly hardItemIds: readonly number[]
@@ -263,6 +290,13 @@ type ProbeOutcome =
       readonly wixSignupRecaptchaAlways?: boolean
     }
   | { readonly kind: 'dead'; readonly reason: PreflightDeadReason; readonly httpStatus?: number; readonly detail?: string }
+  | {
+      readonly kind: 'toxic'
+      readonly category: ToxicSiteCategory
+      readonly matchedKeyword: string
+      readonly matchedIn: 'domain' | 'path' | 'title'
+      readonly reason: string
+    }
   | { readonly kind: 'waf_403'; readonly provider: WafProvider }
   | { readonly kind: 'retryable'; readonly reason: PreflightRetryableReason; readonly httpStatus?: number; readonly detail?: string }
 
@@ -447,6 +481,12 @@ function isKnownParkingHostname(hostname: string): boolean {
   return PARKING_HOST_SUFFIXES.some(suffix => lower === suffix || lower.endsWith(`.${suffix}`))
 }
 
+function extractTitleOnly(html: string): string {
+  const titleMatch = /<title[^>]*>([\s\S]*?)<\/title>/iu.exec(html)
+  if (!titleMatch?.[1]) return ''
+  return titleMatch[1].replace(/<[^>]+>/gu, ' ').replace(/\s+/gu, ' ').trim()
+}
+
 function extractTitleAndH1(html: string): string {
   const parts: string[] = []
   const titleMatch = /<title[^>]*>([\s\S]*?)<\/title>/iu.exec(html)
@@ -457,6 +497,171 @@ function extractTitleAndH1(html: string): string {
     if (match[1]) parts.push(match[1])
   }
   return parts.join(' ').replace(/<[^>]+>/gu, ' ').replace(/\s+/gu, ' ').trim()
+}
+
+const TOXIC_ADULT_DOMAIN_PREFIX_PATTERN =
+  /(?:^|[-_])(?:xxx|porn|pornhub|xvideos|xnxx|hentai|onlyfans|camgirl|nsfw|xhamster|redtube|youporn|chaturbate|stripchat|brazzers|livejasmin)/iu
+
+const TOXIC_ADULT_WORD_PATTERN = new RegExp(
+  [
+    '\\b(?:porn|pornhub|xvideos|xnxx|xxx|hentai|escort|escorts|onlyfans|camgirl|camgirls|nsfw|xhamster|redtube|youporn|chaturbate|stripchat|brazzers|livejasmin|erotica|bdsm)\\b',
+    '\\b(?:adult\\s+videos?|free\\s+sex|sex\\s+movies?|sex\\s+videos?|porn\\s+videos?|live\\s+sex|xxx\\s+videos?|hardcore\\s+sex)\\b',
+  ].join('|'),
+  'iu',
+)
+
+const TOXIC_GAMBLING_DOMAIN_PREFIX_PATTERN =
+  /(?:^|[-_])(?:casino|casinos|gambling|bookies|bookmaker|sportsbook|roulette|jackpot|togel|betwad|betway|betfair|betsson|betclic|betano|betmgm|betrivers|betvictor|betonline|bet365|1xbet|22bet|melbet|mostbet|parimatch|sbobet|draftkings|fanduel)/iu
+
+const TOXIC_GAMBLING_WORD_PATTERN = new RegExp(
+  [
+    '\\b(?:casino|casinos|gambling|bookies|bookmaker|bookmakers|sportsbook|sportsbooks|roulette|jackpot|jackpots|togel|gacor|blackjack|baccarat|pachinko|betwad|betway|bet365|1xbet|22bet|sbobet)\\b',
+    '\\b(?:online\\s+betting|sports\\s+betting|betting\\s+sites?|slot\\s+gacor|poker\\s+online|online\\s+poker|judi\\s+online|bandar\\s+togel|situs\\s+slot|agen\\s+slot)\\b',
+  ].join('|'),
+  'iu',
+)
+
+const TOXIC_SLOT_PHRASE_PATTERN =
+  /\b(?:slot\s+design|slot\s+games?|slot\s+machines?|slot\s+gacor|slot\s+online|online\s+slots?|free\s+slots?|video\s+slots?|penny\s+slots?|fruit\s+slots?|mega\s+slots?|play\s+slots?|slot\s+sites?|slot\s+bonus(?:es)?|slot\s+spins?|slot\s+wins?|slot\s+bets?|slots?\s+casino)\b/iu
+
+const TOXIC_SLOT_WORD_PATTERN = /\bslots?\b/iu
+const TOXIC_SLOT_CO_WORD_PATTERN =
+  /\b(?:casino|casinos|gambling|spin|spins|jackpot|jackpots|bet|bets|betting|win|wins|winnings|payout|payouts|reels|wagering)\b/iu
+
+function normalizeForTokenMatch(raw: string): string {
+  let decoded = raw
+  try {
+    decoded = decodeURIComponent(raw)
+  } catch {
+    // keep raw if malformed percent-encoding
+  }
+  return decoded.replace(/[-_/+.,:;!?()[\]{}|]+/gu, ' ').replace(/\s+/gu, ' ').trim()
+}
+
+/**
+ * High-confidence Toxic Backlink detector covering adult/porn and gambling/betting
+ * domains, URL paths, and page `<title>` strings with strict word-boundary guards
+ * (never false-positives `essex`, `class`, `analytics`, `vue slot`, or `time slot`).
+ */
+export function detectToxicSite(input: {
+  readonly host?: string
+  readonly url?: string
+  readonly title?: string
+}): ToxicSiteDetection {
+  let host = (input.host ?? '').trim().toLowerCase()
+  let pathRaw = ''
+  if (input.url) {
+    try {
+      const parsed = new URL(input.url)
+      if (!host) host = parsed.hostname.toLowerCase()
+      pathRaw = `${parsed.pathname} ${parsed.search}`
+    } catch {
+      pathRaw = input.url
+    }
+  }
+  const hostLabels = host.split('.').filter(Boolean)
+  const normHost = normalizeForTokenMatch(host)
+  const normPath = normalizeForTokenMatch(pathRaw)
+  const normTitle = normalizeForTokenMatch(input.title ?? '')
+
+  // 1. Domain checks (prefix + word-boundary)
+  for (const label of hostLabels) {
+    const adultPrefix = TOXIC_ADULT_DOMAIN_PREFIX_PATTERN.exec(label)
+    if (adultPrefix) {
+      const kw = adultPrefix[0].replace(/^[-_]+/u, '').toLowerCase()
+      return {
+        toxic: true,
+        category: 'adult',
+        matchedKeyword: kw,
+        matchedIn: 'domain',
+        reason: `toxic_site: adult (${kw} in domain)`,
+      }
+    }
+    const gamblingPrefix = TOXIC_GAMBLING_DOMAIN_PREFIX_PATTERN.exec(label)
+    if (gamblingPrefix) {
+      const kw = gamblingPrefix[0].replace(/^[-_]+/u, '').toLowerCase()
+      return {
+        toxic: true,
+        category: 'gambling',
+        matchedKeyword: kw,
+        matchedIn: 'domain',
+        reason: `toxic_site: gambling (${kw} in domain)`,
+      }
+    }
+  }
+
+  const checkSegment = (
+    text: string,
+    segment: 'domain' | 'path' | 'title',
+  ): ToxicSiteDetection | undefined => {
+    if (!text) return undefined
+    const adultHit = TOXIC_ADULT_WORD_PATTERN.exec(text)
+    if (adultHit) {
+      const kw = adultHit[0].toLowerCase()
+      return {
+        toxic: true,
+        category: 'adult',
+        matchedKeyword: kw,
+        matchedIn: segment,
+        reason: `toxic_site: adult (${kw} in ${segment})`,
+      }
+    }
+    const gamblingHit = TOXIC_GAMBLING_WORD_PATTERN.exec(text)
+    if (gamblingHit) {
+      const kw = gamblingHit[0].toLowerCase()
+      return {
+        toxic: true,
+        category: 'gambling',
+        matchedKeyword: kw,
+        matchedIn: segment,
+        reason: `toxic_site: gambling (${kw} in ${segment})`,
+      }
+    }
+    const slotPhraseHit = TOXIC_SLOT_PHRASE_PATTERN.exec(text)
+    if (slotPhraseHit) {
+      const kw = slotPhraseHit[0].toLowerCase()
+      return {
+        toxic: true,
+        category: 'gambling',
+        matchedKeyword: kw,
+        matchedIn: segment,
+        reason: `toxic_site: gambling (${kw} in ${segment})`,
+      }
+    }
+    return undefined
+  }
+
+  const domainWordHit = checkSegment(normHost, 'domain')
+  if (domainWordHit) return domainWordHit
+
+  const pathHit = checkSegment(normPath, 'path')
+  if (pathHit) return pathHit
+
+  const titleHit = checkSegment(normTitle, 'title')
+  if (titleHit) return titleHit
+
+  // Combined slot + gambling co-word check across host + path + title (safe against `vue slot` / `time slot`).
+  const combined = [normHost, normPath, normTitle].filter(Boolean).join(' ')
+  if (TOXIC_SLOT_WORD_PATTERN.test(combined)) {
+    const coHit = TOXIC_SLOT_CO_WORD_PATTERN.exec(combined)
+    if (coHit) {
+      const matchedIn: 'domain' | 'path' | 'title' = TOXIC_SLOT_WORD_PATTERN.test(normTitle)
+        ? 'title'
+        : TOXIC_SLOT_WORD_PATTERN.test(normPath)
+          ? 'path'
+          : 'domain'
+      const kw = `slot+${coHit[0].toLowerCase()}`
+      return {
+        toxic: true,
+        category: 'gambling',
+        matchedKeyword: kw,
+        matchedIn,
+        reason: `toxic_site: gambling (${kw} in ${matchedIn})`,
+      }
+    }
+  }
+
+  return { toxic: false }
 }
 
 function detectInsufficientStorageBody(body: string): string | undefined {
@@ -915,6 +1120,17 @@ async function probeItemUrl(
     if (response.status === 429) {
       return { kind: 'retryable', reason: 'http_429', httpStatus: 429 }
     }
+    const pageTitle = extractTitleOnly(body)
+    const toxicCheck = detectToxicSite({ url: finalUrl, title: pageTitle })
+    if (toxicCheck.toxic && toxicCheck.category && toxicCheck.matchedKeyword && toxicCheck.matchedIn && toxicCheck.reason) {
+      return {
+        kind: 'toxic',
+        category: toxicCheck.category,
+        matchedKeyword: toxicCheck.matchedKeyword,
+        matchedIn: toxicCheck.matchedIn,
+        reason: toxicCheck.reason,
+      }
+    }
     const siteHint = detectSiteHint(finalUrl, response.headers, body)
     const wixSignupRecaptchaAlways = siteHint === 'wix_blog' && detectWixSignupRecaptchaAlways(body)
     return {
@@ -934,10 +1150,38 @@ interface AutoSkipEntry {
   readonly itemId: number
   readonly sourceId: number
   readonly skipReason: string
-  readonly kind: 'dead' | 'tagged'
+  readonly kind: 'dead' | 'tagged' | 'toxic'
 }
 
 const PREFLIGHT_SKIP_CHUNK_SIZE = 100
+
+async function tagSourceNonFatal(
+  batchSource: BacklinkBatchSourceProvider,
+  sourceId: number,
+  tags: readonly string[],
+  signal?: AbortSignal,
+): Promise<{ readonly tagged: boolean; readonly error?: string }> {
+  try {
+    await batchSource.tagSource(sourceId, tags, signal)
+    return { tagged: true }
+  } catch (error) {
+    if (signal?.aborted) throw error
+    if (isSupermanager5xxError(error)) {
+      const fallback = mapTagsToSafeChineseFallback(tags)
+      const changed = fallback.length !== tags.length || fallback.some((t, i) => t !== tags[i])
+      if (changed) {
+        try {
+          await batchSource.tagSource(sourceId, fallback, signal)
+          return { tagged: true }
+        } catch (retryError) {
+          if (signal?.aborted) throw retryError
+          return { tagged: false, error: retryError instanceof Error ? retryError.message : String(retryError) }
+        }
+      }
+    }
+    return { tagged: false, error: error instanceof Error ? error.message : String(error) }
+  }
+}
 
 function isLeaseRequiredError(error: unknown): boolean {
   if (!(error instanceof BacklinksError)) return false
@@ -959,6 +1203,7 @@ function isUnsupportedEndpointError(error: unknown): boolean {
 interface LegacyAutoSkipOutcome {
   readonly skippedDeadItemIds: readonly number[]
   readonly skippedTaggedItemIds: readonly number[]
+  readonly skippedToxicItemIds: readonly number[]
   readonly taggedSourceIds: readonly number[]
   readonly errors: readonly PreflightAutoSkipError[]
 }
@@ -970,12 +1215,14 @@ async function applyLegacyAutoSkips(
   signal?: AbortSignal,
 ): Promise<LegacyAutoSkipOutcome> {
   if (entries.length === 0) {
-    return { skippedDeadItemIds: [], skippedTaggedItemIds: [], taggedSourceIds: [], errors: [] }
+    return { skippedDeadItemIds: [], skippedTaggedItemIds: [], skippedToxicItemIds: [], taggedSourceIds: [], errors: [] }
   }
 
   const skippedDeadItemIds: number[] = []
   const skippedTaggedItemIds: number[] = []
+  const skippedToxicItemIds: number[] = []
   const deadSourceIds = new Set<number>()
+  const toxicSourceIds = new Set<number>()
   const taggedSourceIds: number[] = []
   const errors: PreflightAutoSkipError[] = []
 
@@ -983,6 +1230,9 @@ async function applyLegacyAutoSkips(
     if (entry.kind === 'dead') {
       skippedDeadItemIds.push(entry.itemId)
       deadSourceIds.add(entry.sourceId)
+    } else if (entry.kind === 'toxic') {
+      skippedToxicItemIds.push(entry.itemId)
+      toxicSourceIds.add(entry.sourceId)
     } else {
       skippedTaggedItemIds.push(entry.itemId)
     }
@@ -1045,20 +1295,32 @@ async function applyLegacyAutoSkips(
   }
 
   for (const sourceId of deadSourceIds) {
-    try {
-      await batchSource.tagSource(sourceId, ['dead_site'], signal)
+    const tagRes = await tagSourceNonFatal(batchSource, sourceId, ['dead_site'], signal)
+    if (tagRes.tagged) {
       taggedSourceIds.push(sourceId)
-    } catch (error) {
-      if (signal?.aborted) throw error
+    } else if (tagRes.error) {
       const relatedItem = entries.find(entry => entry.kind === 'dead' && entry.sourceId === sourceId)
       errors.push({
         itemId: relatedItem?.itemId ?? sourceId,
-        error: `tagSource dead_site failed for source ${sourceId}: ${error instanceof Error ? error.message : String(error)}`,
+        error: `tagSource dead_site failed for source ${sourceId}: ${tagRes.error}`,
       })
     }
   }
 
-  return { skippedDeadItemIds, skippedTaggedItemIds, taggedSourceIds, errors }
+  for (const sourceId of toxicSourceIds) {
+    const tagRes = await tagSourceNonFatal(batchSource, sourceId, ['low_quality'], signal)
+    if (tagRes.tagged) {
+      if (!taggedSourceIds.includes(sourceId)) taggedSourceIds.push(sourceId)
+    } else if (tagRes.error) {
+      const relatedItem = entries.find(entry => entry.kind === 'toxic' && entry.sourceId === sourceId)
+      errors.push({
+        itemId: relatedItem?.itemId ?? sourceId,
+        error: `tagSource low_quality failed for source ${sourceId}: ${tagRes.error}`,
+      })
+    }
+  }
+
+  return { skippedDeadItemIds, skippedTaggedItemIds, skippedToxicItemIds, taggedSourceIds, errors }
 }
 
 async function applyAutoSkips(
@@ -1070,6 +1332,7 @@ async function applyAutoSkips(
   readonly mode: 'preflight_skip_api' | 'legacy_fallback'
   readonly skippedDeadItemIds: readonly number[]
   readonly skippedTaggedItemIds: readonly number[]
+  readonly skippedToxicItemIds: readonly number[]
   readonly unchangedCount: number
   readonly taggedSourceIds: readonly number[]
   readonly downgradeNotice?: string
@@ -1080,6 +1343,7 @@ async function applyAutoSkips(
       mode: batchSource.preflightSkip ? 'preflight_skip_api' : 'legacy_fallback',
       skippedDeadItemIds: [],
       skippedTaggedItemIds: [],
+      skippedToxicItemIds: [],
       unchangedCount: 0,
       taggedSourceIds: [],
       errors: [],
@@ -1089,58 +1353,111 @@ async function applyAutoSkips(
   if (typeof batchSource.preflightSkip === 'function') {
     const skippedDeadItemIds: number[] = []
     const skippedTaggedItemIds: number[] = []
+    const skippedToxicItemIds: number[] = []
     const taggedSourceIds = new Set<number>()
     const errors: PreflightAutoSkipError[] = []
     let unchangedCount = 0
+
+    const recordPreflightRes = (
+      chunk: readonly AutoSkipEntry[],
+      res: Awaited<ReturnType<NonNullable<BacklinkBatchSourceProvider['preflightSkip']>>>,
+    ) => {
+      unchangedCount += res.unchangedCount
+      const entryById = new Map(chunk.map(entry => [entry.itemId, entry]))
+      if (res.results.length > 0) {
+        for (const itemRes of res.results) {
+          const matched = entryById.get(itemRes.itemId)
+          if (itemRes.itemStatus === 'skipped' && itemRes.changed) {
+            if (matched?.kind === 'dead') skippedDeadItemIds.push(itemRes.itemId)
+            else if (matched?.kind === 'toxic') skippedToxicItemIds.push(itemRes.itemId)
+            else skippedTaggedItemIds.push(itemRes.itemId)
+          }
+          if (itemRes.attachedTags.length > 0) {
+            taggedSourceIds.add(itemRes.sourceId)
+          }
+        }
+      } else {
+        for (const entry of chunk) {
+          if (entry.kind === 'dead') {
+            skippedDeadItemIds.push(entry.itemId)
+            taggedSourceIds.add(entry.sourceId)
+          } else if (entry.kind === 'toxic') {
+            skippedToxicItemIds.push(entry.itemId)
+            taggedSourceIds.add(entry.sourceId)
+          } else {
+            skippedTaggedItemIds.push(entry.itemId)
+          }
+        }
+      }
+    }
 
     for (let offset = 0; offset < entries.length; offset += PREFLIGHT_SKIP_CHUNK_SIZE) {
       const chunk = entries.slice(offset, offset + PREFLIGHT_SKIP_CHUNK_SIZE)
       const payload: BacklinkPreflightSkipItem[] = chunk.map(entry => ({
         itemId: entry.itemId,
         skipReason: entry.skipReason,
-        ...(entry.kind === 'dead' ? { tags: ['dead_site'] } : {}),
+        ...(entry.kind === 'dead'
+          ? { tags: ['dead_site'] }
+          : entry.kind === 'toxic'
+            ? { tags: ['low_quality'] }
+            : {}),
       }))
       try {
         const res = await batchSource.preflightSkip(batchId, payload, signal)
-        unchangedCount += res.unchangedCount
-        const entryById = new Map(chunk.map(entry => [entry.itemId, entry]))
-        if (res.results.length > 0) {
-          for (const itemRes of res.results) {
-            const matched = entryById.get(itemRes.itemId)
-            if (itemRes.itemStatus === 'skipped' && itemRes.changed) {
-              if (matched?.kind === 'dead') skippedDeadItemIds.push(itemRes.itemId)
-              else skippedTaggedItemIds.push(itemRes.itemId)
-            }
-            if (itemRes.attachedTags.length > 0) {
-              taggedSourceIds.add(itemRes.sourceId)
-            }
-          }
-        } else {
-          for (const entry of chunk) {
-            if (entry.kind === 'dead') {
-              skippedDeadItemIds.push(entry.itemId)
-              taggedSourceIds.add(entry.sourceId)
-            } else {
-              skippedTaggedItemIds.push(entry.itemId)
-            }
-          }
-        }
+        recordPreflightRes(chunk, res)
       } catch (error) {
         if (signal?.aborted) throw error
         if (isUnsupportedEndpointError(error)) {
           const fallback = await applyLegacyAutoSkips(batchSource, batchId, entries.slice(offset), signal)
           for (const id of fallback.skippedDeadItemIds) skippedDeadItemIds.push(id)
           for (const id of fallback.skippedTaggedItemIds) skippedTaggedItemIds.push(id)
+          for (const id of fallback.skippedToxicItemIds) skippedToxicItemIds.push(id)
           for (const sid of fallback.taggedSourceIds) taggedSourceIds.add(sid)
           for (const err of fallback.errors) errors.push(err)
           return {
             mode: 'legacy_fallback',
             skippedDeadItemIds,
             skippedTaggedItemIds,
+            skippedToxicItemIds,
             unchangedCount,
             taggedSourceIds: [...taggedSourceIds],
             downgradeNotice: 'Supermanager returned 404/405 for /preflight-skip; downgraded to legacy item_result/ephemeral lease flow.',
             errors,
+          }
+        }
+        // If Supermanager rejects `low_quality` tag with 5xx, retry skipping without `low_quality` so skip never fails,
+        // then attempt non-fatal source_tags fallback separately.
+        const toxicInChunk = chunk.filter(entry => entry.kind === 'toxic')
+        if (isSupermanager5xxError(error) && toxicInChunk.length > 0) {
+          const retryPayload: BacklinkPreflightSkipItem[] = chunk.map(entry => ({
+            itemId: entry.itemId,
+            skipReason: entry.skipReason,
+            ...(entry.kind === 'dead' ? { tags: ['dead_site'] } : {}),
+          }))
+          try {
+            const retryRes = await batchSource.preflightSkip(batchId, retryPayload, signal)
+            recordPreflightRes(chunk, retryRes)
+            const toxicSourceIds = new Set(toxicInChunk.map(e => e.sourceId))
+            for (const sourceId of toxicSourceIds) {
+              const tagRes = await tagSourceNonFatal(batchSource, sourceId, ['low_quality'], signal)
+              if (tagRes.tagged) {
+                taggedSourceIds.add(sourceId)
+              } else if (tagRes.error) {
+                const rel = toxicInChunk.find(e => e.sourceId === sourceId)
+                errors.push({
+                  itemId: rel?.itemId ?? sourceId,
+                  error: `tagSource low_quality failed for source ${sourceId}: ${tagRes.error}`,
+                })
+              }
+            }
+            continue
+          } catch (retryError) {
+            if (signal?.aborted) throw retryError
+            const retryMsg = retryError instanceof Error ? retryError.message : String(retryError)
+            for (const entry of chunk) {
+              errors.push({ itemId: entry.itemId, error: retryMsg })
+            }
+            continue
           }
         }
         const message = error instanceof Error ? error.message : String(error)
@@ -1160,6 +1477,7 @@ async function applyAutoSkips(
       mode: 'preflight_skip_api',
       skippedDeadItemIds,
       skippedTaggedItemIds,
+      skippedToxicItemIds,
       unchangedCount,
       taggedSourceIds: [...taggedSourceIds],
       errors,
@@ -1171,6 +1489,7 @@ async function applyAutoSkips(
     mode: 'legacy_fallback',
     skippedDeadItemIds: legacy.skippedDeadItemIds,
     skippedTaggedItemIds: legacy.skippedTaggedItemIds,
+    skippedToxicItemIds: legacy.skippedToxicItemIds,
     unchangedCount: 0,
     taggedSourceIds: legacy.taggedSourceIds,
     errors: legacy.errors,
@@ -1305,6 +1624,7 @@ export async function runBatchPreflight(
   const concurrency = options.concurrency ?? DEFAULT_PREFLIGHT_CONCURRENCY
   const autoSkip = options.autoSkip === true
   const autoSkipTagged = options.autoSkipTagged === true
+  const autoSkipToxic = options.autoSkipToxic !== false
   const autoFailWaf = options.autoFailWaf === true
   const retry5xx = options.retry5xx ?? 1
 
@@ -1319,6 +1639,7 @@ export async function runBatchPreflight(
 
   const alreadyPublishedItemIds: number[] = []
   const taggedBlocked: PreflightTaggedBlockedItem[] = []
+  const toxicBlocked: PreflightToxicItem[] = []
   const heldForManual: PreflightHeldForManualItem[] = []
   const probeQueue: Array<{ readonly item: BacklinkBatchItem; readonly url: string; readonly softTags: readonly string[] }> = []
 
@@ -1362,6 +1683,23 @@ export async function runBatchPreflight(
     const targetUrl = item.submitUrl !== null && item.submitUrl.trim().length > 0
       ? item.submitUrl.trim()
       : item.sourceUrl.trim()
+
+    // Zero-HTTP pre-filter for high-confidence toxic (adult/gambling) domains and URL paths.
+    const preToxic = detectToxicSite({ host: item.sourceHost, url: targetUrl })
+    if (preToxic.toxic && preToxic.category && preToxic.matchedKeyword && preToxic.matchedIn && preToxic.reason) {
+      toxicBlocked.push({
+        id: item.id,
+        sourceId: item.sourceId,
+        host: item.sourceHost,
+        url: targetUrl,
+        category: preToxic.category,
+        matchedKeyword: preToxic.matchedKeyword,
+        matchedIn: preToxic.matchedIn,
+        reason: preToxic.reason,
+      })
+      continue
+    }
+
     probeQueue.push({ item, url: targetUrl, softTags: tagMatch.soft })
   }
 
@@ -1431,6 +1769,18 @@ export async function runBatchPreflight(
           ...(outcome.detail === undefined ? {} : { detail: outcome.detail }),
         })
         break
+      case 'toxic':
+        toxicBlocked.push({
+          id: item.id,
+          sourceId: item.sourceId,
+          host: item.sourceHost,
+          url,
+          category: outcome.category,
+          matchedKeyword: outcome.matchedKeyword,
+          matchedIn: outcome.matchedIn,
+          reason: outcome.reason,
+        })
+        break
       case 'waf_403':
         wafBlocked.push({
           id: item.id,
@@ -1476,10 +1826,27 @@ export async function runBatchPreflight(
       })
     }
   }
+  if (autoSkipToxic) {
+    for (const toxic of toxicBlocked) {
+      autoSkipEntries.push({
+        itemId: toxic.id,
+        sourceId: toxic.sourceId,
+        skipReason: toxic.reason,
+        kind: 'toxic',
+      })
+    }
+  }
 
   const skipEffect = await applyAutoSkips(batchSource, detail.batch.id, autoSkipEntries, signal)
-  const totalAutoSkipped = skipEffect.skippedDeadItemIds.length + skipEffect.skippedTaggedItemIds.length
-  const combinedSkippedIds = [...skipEffect.skippedDeadItemIds, ...skipEffect.skippedTaggedItemIds]
+  const totalAutoSkipped =
+    skipEffect.skippedDeadItemIds.length
+    + skipEffect.skippedTaggedItemIds.length
+    + skipEffect.skippedToxicItemIds.length
+  const combinedSkippedIds = [
+    ...skipEffect.skippedDeadItemIds,
+    ...skipEffect.skippedTaggedItemIds,
+    ...skipEffect.skippedToxicItemIds,
+  ]
 
   const wafFailEntries: AutoFailWafEntry[] = []
   if (autoFailWaf) {
@@ -1508,7 +1875,9 @@ export async function runBatchPreflight(
   const softItemIds = heldForManual.map(entry => entry.id)
   const timeoutClusters = detectTimeoutClusters(retryableItems)
 
-  const summary = `preflight batch ${detail.batch.id}: ${runnableItemIds.length} runnable, ${deadItems.length} dead, ${taggedBlocked.length} tagged-blocked, ${wafBlocked.length} waf_403, ${retryableItems.length} retryable`
+  const summary = `preflight batch ${detail.batch.id}: ${runnableItemIds.length} runnable, ${deadItems.length} dead, ${taggedBlocked.length} tagged-blocked`
+    + (toxicBlocked.length > 0 ? `, ${toxicBlocked.length} toxic` : '')
+    + `, ${wafBlocked.length} waf_403, ${retryableItems.length} retryable`
     + (heldForManual.length > 0 ? `, ${heldForManual.length} held-manual` : '')
     + (timeoutClusters.length > 0 ? `, ${timeoutClusters.length} timeout-cluster(s)` : '')
     + ` (auto-skipped ${totalAutoSkipped}`
@@ -1519,6 +1888,7 @@ export async function runBatchPreflight(
     summary,
     skippedDeadItemIds: skipEffect.skippedDeadItemIds,
     skippedTaggedItemIds: skipEffect.skippedTaggedItemIds,
+    skippedToxicItemIds: skipEffect.skippedToxicItemIds,
     failedWafItemIds: wafFailEffect.failedItemIds,
     data: {
       batchId: detail.batch.id,
@@ -1529,6 +1899,7 @@ export async function runBatchPreflight(
         considered: candidates.length,
         alreadyPublished: alreadyPublishedItemIds.length,
         taggedBlocked: taggedBlocked.length,
+        toxicBlocked: toxicBlocked.length,
         heldForManual: heldForManual.length,
         probed: probeQueue.length,
         runnable: runnableItemIds.length,
@@ -1543,6 +1914,7 @@ export async function runBatchPreflight(
       runnableItems,
       ...(cautionItems.length > 0 ? { cautionItems } : {}),
       ...(taggedBlocked.length > 0 ? { taggedBlocked } : {}),
+      ...(toxicBlocked.length > 0 ? { toxicBlocked } : {}),
       ...(heldForManual.length > 0 ? { heldForManual } : {}),
       ...(hardItemIds.length > 0 || softItemIds.length > 0
         ? { skippedByTag: { hardItemIds, softItemIds } }
@@ -1552,7 +1924,7 @@ export async function runBatchPreflight(
       ...(retryableItems.length > 0 ? { retryableItems } : {}),
       ...(timeoutClusters.length > 0 ? { timeoutClusters } : {}),
       ...(alreadyPublishedItemIds.length > 0 ? { alreadyPublishedItemIds } : {}),
-      ...(autoSkip || autoSkipTagged
+      ...(autoSkip || autoSkipTagged || (autoSkipToxic && toxicBlocked.length > 0)
         ? {
             autoSkipResult: {
               mode: skipEffect.mode,

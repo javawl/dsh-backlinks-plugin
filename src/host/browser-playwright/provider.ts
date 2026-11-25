@@ -256,6 +256,67 @@ function elementLocator(page: Page, addressing: Addressing, nth?: number): Locat
   return applyNth(locator, nth)
 }
 
+const CAPTCHA_RESPONSE_FIELD_PATTERN = /^(?:g-recaptcha-response|h-captcha-response|cf-turnstile-response)(?:-\d+)?$/iu
+
+async function isCaptchaResponseLocator(locator: Locator): Promise<boolean> {
+  const probe = locator as unknown as {
+    getAttribute?: (name: string) => Promise<string | null>
+  }
+  if (typeof probe.getAttribute !== 'function') return false
+  const [nameAttr, idAttr] = await Promise.all([
+    probe.getAttribute('name').catch(() => null),
+    probe.getAttribute('id').catch(() => null),
+  ])
+  return Boolean(
+    (nameAttr && CAPTCHA_RESPONSE_FIELD_PATTERN.test(nameAttr.trim()))
+    || (idAttr && CAPTCHA_RESPONSE_FIELD_PATTERN.test(idAttr.trim())),
+  )
+}
+
+/**
+ * Resolve a visible, non-CAPTCHA-response locator when `nth` is omitted so hidden
+ * modals and hidden `textarea[name="g-recaptcha-response"]` fields never trigger
+ * strict-mode conflicts while preserving exact unique visible selectors and
+ * multi-visible strict-mode diagnostics.
+ */
+export async function resolvePreferredVisibleLocator(
+  locator: Locator,
+  nth: number | undefined,
+): Promise<Locator> {
+  if (nth !== undefined) return locator
+  const probe = locator as unknown as {
+    count?: () => Promise<number>
+    nth?: (index: number) => Locator
+  }
+  if (typeof probe.count !== 'function' || typeof probe.nth !== 'function') return locator
+  const total = await probe.count().catch(() => 0)
+  if (!Number.isFinite(total) || total <= 0) return locator
+  if (total === 1) {
+    const only = probe.nth(0)
+    if (await isCaptchaResponseLocator(only)) {
+      throw new BrowserError('skipped hidden captcha response field (g-recaptcha-response / h-captcha-response)', 'BROWSER_ACTION_FAILED')
+    }
+    return locator
+  }
+
+  const limit = Math.min(total, 20)
+  const visibleMatches: Locator[] = []
+  for (let index = 0; index < limit; index++) {
+    const candidate = probe.nth(index)
+    if (await isCaptchaResponseLocator(candidate)) continue
+    const visible = typeof candidate.isVisible === 'function'
+      ? await candidate.isVisible().catch(() => false)
+      : false
+    if (visible) {
+      visibleMatches.push(candidate)
+    }
+  }
+  if (visibleMatches.length === 1) {
+    return visibleMatches[0]!
+  }
+  return locator
+}
+
 export async function inspectStrictModeCandidates(
   locator: Locator,
   timeoutMs = STRICT_MODE_INSPECT_TIMEOUT_MS,
@@ -597,7 +658,8 @@ export class PlaywrightSession implements BrowserSession {
               await page.mouse.click(addressing.x, addressing.y)
               return
             }
-            const locator = elementLocator(page, addressing, command.nth)
+            const rawLocator = elementLocator(page, addressing, command.nth)
+            const locator = await resolvePreferredVisibleLocator(rawLocator, command.nth)
             await this.runLocatorAction('click', locator, () => locator.click({ timeout: this.defaultTimeoutMs }))
           }
 
@@ -620,19 +682,22 @@ export class PlaywrightSession implements BrowserSession {
         }
         case 'fill': {
           const { page } = await this.requirePage(command.page)
-          const locator = elementLocator(page, parseSelector(command.selector), command.nth)
+          const rawLocator = elementLocator(page, parseSelector(command.selector), command.nth)
+          const locator = await resolvePreferredVisibleLocator(rawLocator, command.nth)
           await this.runLocatorAction('fill', locator, () => locator.fill(command.value, { timeout: this.defaultTimeoutMs }))
           return { kind: 'acked' }
         }
         case 'select': {
           const { page } = await this.requirePage(command.page)
-          const locator = elementLocator(page, parseSelector(command.selector), command.nth)
+          const rawLocator = elementLocator(page, parseSelector(command.selector), command.nth)
+          const locator = await resolvePreferredVisibleLocator(rawLocator, command.nth)
           await this.runLocatorAction('select', locator, () => locator.selectOption(command.value, { timeout: this.defaultTimeoutMs }))
           return { kind: 'acked' }
         }
         case 'check': {
           const { page } = await this.requirePage(command.page)
-          const locator = elementLocator(page, parseSelector(command.selector), command.nth)
+          const rawLocator = elementLocator(page, parseSelector(command.selector), command.nth)
+          const locator = await resolvePreferredVisibleLocator(rawLocator, command.nth)
           await this.runLocatorAction('check', locator, () => locator.check({ timeout: this.defaultTimeoutMs }))
           return { kind: 'acked' }
         }

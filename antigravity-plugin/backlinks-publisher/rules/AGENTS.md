@@ -2,34 +2,55 @@
 
 You operate the `backlinks` and `browser` MCP tools provided by `backlinks-publisher`.
 
-## One-Page High-Efficiency Execution Cheat Sheet (v2.2.1 Fast-Path)
+## One-Page High-Efficiency Execution Cheat Sheet (v2.3 Fast-Path)
 
-> **Zero-`read_file` Directive**: This cheat sheet + `SKILL.md` contain everything needed for standard blogs, directories, and forms. **Do NOT call `read_file` on `references/*` playbooks** for normal runs; inspect `references/*` only for unusual auth/edge failures.
+> **Zero-Startup-Bloat Directive**: Do **NOT** run `ls` / `find` on workspace/plugin directories and do **NOT** call `read_file` on large schema JSONs or `references/*` playbooks on startup. Use the minimal parameter quick-reference below directly; inspect `references/*` only for unusual auth/edge failures.
 
-1. **Zero-LLM Preflight**: `backlinks action="batch_preflight"` (`batchId`, `autoSkip: true`, `autoSkipTagged: true`, `autoFailWaf: true`).
-   - Sniffs full page (≤128KB) or head 32KB + tail 64KB; detects `/go/` redirects (`rootSubmitHint`) and path-prefix + mid-slug n-gram timeout clusters (`timeoutClusters`, e.g. merging `/nano-banana-pro-*` with `/how-nano-banana-pro-*`).
-   - `waf_403`-tagged items are held out by default (`heldForManual` / `skippedByTag.softItemIds`); `autoFailWaf: true` marks new + held `waf_403` items `failed(manual_required)`.
-   - Read `runnableItems: [{ itemId, domain, siteHint, rootSubmitHint? }]` (`wordpress_comment` / `typecho_comment` / `wix_blog` / `comments_closed_hint` / `directory_or_form` / `other`).
-2. **Fetch Batch Once**: `backlinks action="batch_list"` supports `websiteId` filtering; `batch_get` (`batchId`, `compact: true`, `pendingOnly: true`) once per batch for `website` profile, `anchors`, and `publishedSourceIds`.
-3. **Sharded Claim**: `backlinks action="batch_claim"` ONLY from `runnableItemIds` (5–6 items/slice, serial per `sourceHost`; 10–12 items / 2 slices per session).
+### Minimal Tool Parameter Quick-Reference
+
+| Tool & Action | Key Parameters |
+| --- | --- |
+| `backlinks batch_list` | `onlyPending: true`, `compact: true`, `websiteId?`, `limit: 20` |
+| `backlinks batch_preflight` | `batchId`, `autoSkip: true`, `autoSkipTagged: true`, `autoSkipToxic: true` (default), `autoFailWaf: true` |
+| `backlinks batch_get` | `batchId`, `compact: true`, `pendingOnly: true` |
+| `backlinks batch_claim` | `batchId`, `itemIds: [...]` (5–6 surviving IDs) |
+| `backlinks item_result` | `itemId`, `status` (`live`/`submitted`/`failed`/`skipped`), `publicUrl?`, `anchorText?`, `targetUrl?`, `failureMode?`, `failureReason?`, `skipReason?`, `templateSignature?`, `evidence` |
+| `backlinks source_tags` | `sourceId`, `tags: [...]` |
+| `browser comment_publish` | `url`, `commentText`, `authorName?`, `authorEmail?`, `websiteUrl?`, `anchorText?`, `siteHint?`, `autoGoogleSso?: true`, `verifyReload?: true`, `page?` |
+| `browser directory_autofill` | `url?`, `websiteUrl`, `name?`, `tagline?`, `description?`, `email?`, `page?` |
+| `browser batch_fill` | `fields: [{ target, op?, value?, nth? }]`, `submitTarget?`, `submitNth?`, `page?` |
+
+1. **Zero-LLM Preflight**: `backlinks action="batch_preflight"` (`batchId`, `autoSkip: true`, `autoSkipTagged: true`, `autoSkipToxic: true`, `autoFailWaf: true`).
+   - **Toxic Backlink Pre-Filter (`autoSkipToxic: true` by default)**: detects high-confidence adult/gambling domains, URL paths, and `<title>` (strict word boundaries; safe on `vue slot` / `essex`), reports `toxicBlocked`, auto-skips with `toxic_site: ...`, and non-fatally tags `low_quality`.
+   - Sniffs full page (≤128KB) or head 32KB + tail 64KB; detects `/go/` redirects (`rootSubmitHint`), HTTP 507 dead sites, `wixSignupRecaptchaAlways`, and path-prefix + mid-slug n-gram `timeoutClusters`.
+   - `waf_403`-tagged items are held out by default (`heldForManual`); `autoFailWaf: true` marks new + held `waf_403` items `failed(manual_required)`.
+   - Read `runnableItems: [{ itemId, domain, siteHint, rootSubmitHint?, wixSignupRecaptchaAlways? }]`.
+2. **Fetch Batch Once & Low-Runnable Multi-Batch Relay**: `batch_list` (`websiteId` filter) + `batch_get` (`compact: true`, `pendingOnly: true`) once per batch for `website` profile, `anchors`, and `publishedSourceIds`.
+   - **Low `runnable <= 5` Relay Rule**: when a batch's `batch_preflight` yields `runnable <= 5`, finish those surviving items, call `lease_release`, and relay directly into the next pending batch within the same 10–12 item session budget (never end a session after just 1–3 items if more pending batches exist).
+3. **Sharded Claim**: `backlinks action="batch_claim"` ONLY from `runnableItemIds` (5–6 items/slice, serial per `sourceHost`; 10–12 items / 2 slices per session across 1 or relayed small batches).
 4. **Deterministic Fast-Paths (`comment_publish` & `directory_autofill`)**:
-   - Blogs (`wordpress_comment` / `typecho_comment` / `wix_blog` / `comments_closed_hint` / Blogger / custom blogs): call **`browser action="comment_publish"`** in **1 call** (`url`, `commentText`, `authorName`, `authorEmail`, `websiteUrl`, `anchorText`, optional `siteHint` / `page`). Handles Wix 14–15s progressive lazy scroll (early-exits immediately on visible editor/login; relaxes `domcontentloaded` nav to 15s for `siteHint: "wix_blog"`), empty-placeholder `no_form`, logged-in `comment-box-rce-wrapper`, disabled-submit guard, multilingual/Thai (`รับทราบ`) moderation dialogs, WP 302 recovery, Jetpack Verbum guest flow, WP POST 403/WAF `blocked_waf`, Typecho, and Blogger `#comment-editor` `role="button"` Publish.
+   - Blogs (`wordpress_comment` / `typecho_comment` / `wix_blog` / `comments_closed_hint` / Valine / Blogger / custom blogs): call **`browser action="comment_publish"`** in **1 call**.
+     - **Non-Wix `commit` Nav + Resource Blocking**: non-Wix sites use `waitUntil: 'commit'` (15s default, respects higher `timeoutMs`) + lightweight blocking of `image`/`media`/`font`/ads (never blocks `document`/`stylesheet`/`xhr`/`fetch` or Wix/OAuth/CAPTCHA domains), always unrouted in `finally`. Automatically waits 2000ms and retries once on `Execution context was destroyed`.
+     - **WordPress New `#comment-ID` & `wp_die` 403**: records pre-submit max `#comment-ID`; post-submit redirect to a brand-new `#comment-<newId>` without error (even behind full-page cache) returns `submitted` (`wp_new_comment_id_assigned`) with `#comment-<newId>` preserved, alongside expanded multilingual moderation (EN/FR/ES/DE/IT/PT/TR/RU/JA/ZH/FA/TH) and a lightweight cache-bust recheck. HTTP 403 WordPress `wp_die` validation errors (e.g. missing rating) return `needs_llm_fallback` (`wp_die_validation_error`), cleanly separated from WAF 403 `blocked_waf`.
+     - **Wix One-Click Google SSO (`autoGoogleSso: true` default)**: on Wix `needs_login` without CAPTCHA/`signupRecaptchaOption=ALWAYS`, internally clicks login → re-checks CAPTCHA → clicks multilingual Google SSO → drives Account Chooser / Consent popup → resumes commenting & reload verification. Immediately aborts on `"Looks like there was a technical issue"` as `manual_required` (`templateSignature: "wix:google_sso_technical_issue"`, never retry).
+     - **Valine & Multilingual Submit**: recognizes Valine (`input.vnick`/`vmail`/`vlink`, `textarea.veditor`, `button.vsubmit`, verifying LeanCloud `POST .../classes/Comment` 201 or reload `.first()` `a.vnick`) and multilingual buttons (TR `GÖNDER`, ES, FR, DE, IT, PT, RU, JA, ZH).
    - Map `comment_publish.outcome` directly:
      - `live` → `item_result(live, publicUrl)`
-     - `submitted` → `item_result(submitted, publicUrl)` (incl. `post_submit_comment_id_cached` & multilingual/Thai moderation)
+     - `submitted` → `item_result(submitted, publicUrl)` (incl. `wp_new_comment_id_assigned`, `post_submit_comment_id_cached` & multilingual moderation)
      - `comments_closed` → `item_result(skipped, skipReason)` + `source_tags(["评论关闭"])`
      - `no_form` → `item_result(skipped, skipReason)` + `source_tags(["no_form"])`
      - `blocked_captcha` → `bringToFront`, `item_result(failed, manual_required, templateSignature)` + `source_tags(["has_captcha"])` (never bypass CAPTCHA!)
      - `blocked_waf` → `item_result(failed, manual_required, templateSignature)` + `source_tags(["waf_403"])` (HTTP 403/406/429 WAF block on submit; NEVER retry submit!)
-     - `needs_login` → Wix/Blogger member wall (never blind-published); inspect `loginInfo` + `snapshot format="interactive"` for Google SSO or mailbox signup.
+     - `manual_required` → `item_result(failed, manual_required, templateSignature)` (e.g. `wix:google_sso_technical_issue` fast circuit breaker — NEVER retry!)
+     - `needs_login` → Wix/Blogger member wall when auto Google SSO is unavailable/stopped (e.g. password/MFA); inspect `loginInfo` + `snapshot format="interactive"`.
      - `uncertain_after_submit` → **`item_result(failed, manual_required)` (IDEMPOTENT: NEVER retry submit! Check `reason`/`postSubmitUrl`/`postSubmitSnippet`)**
-     - `needs_llm_fallback` → tab is already at `finalUrl` with `formSummary` + `bottomSnapshot` (check `reason`, e.g. `submit_button_disabled`); continue without re-navigating!
-   - Directories (MkDirs / AI-Autofill submit pages): call **`browser action="directory_autofill"`** (`url`, `websiteUrl`, `name`, `tagline`, `description`, `email`) to auto-fetch + backfill missing fields in 1 call, then finish remaining required fields & submit via `batch_fill`.
-5. **Fallback Form Flow, OAuth Popups & Compact Snapshots**:
-   - `snapshot` defaults to **compact mode (4,500 chars)**: collapses `<select>` >15 options (first 3 + `... (共 N 项)` + last 2), exempts status/success/error keywords, and shows `input[type=url]` + distinct `#id`/`[name=]` selectors. Pass `full: true` (up to 16,000) only when needed.
-   - `batch_fill` with `submitTarget` automatically captures `submitFeedback` (native `alert` dialogs, XHR/fetch status+body, new toast/modal notices).
-   - OAuth / Firebase popups (`window.open`): `click` returns `popupPageRef` / `openedPages`; use `listPages` to inspect open tabs & popups. Closing a popup (`closePage`) never invalidates your original named tab ref, and closing the last tab preserves an internal `about:blank` keeper.
-   - `navigate` defaults to `domcontentloaded` (and gracefully returns ready DOM if explicit `load` times out). Use `wait_for_login` for manual logins.
+     - `needs_llm_fallback` → tab is already at `finalUrl` with `formSummary` + `bottomSnapshot` (check `reason`, e.g. `wp_die_validation_error` or `submit_button_disabled`); continue without re-navigating!
+   - Directories (MkDirs / AI-Autofill submit pages): call **`browser action="directory_autofill"`** (`url`, `websiteUrl`, `name`, `tagline`, `description`, `email`) — automatically filters `:visible` elements & skips hidden modals/CAPTCHA fields.
+5. **Fallback Form Flow, `:visible` Safety, OAuth Popups & Compact Snapshots**:
+   - `batch_fill` automatically skips hidden elements & `g-recaptcha-response`/`h-captcha-response` when `nth` is omitted, and captures `submitFeedback` when `submitTarget` is passed.
+   - `snapshot` defaults to **compact mode (4,500 chars)**: collapses `<select>` >15 options, exempts status/success/error keywords, and shows `input[type=url]` + distinct `#id`/`[name=]` selectors. Pass `full: true` (up to 16,000) only when needed.
+   - OAuth popups (`window.open`): `click` returns `popupPageRef` / `openedPages`; use `listPages` to inspect open tabs & popups. Closing a popup (`closePage`) never invalidates your original named tab ref.
+   - `navigate` defaults to `domcontentloaded` (or `commit` 20s when `siteHint: "wix_blog"`). Use `wait_for_login` for manual logins.
 6. **Closeout**: `source_tags` maps `comments_closed` → `评论关闭` automatically and degrades 5xx non-fatally. Heartbeat every 1–2 items and always `lease_release` when done.
 
 ## Credential Isolation & Safety

@@ -161,6 +161,10 @@ export const BACKLINKS_TOOL_DEFINITION: Tool = {
         type: 'boolean',
         description: 'For batch_preflight: when true, automatically report skipped for items already carrying hard blocking tags (paid_only, dead_site, no_form, comments_closed) without HTTP requests (default false).',
       },
+      autoSkipToxic: {
+        type: 'boolean',
+        description: 'For batch_preflight: when true (default), automatically skip high-confidence toxic backlink sites (adult/gambling detected in domain, path, or <title>) and non-fatally tag low_quality; pass false to report toxicBlocked without auto-skipping.',
+      },
       skipSoftTagged: {
         type: 'boolean',
         description: 'For batch_preflight: control preflight handling of soft-blocking tags. Defaults to holding out waf_403 into heldForManual (zero HTTP) while probing other soft tags; pass true to hold out all soft tags (has_captcha, waf_403, submitmatic_verify_fail); pass false to probe all soft-tagged items.',
@@ -470,6 +474,9 @@ export function createBacklinksToolHandler(deps: BacklinksToolDependencies) {
           if (args.autoSkipTagged !== undefined && typeof args.autoSkipTagged !== 'boolean') {
             throw new Error('backlinks autoSkipTagged must be a boolean.')
           }
+          if (args.autoSkipToxic !== undefined && typeof args.autoSkipToxic !== 'boolean') {
+            throw new Error('backlinks autoSkipToxic must be a boolean.')
+          }
           if (args.skipSoftTagged !== undefined && typeof args.skipSoftTagged !== 'boolean') {
             throw new Error('backlinks skipSoftTagged must be a boolean.')
           }
@@ -507,6 +514,7 @@ export function createBacklinksToolHandler(deps: BacklinksToolDependencies) {
               concurrency,
               autoSkip: args.autoSkip === true,
               autoSkipTagged: args.autoSkipTagged === true,
+              ...(args.autoSkipToxic === undefined ? {} : { autoSkipToxic: args.autoSkipToxic }),
               ...(args.skipSoftTagged === undefined ? {} : { skipSoftTagged: args.skipSoftTagged }),
               autoFailWaf: args.autoFailWaf === true,
               ...(skipTags === undefined ? {} : { skipTags }),
@@ -516,7 +524,7 @@ export function createBacklinksToolHandler(deps: BacklinksToolDependencies) {
             },
             signal,
           )
-          for (const id of [...preflight.skippedDeadItemIds, ...preflight.skippedTaggedItemIds]) {
+          for (const id of [...preflight.skippedDeadItemIds, ...preflight.skippedTaggedItemIds, ...preflight.skippedToxicItemIds]) {
             sessionGuard.markItemTerminal(id, 'skipped')
           }
           for (const id of preflight.failedWafItemIds) {

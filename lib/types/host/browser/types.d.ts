@@ -76,8 +76,8 @@ export interface BrowserProbeCommand extends BrowserPageAddress {
     readonly kind: 'probe';
     readonly selector?: string;
 }
-export type CommentPublishSiteType = 'wordpress' | 'wix' | 'typecho' | 'blogger' | 'other';
-export type CommentPublishOutcome = 'live' | 'submitted' | 'uncertain_after_submit' | 'comments_closed' | 'blocked_captcha' | 'blocked_waf' | 'needs_login' | 'no_form' | 'needs_llm_fallback' | 'form_ready';
+export type CommentPublishSiteType = 'wordpress' | 'wix' | 'typecho' | 'blogger' | 'valine' | 'other';
+export type CommentPublishOutcome = 'live' | 'submitted' | 'uncertain_after_submit' | 'comments_closed' | 'blocked_captcha' | 'blocked_waf' | 'needs_login' | 'manual_required' | 'no_form' | 'needs_llm_fallback' | 'form_ready';
 export interface CommentPublishLoginInfo {
     readonly loginButtons: readonly string[];
     readonly ssoProviders: readonly string[];
@@ -108,6 +108,8 @@ export interface BrowserCommentPublishCommand extends BrowserPageAddress {
     readonly timeoutMs?: number;
     readonly verifyReload?: boolean;
     readonly probeOnly?: boolean;
+    /** When true (default), automatically attempts Wix Google SSO login on member-only walls without CAPTCHA. */
+    readonly autoGoogleSso?: boolean;
 }
 export interface BrowserDirectoryAutofillCommand extends BrowserPageAddress {
     readonly kind: 'directory_autofill';

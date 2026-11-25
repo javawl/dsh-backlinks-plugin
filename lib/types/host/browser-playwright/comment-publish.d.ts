@@ -19,10 +19,15 @@ import type { SleepLike } from '../../mcp/backlinks-tool.ts';
 export declare const DEFAULT_LAZY_WAIT_MAX_MS = 2500;
 export declare const DEFAULT_WIX_LAZY_WAIT_MAX_MS = 20000;
 export declare const DEFAULT_WIX_NAV_TIMEOUT_MS = 20000;
+export declare const DEFAULT_COMMENT_NAV_TIMEOUT_MS = 15000;
 export declare const DEFAULT_WIX_DOM_READY_WAIT_MS = 6000;
+export declare const DEFAULT_NON_WIX_DOM_READY_WAIT_MS = 7000;
 export declare const DEFAULT_WIX_RELOAD_VERIFY_WAIT_MS = 10000;
 export declare const DEFAULT_WIX_EXPAND_WAIT_MAX_MS = 4000;
 export declare const DEFAULT_WIX_POST_SUBMIT_WAIT_MS = 2500;
+export declare const DEFAULT_CONTEXT_DESTROYED_RETRY_MS = 2000;
+export declare const DEFAULT_WIX_SSO_POPUP_TIMEOUT_MS = 4000;
+export declare const DEFAULT_WIX_SSO_COMPLETE_WAIT_MS = 8000;
 export interface WordPressInspection {
     readonly found: boolean;
     readonly collapsedTriggerSelector?: string;
@@ -44,7 +49,7 @@ export interface WordPressInspection {
 }
 export interface GenericCommentInspection {
     readonly found: boolean;
-    readonly kind?: 'typecho' | 'custom_blog';
+    readonly kind?: 'typecho' | 'valine' | 'custom_blog';
     readonly formSelector?: string;
     readonly commentSelector?: string;
     readonly authorSelector?: string;
@@ -121,6 +126,7 @@ export interface CommentVerifyOutcome {
     readonly escapedHtmlDetected: boolean;
     readonly moderationNotice?: string;
     readonly wpErrorMessage?: string;
+    readonly hasWpDieDom?: boolean;
     readonly captchaDetected?: boolean;
     readonly snippet?: string;
 }
@@ -138,6 +144,17 @@ export declare const WIX_SIGNUP_RECAPTCHA_ALWAYS_PATTERN: RegExp;
 export declare function hasWixSignupRecaptchaAlways(raw: string): boolean;
 /** Strip unapproved/moderation query parameters before public reload verification (preserving `#comment-ID`). */
 export declare function stripWpModerationParams(rawUrl: string): string;
+/** Extract positive numeric WordPress comment ID from a URL hash (`#comment-123`) or token (`comment-123`). */
+export declare function extractCommentNumericId(raw: string | undefined): number | undefined;
+/** Append a lightweight cache-busting query parameter while preserving any `#comment-ID` hash. */
+export declare function appendCacheBustParam(rawUrl: string, nonce?: number): string;
+/**
+ * Decide whether a request during `comment_publish` navigation should be aborted.
+ * Never blocks `document`, `stylesheet` (protects `:visible`), `xhr`/`fetch`, or
+ * Wix / Google OAuth / reCAPTCHA / hCaptcha / Turnstile / LeanCloud / Blogger domains.
+ */
+export declare function shouldAbortCommentPublishRequest(url: string, resourceType: string): boolean;
+export declare const WIX_GOOGLE_SSO_TECHNICAL_ISSUE_PATTERN: RegExp;
 /** Build plain/HTML comment body: plain text when `url` field exists, HTML `<a>` otherwise. */
 export declare function buildWpCommentContent(commentText: string, websiteUrl: string | undefined, anchorText: string | undefined, hasUrlField: boolean): string;
 /** Strip raw `<a>` markup before typing into a `contenteditable` rich editor. */
@@ -177,9 +194,13 @@ export interface ExecuteCommentPublishOptions {
     readonly lazyWaitMaxMs?: number;
     readonly wixLazyWaitMaxMs?: number;
     readonly wixDomReadyWaitMs?: number;
+    readonly nonWixDomReadyWaitMs?: number;
     readonly wixReloadVerifyWaitMs?: number;
     readonly wixExpandWaitMaxMs?: number;
     readonly wixPostSubmitWaitMs?: number;
+    readonly contextRetryDelayMs?: number;
+    readonly wixSsoPopupTimeoutMs?: number;
+    readonly wixSsoCompleteWaitMs?: number;
     readonly sleepImpl?: SleepLike;
     readonly signal?: AbortSignal;
 }
@@ -187,10 +208,14 @@ export declare const CAPTCHA_FRAME_URL_PATTERN: RegExp;
 export declare const KNOWN_COMMENT_FRAME_URL_PATTERN: RegExp;
 export declare const NON_COMMENT_FRAME_URL_PATTERN: RegExp;
 export declare const POST_SUBMIT_WAF_FINGERPRINT_PATTERN: RegExp;
+/** Detect whether an HTTP 403 response is a WordPress `wp_die` form-validation error (e.g. missing rating) rather than a WAF block. */
+export declare function isWpDieFormValidationError(text: string, rawHtml?: string, hasWpDieDom?: boolean): boolean;
 export interface PostSubmitWafDetectionInput {
     readonly httpStatus?: number;
     readonly responseHeaders?: Readonly<Record<string, string>>;
     readonly responseSnippet?: string;
+    readonly rawResponseBody?: string;
+    readonly hasWpDieDom?: boolean;
     readonly postSubmitUrl?: string;
     readonly postSubmitSnippet?: string;
     readonly title?: string;
@@ -200,8 +225,10 @@ export interface PostSubmitWafDetection {
     readonly httpStatus?: number;
     readonly provider?: string;
     readonly snippet?: string;
+    readonly isWpDieValidation?: boolean;
+    readonly wpDieMessage?: string;
 }
-/** Detect HTTP 403 or 406/429 WAF-fingerprinted blocks returned after comment submission. */
+/** Detect HTTP 403 or 406/429 WAF-fingerprinted blocks returned after comment submission (distinguishing WP `wp_die` validation 403s). */
 export declare function detectPostSubmitWafBlock(input: PostSubmitWafDetectionInput): PostSubmitWafDetection;
 export declare function isNavigationContextError(error: unknown): boolean;
 export declare function isTimeoutError(error: unknown): boolean;
@@ -218,5 +245,19 @@ export declare function navigateWixWithCommit(page: Page, url: string, options: 
     readonly sleep?: SleepLike;
     readonly signal?: AbortSignal;
 }): Promise<void>;
+/**
+ * Commit-first navigation for non-Wix `comment_publish` (WordPress / Valine / Typecho / custom blogs):
+ * navigates with `waitUntil: 'commit'` (default 15s, respecting higher caller timeoutMs), then polls
+ * up to 6-8s for comment form / textarea / `#comment` / `form` / error DOM readiness so slow third-party
+ * scripts or 13MB pages do not fail with `domcontentloaded` timeouts.
+ */
+export declare function navigateCommentPageWithCommit(page: Page, url: string, options: {
+    readonly timeoutMs: number;
+    readonly domReadyWaitMs?: number;
+    readonly sleep?: SleepLike;
+    readonly signal?: AbortSignal;
+}): Promise<void>;
+/** Collect max existing numeric `#comment-<ID>` currently present in the DOM before WordPress comment submit. */
+export declare function collectMaxExistingCommentId(page: Page): Promise<number>;
 export declare function inspectChildFrames(page: Page): Promise<ChildFramesInspection>;
 export declare function executeCommentPublish(page: Page, ref: string, command: BrowserCommentPublishCommand, options: ExecuteCommentPublishOptions): Promise<BrowserCommentPublishResult>;
