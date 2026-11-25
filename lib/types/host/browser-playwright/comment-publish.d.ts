@@ -312,6 +312,11 @@ export declare function inspectChildFrames(page: Page): Promise<ChildFramesInspe
  * that only mount after focusing the editor or selecting anchor text).
  */
 export declare const FIND_WIX_RCE_TOOLBAR_LINK_SCRIPT: string;
+export declare const WIX_LINK_URL_INPUT_PRIORITY_SELECTOR: string;
+export declare const WIX_LINK_URL_INPUT_FALLBACK_SELECTOR: string;
+export declare const WIX_LINK_URL_INPUT_SELECTOR: string;
+export declare const WIX_LINK_SAVE_BUTTON_LABEL_PATTERN: RegExp;
+export declare function matchesWixLinkSaveButtonLabel(label: string): boolean;
 export interface StarRatingEnsureResult {
     readonly detected: boolean;
     readonly alreadySelected: boolean;

@@ -4165,33 +4165,66 @@ export const FIND_WIX_RCE_TOOLBAR_LINK_SCRIPT = String.raw`(() => {
   return { found: false };
 })()`
 
-const WIX_LINK_URL_INPUT_SELECTOR = [
-  '[data-hook="linkPanelInput"] input',
-  'input[data-hook*="linkPanel" i]',
-  'input[data-hook*="link" i]',
-  '[data-hook*="linkPanel" i] input',
-  '[data-hook*="link-modal" i] input',
-  'input[type="url"]',
-  'input[placeholder*="http" i]',
-  'input[placeholder*="url" i]',
-  'input[placeholder*="link" i]',
-  'input[placeholder*="enlace" i]',
-  'input[placeholder*="lien" i]',
-  'input[placeholder*="링크" i]',
-  'input[placeholder*="ссылк" i]',
-  'input[placeholder*="链接" i]',
-  'input[aria-label*="url" i]',
-  'input[aria-label*="link" i]',
-  'input[aria-label*="enlace" i]',
-  'input[aria-label*="lien" i]',
-  'input[aria-label*="링크" i]',
-  'input[aria-label*="ссылк" i]',
-  'input[aria-label*="链接" i]',
+const WIX_LINK_EDITABLE_INPUT_GUARD =
+  ':not([readonly]):not([aria-readonly="true"]):not([role="combobox"]):not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([disabled])'
+
+export const WIX_LINK_URL_INPUT_PRIORITY_SELECTOR = [
+  `input[type="url"]${WIX_LINK_EDITABLE_INPUT_GUARD}`,
+  `[data-hook="linkPanelInput"] input${WIX_LINK_EDITABLE_INPUT_GUARD}`,
+  `input[data-hook="linkPanelInput"]${WIX_LINK_EDITABLE_INPUT_GUARD}`,
+  `input[placeholder*="http" i]${WIX_LINK_EDITABLE_INPUT_GUARD}`,
+  `input[placeholder*="www" i]${WIX_LINK_EDITABLE_INPUT_GUARD}`,
+  `input[placeholder*="url" i]${WIX_LINK_EDITABLE_INPUT_GUARD}`,
+  `input[placeholder*="web" i]${WIX_LINK_EDITABLE_INPUT_GUARD}`,
+  `input[placeholder*="enlace" i]${WIX_LINK_EDITABLE_INPUT_GUARD}`,
+  `input[placeholder*="endereço" i]${WIX_LINK_EDITABLE_INPUT_GUARD}`,
+  `input[placeholder*="endereco" i]${WIX_LINK_EDITABLE_INPUT_GUARD}`,
+  `input[placeholder*="dirección" i]${WIX_LINK_EDITABLE_INPUT_GUARD}`,
+  `input[placeholder*="direccion" i]${WIX_LINK_EDITABLE_INPUT_GUARD}`,
+  `input[placeholder*="link" i]${WIX_LINK_EDITABLE_INPUT_GUARD}`,
+  `input[placeholder*="lien" i]${WIX_LINK_EDITABLE_INPUT_GUARD}`,
+  `input[placeholder*="링크" i]${WIX_LINK_EDITABLE_INPUT_GUARD}`,
+  `input[placeholder*="ссылк" i]${WIX_LINK_EDITABLE_INPUT_GUARD}`,
+  `input[placeholder*="链接" i]${WIX_LINK_EDITABLE_INPUT_GUARD}`,
+  `input[aria-label*="url" i]${WIX_LINK_EDITABLE_INPUT_GUARD}`,
+  `input[aria-label*="web" i]${WIX_LINK_EDITABLE_INPUT_GUARD}`,
+  `input[aria-label*="enlace" i]${WIX_LINK_EDITABLE_INPUT_GUARD}`,
+  `input[aria-label*="endereço" i]${WIX_LINK_EDITABLE_INPUT_GUARD}`,
+  `input[aria-label*="endereco" i]${WIX_LINK_EDITABLE_INPUT_GUARD}`,
+  `input[aria-label*="dirección" i]${WIX_LINK_EDITABLE_INPUT_GUARD}`,
+  `input[aria-label*="direccion" i]${WIX_LINK_EDITABLE_INPUT_GUARD}`,
+  `input[aria-label*="link" i]${WIX_LINK_EDITABLE_INPUT_GUARD}`,
+  `input[aria-label*="lien" i]${WIX_LINK_EDITABLE_INPUT_GUARD}`,
+  `input[aria-label*="링크" i]${WIX_LINK_EDITABLE_INPUT_GUARD}`,
+  `input[aria-label*="ссылк" i]${WIX_LINK_EDITABLE_INPUT_GUARD}`,
+  `input[aria-label*="链接" i]${WIX_LINK_EDITABLE_INPUT_GUARD}`,
 ].join(', ')
+
+export const WIX_LINK_URL_INPUT_FALLBACK_SELECTOR = [
+  `input[data-hook*="linkPanel" i]${WIX_LINK_EDITABLE_INPUT_GUARD}`,
+  `input[data-hook*="link" i]${WIX_LINK_EDITABLE_INPUT_GUARD}`,
+  `[data-hook*="linkPanel" i] input${WIX_LINK_EDITABLE_INPUT_GUARD}`,
+  `[data-hook*="link-modal" i] input${WIX_LINK_EDITABLE_INPUT_GUARD}`,
+  `[data-hook*="linkModal" i] input${WIX_LINK_EDITABLE_INPUT_GUARD}`,
+].join(', ')
+
+export const WIX_LINK_URL_INPUT_SELECTOR = [
+  WIX_LINK_URL_INPUT_PRIORITY_SELECTOR,
+  WIX_LINK_URL_INPUT_FALLBACK_SELECTOR,
+].join(', ')
+
+export const WIX_LINK_SAVE_BUTTON_LABEL_PATTERN =
+  /^(?:save|apply|done|ok|insert|add|confirm|guardar|aplicar|insertar|confirmar|salvar|inserir|enregistrer|appliquer|ins[ée]rer|speichern|[üu]bernehmen|einf[üu]gen|salva|applica|저장|적용|확인|保存|適用|сохранить|применить|确定|应用|插入)$/iu
+
+export function matchesWixLinkSaveButtonLabel(label: string): boolean {
+  const clean = label.replace(/\s+/gu, ' ').trim()
+  return clean.length > 0 && WIX_LINK_SAVE_BUTTON_LABEL_PATTERN.test(clean)
+}
 
 const WIX_LINK_APPLY_BUTTON_SELECTOR = [
   '[data-hook*="linkPanelConfirm" i]',
   '[data-hook*="link-panel-confirm" i]',
+  '[data-hook*="actionButtonSave" i]',
   '[data-hook*="save" i]',
   '[data-hook*="apply" i]',
   '[data-hook*="confirm" i]',
@@ -4204,9 +4237,59 @@ const WIX_LINK_APPLY_BUTTON_SELECTOR = [
   'button[aria-label*="저장" i]',
   'button[aria-label*="保存" i]',
   'button[aria-label*="сохранить" i]',
+  'button[title*="save" i]',
+  'button[title*="salvar" i]',
+  'button[title*="guardar" i]',
+  'button[title*="enregistrer" i]',
+  'button[title*="speichern" i]',
+  'button[title*="保存" i]',
   '[data-hook*="linkPanel" i] button[type="submit"]',
   '[role="dialog"] button[type="submit"]',
 ].join(', ')
+
+/** Resolve the first visible editable (non-readonly, non-combobox) URL input inside a Wix RCE link modal, prioritizing explicit URL/web inputs over generic modal inputs. */
+async function resolveWixLinkUrlInputLocator(
+  page: Page,
+): Promise<ReturnType<Page['locator']> | undefined> {
+  const tryTier = async (selector: string): Promise<ReturnType<Page['locator']> | undefined> => {
+    const base = page.locator(selector)
+    const total = await base.count().catch(() => 0)
+    if (total <= 0) return undefined
+    const probe = base as unknown as {
+      nth?: (index: number) => ReturnType<Page['locator']> & {
+        isVisible?: () => Promise<boolean>
+        getAttribute?: (name: string) => Promise<string | null>
+      }
+      first: () => ReturnType<Page['locator']>
+    }
+    if (typeof probe.nth === 'function') {
+      const limit = Math.min(total, 15)
+      for (let i = 0; i < limit; i++) {
+        const candidate = probe.nth(i)
+        const visible = typeof candidate.isVisible === 'function'
+          ? await candidate.isVisible().catch(() => false)
+          : true
+        if (!visible) continue
+        const [ro, ariaRo, role] = typeof candidate.getAttribute === 'function'
+          ? await Promise.all([
+              candidate.getAttribute('readonly').catch(() => null),
+              candidate.getAttribute('aria-readonly').catch(() => null),
+              candidate.getAttribute('role').catch(() => null),
+            ])
+          : [null, null, null]
+        if (ro !== null || ariaRo?.toLowerCase() === 'true' || role?.toLowerCase() === 'combobox') {
+          continue
+        }
+        return candidate
+      }
+      return undefined
+    }
+    return base.first()
+  }
+
+  return (await tryTier(WIX_LINK_URL_INPUT_PRIORITY_SELECTOR))
+    ?? (await tryTier(WIX_LINK_URL_INPUT_FALLBACK_SELECTOR))
+}
 
 /** Select an anchor substring inside a contenteditable editor and notify selection listeners. */
 async function selectTextInRichEditor(
@@ -4258,10 +4341,8 @@ async function applyWixLinkPopover(
   stepTimeoutMs: number,
   excludeSubmitSelector?: string,
 ): Promise<boolean> {
-  const urlInputLocator = page.locator(WIX_LINK_URL_INPUT_SELECTOR)
-  const urlInputCount = await urlInputLocator.count().catch(() => 0)
-  if (urlInputCount <= 0) return false
-  const urlInput = await resolveFirstVisibleLocator(page, WIX_LINK_URL_INPUT_SELECTOR)
+  const urlInput = await resolveWixLinkUrlInputLocator(page)
+  if (!urlInput) return false
   await urlInput.fill(targetUrl, { timeout: stepTimeoutMs })
 
   const applyLocator = page.locator(WIX_LINK_APPLY_BUTTON_SELECTOR)
@@ -4280,33 +4361,47 @@ async function applyWixLinkPopover(
         }, excludeSubmitSelector)
         .catch(() => false)
       : false
-    if (!isCommentPublishBtn) {
+    const isVisibleBtn = typeof (applyBtn as unknown as { isVisible?: () => Promise<boolean> }).isVisible === 'function'
+      ? await (applyBtn as unknown as { isVisible: () => Promise<boolean> }).isVisible().catch(() => true)
+      : true
+    if (isVisibleBtn && !isCommentPublishBtn) {
       await applyBtn.click({ timeout: stepTimeoutMs })
       return true
     }
   }
 
-  // Fallback: look for a visible localized Save/Apply/Insert button inside a popover/dialog, or press Enter.
+  // Fallback: look for a visible localized Save/Apply/Insert button (Salvar / Guardar / Enregistrer / Speichern / 保存 / Save) inside a popover/dialog, or press Enter.
   const localizedConfirmSel = await page.evaluate((submitSel: string) => {
     interface DomNode {
       readonly nodeType?: number
       readonly localName?: string
       readonly id?: string
       readonly hidden?: boolean
+      readonly disabled?: boolean
       readonly parentElement?: DomNode | null
+      readonly children?: ArrayLike<DomNode>
       readonly innerText?: string
       readonly textContent?: string | null
       getAttribute?(k: string): string | null
+      closest?(sel: string): DomNode | null
       matches?(sel: string): boolean
       querySelectorAll?(sel: string): ArrayLike<DomNode>
     }
     const g = globalThis as unknown as {
-      readonly document: { querySelectorAll(sel: string): ArrayLike<DomNode> }
+      readonly CSS?: { escape?(v: string): string }
+      readonly document: {
+        readonly body?: DomNode | null
+        querySelectorAll(sel: string): ArrayLike<DomNode>
+      }
       readonly getComputedStyle?: (el: DomNode) => { display?: string; visibility?: string; opacity?: string } | null
     }
+    const escapeCss = (v: string) => (typeof g.CSS !== 'undefined' && typeof g.CSS.escape === 'function')
+      ? g.CSS.escape(v)
+      : String(v).replace(/([^\w-])/g, '\\$1')
     const clean = (v: unknown) => String(v ?? '').replace(/\s+/gu, ' ').trim()
     const isVisible = (el: DomNode | null | undefined): boolean => {
       if (!el || el.nodeType !== 1) return false
+      if (el.disabled || el.getAttribute?.('aria-disabled') === 'true') return false
       for (let cur: DomNode | null | undefined = el; cur && cur.nodeType === 1; cur = cur.parentElement) {
         if (cur.hidden) return false
         if (cur.getAttribute?.('aria-hidden') === 'true') return false
@@ -4315,24 +4410,65 @@ async function applyWixLinkPopover(
       }
       return true
     }
-    const labelRegex = /^(?:save|apply|done|ok|insert|add|confirm|guardar|aplicar|insertar|salvar|inserir|enregistrer|appliquer|ins[ée]rer|speichern|[üu]bernehmen|einf[üu]gen|salva|applica|저장|적용|확인|保存|適用|сохранить|применить|确定|应用|插入)$/iu
-    const scopes = Array.from(g.document.querySelectorAll('[data-hook*="linkPanel" i], [data-hook*="link-modal" i], [role="dialog"], [class*="linkPanel" i], [class*="popover" i]'))
-      .filter(isVisible)
+    const unique = (el: DomNode, sel: string): boolean => {
+      if (!sel) return false
+      try {
+        const list = g.document.querySelectorAll(sel)
+        return list.length === 1 && list[0] === el
+      } catch {
+        return false
+      }
+    }
+    const selectorFor = (el: DomNode): string => {
+      const hook = el.getAttribute?.('data-hook')
+      if (hook) {
+        const s = `[data-hook="${hook.replace(/"/g, '\\"')}"]`
+        if (unique(el, s)) return s
+      }
+      const testId = el.getAttribute?.('data-testid')
+      if (testId) {
+        const s = `[data-testid="${testId.replace(/"/g, '\\"')}"]`
+        if (unique(el, s)) return s
+      }
+      if (el.id) {
+        const s = `#${escapeCss(el.id)}`
+        if (unique(el, s)) return s
+      }
+      const aria = el.getAttribute?.('aria-label')
+      if (aria) {
+        const s = `${el.localName ?? 'button'}[aria-label="${aria.replace(/"/g, '\\"')}"]`
+        if (unique(el, s)) return s
+      }
+      let path = ''
+      for (let node: DomNode | null | undefined = el, depth = 0; node && node.nodeType === 1 && depth < 14; node = node.parentElement, depth++) {
+        const tag = node.localName ?? 'button'
+        const parent = node.parentElement
+        if (!parent) break
+        const siblings = Array.from(parent.children ?? []).filter(s => s.localName === tag)
+        const seg = siblings.length > 1 ? `${tag}:nth-of-type(${siblings.indexOf(node) + 1})` : tag
+        path = path ? `${seg} > ${path}` : seg
+        if (unique(el, path)) return path
+      }
+      return ''
+    }
+    const labelRegex = /^(?:save|apply|done|ok|insert|add|confirm|guardar|aplicar|insertar|confirmar|salvar|inserir|enregistrer|appliquer|ins[ée]rer|speichern|[üu]bernehmen|einf[üu]gen|salva|applica|저장|적용|확인|保存|適用|сохранить|применить|确定|应用|插入)$/iu
+    const scopes = Array.from(g.document.querySelectorAll(
+      '[data-hook*="linkPanel" i], [data-hook*="link-modal" i], [data-hook*="linkModal" i], [data-hook*="modal" i], [role="dialog"], [aria-modal="true"], [class*="linkPanel" i], [class*="popover" i], [class*="modal" i], [data-hook*="ricos" i]',
+    )).filter(isVisible)
+    if (g.document.body) scopes.push(g.document.body)
     for (const scope of scopes) {
       for (const btn of Array.from(scope.querySelectorAll?.('button, [role="button"]') ?? [])) {
         if (!isVisible(btn)) continue
+        if (btn.closest?.('header, nav, footer, [role="banner"], [role="navigation"], [role="contentinfo"]')) continue
         try {
           if (submitSel && btn.matches?.(submitSel)) continue
         } catch {
           // ignore
         }
-        const lbl = clean(btn.innerText || btn.textContent || btn.getAttribute?.('aria-label'))
+        const lbl = clean(btn.innerText || btn.textContent || btn.getAttribute?.('aria-label') || btn.getAttribute?.('title'))
         if (labelRegex.test(lbl)) {
-          const hook = btn.getAttribute?.('data-hook')
-          if (hook) return `[data-hook="${hook.replace(/"/g, '\\"')}"]`
-          if (btn.id) return `#${btn.id}`
-          const aria = btn.getAttribute?.('aria-label')
-          if (aria) return `${btn.localName ?? 'button'}[aria-label="${aria.replace(/"/g, '\\"')}"]`
+          const sel = selectorFor(btn)
+          if (sel) return sel
         }
       }
     }
@@ -6522,7 +6658,7 @@ export async function executeCommentPublish(
               const linkBtnLoc = await resolveFirstVisibleLocator(page, toolbarProbe.selector)
               await linkBtnLoc.click({ timeout: stepTimeout() }).catch(() => undefined)
               await sleep(Math.min(150, stepTimeout()), options.signal)
-              popoverOpened = (await page.locator(WIX_LINK_URL_INPUT_SELECTOR).count().catch(() => 0)) > 0
+              popoverOpened = (await resolveWixLinkUrlInputLocator(page)) !== undefined
             }
             if (!popoverOpened) {
               for (const shortcut of ['Control+k', 'Meta+k'] as const) {
@@ -6532,7 +6668,7 @@ export async function executeCommentPublish(
                   await page.keyboard.press(shortcut).catch(() => undefined)
                 }
                 await sleep(Math.min(150, stepTimeout()), options.signal)
-                if ((await page.locator(WIX_LINK_URL_INPUT_SELECTOR).count().catch(() => 0)) > 0) {
+                if ((await resolveWixLinkUrlInputLocator(page)) !== undefined) {
                   popoverOpened = true
                   break
                 }

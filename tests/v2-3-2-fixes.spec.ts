@@ -2,11 +2,14 @@ import { JSDOM } from 'jsdom'
 import { describe, expect, it } from 'vitest'
 import {
   DEFAULT_COMMENT_STEP_TIMEOUT_MS,
+  WIX_LINK_URL_INPUT_PRIORITY_SELECTOR,
+  WIX_LINK_URL_INPUT_SELECTOR,
   ensureWordPressStarRating,
   executeCommentPublish,
   hasWpModerationUrlParams,
   matchModerationNotice,
   matchesGoogleSsoButtonLabel,
+  matchesWixLinkSaveButtonLabel,
   matchesWixLoginTriggerLabel,
   matchesWixRceLinkButton,
   resolveStepTimeoutMs,
@@ -597,6 +600,127 @@ describe('v2.3.2 Fix 2: Wix RCE toolbar link insertion fallback & multilingual a
     ]) {
       expect(matchesGoogleSsoButtonLabel(sso), `google sso: ${sso}`).toBe(true)
     }
+
+    for (const saveLabel of ['Salvar', 'Guardar', 'Enregistrer', 'Speichern', '保存', 'Save']) {
+      expect(matchesWixLinkSaveButtonLabel(saveLabel), `save button: ${saveLabel}`).toBe(true)
+    }
+    expect(WIX_LINK_URL_INPUT_PRIORITY_SELECTOR).toContain(':not([readonly]):not([aria-readonly="true"]):not([role="combobox"])')
+    expect(WIX_LINK_URL_INPUT_SELECTOR).toContain('input[placeholder*="www" i]')
+    expect(WIX_LINK_URL_INPUT_SELECTOR).toContain('input[placeholder*="endereço" i]')
+    expect(WIX_LINK_URL_INPUT_SELECTOR).toContain('input[placeholder*="enlace" i]')
+  })
+
+  it('skips readonly combobox ("Endereço web" / "Dirección web") in Wix RCE link modal, fills editable URL input, and clicks plain localized Salvar/Guardar button', async () => {
+    const cases: ReadonlyArray<{
+      readonly url: string
+      readonly comboboxValue: string
+      readonly editablePlaceholder: string
+      readonly linkBtnLabel: string
+      readonly saveLabel: string
+    }> = [
+      {
+        url: 'https://www.cofeci.gov.br/post/mercado-imobiliario',
+        comboboxValue: 'Endereço web',
+        editablePlaceholder: 'Cole ou digite um endereço web',
+        linkBtnLabel: 'Inserir link',
+        saveLabel: 'Salvar',
+      },
+      {
+        url: 'https://www.universidadmaya.edu.mx/post/admisiones',
+        comboboxValue: 'Dirección web',
+        editablePlaceholder: 'www.ejemplo.com',
+        linkBtnLabel: 'Insertar enlace',
+        saveLabel: 'Guardar',
+      },
+    ]
+
+    for (const c of cases) {
+      let comboboxTouched = false
+      let filledUrl = ''
+      let saveClicked = false
+      const routes: Record<string, V232Route> = {
+        [c.url]: {
+          html: `
+            <html><head><title>Wix RCE Modal</title><script src="https://static.wixstatic.com/app.js"></script></head><body>
+              <div data-hook="comments-section">
+                <div data-hook="comment-box">
+                  <div data-hook="comment-box-rce-wrapper">
+                    <div contenteditable="true" role="textbox"></div>
+                  </div>
+                  <div id="floating-toolbar" data-hook="ricos-inline-toolbar" style="display:none">
+                    <button type="button" data-hook="textInlineStyleButton_LINK" aria-label="${c.linkBtnLabel}">${c.linkBtnLabel}</button>
+                  </div>
+                  <div id="link-modal" data-hook="linkPanel" style="display:none">
+                    <input type="text" data-hook="linkPanelTypeDropdown" role="combobox" readonly aria-readonly="true" value="${c.comboboxValue}" aria-label="${c.comboboxValue}" />
+                    <input type="text" placeholder="${c.editablePlaceholder}" />
+                    <input type="checkbox" checked />
+                    <button type="button">${c.saveLabel}</button>
+                  </div>
+                  <button type="button" data-hook="submit-comment-button">Publicar</button>
+                </div>
+              </div>
+            </body></html>
+          `,
+          onAction: (kind, selector, value, el, doc) => {
+            if (kind === 'fill' && el) {
+              if (el.hasAttribute('readonly') || el.getAttribute('aria-readonly') === 'true' || el.getAttribute('role') === 'combobox') {
+                comboboxTouched = true
+                return { throwError: new Error('Element is not editable (readonly combobox)') }
+              }
+              if (el.getAttribute('placeholder') === c.editablePlaceholder) {
+                filledUrl = value ?? ''
+              }
+            }
+            if (kind === 'fill' && (el?.getAttribute('contenteditable') === 'true' || selector.includes('contenteditable'))) {
+              doc?.getElementById('floating-toolbar')?.removeAttribute('style')
+            }
+            if (kind === 'click' && selector.includes('textInlineStyleButton_LINK')) {
+              doc?.getElementById('link-modal')?.removeAttribute('style')
+            }
+            if (kind === 'click' && el && el.textContent?.trim() === c.saveLabel) {
+              saveClicked = true
+              const editor = doc?.querySelector('[contenteditable="true"]')
+              if (editor) {
+                editor.innerHTML = `Recurso útil <a href="${filledUrl}">FreeCreate</a>.`
+              }
+            }
+            if (kind === 'click' && selector.includes('submit-comment-button')) {
+              routes[c.url]!.html = `
+                <html><head><title>Wix RCE Modal</title><script src="https://static.wixstatic.com/app.js"></script></head><body>
+                  <div data-hook="comments-section">
+                    <div class="published">Recurso útil <a href="${filledUrl}">FreeCreate</a>.</div>
+                  </div>
+                </body></html>
+              `
+            }
+          },
+        },
+      }
+
+      const { page } = createV232MockPage(routes)
+      const res = await executeCommentPublish(
+        page as never,
+        'p1',
+        {
+          kind: 'comment_publish',
+          url: c.url,
+          siteHint: 'wix_blog',
+          commentText: 'Recurso útil FreeCreate.',
+          websiteUrl: 'https://freecreate.example.com',
+          anchorText: 'FreeCreate',
+        },
+        { defaultTimeoutMs: 10_000, sleepImpl: async () => {} },
+      )
+
+      expect(comboboxTouched, c.url).toBe(false)
+      expect(filledUrl, c.url).toBe('https://freecreate.example.com')
+      expect(saveClicked, c.url).toBe(true)
+      expect(res, c.url).toMatchObject({
+        outcome: 'live',
+        siteType: 'wix',
+        submitTriggered: true,
+      })
+    }
   })
 
   it('falls back to Wix RCE toolbar Link button when URL + Space does not autolink (cofeci.gov.br / universidadmaya.edu.mx)', async () => {
@@ -626,7 +750,7 @@ describe('v2.3.2 Fix 2: Wix RCE toolbar link insertion fallback & multilingual a
         onAction: (kind, selector, value, _el, doc) => {
           // Pressing Space intentionally does NOT autolink!
           // Filling text makes the floating toolbar mount (simulating Ricos inline toolbar appearing after focus/selection).
-          if (kind === 'fill' && selector.includes('comment-box-rce-wrapper')) {
+          if (kind === 'fill' && (_el?.getAttribute('contenteditable') === 'true' || selector.includes('contenteditable'))) {
             const tb = doc?.getElementById('floating-toolbar')
             if (tb) tb.removeAttribute('style')
           }
