@@ -22,6 +22,7 @@ export declare const DEFAULT_WIX_NAV_TIMEOUT_MS = 20000;
 export declare const DEFAULT_COMMENT_NAV_TIMEOUT_MS = 15000;
 export declare const DEFAULT_WIX_DOM_READY_WAIT_MS = 6000;
 export declare const DEFAULT_NON_WIX_DOM_READY_WAIT_MS = 7000;
+export declare const DEFAULT_LARGE_WP_FORM_WAIT_MAX_MS = 15000;
 export declare const DEFAULT_WIX_RELOAD_VERIFY_WAIT_MS = 10000;
 export declare const DEFAULT_WIX_EXPAND_WAIT_MAX_MS = 4000;
 export declare const DEFAULT_WIX_POST_SUBMIT_WAIT_MS = 2500;
@@ -155,6 +156,13 @@ export declare function appendCacheBustParam(rawUrl: string, nonce?: number): st
  */
 export declare function shouldAbortCommentPublishRequest(url: string, resourceType: string): boolean;
 export declare const WIX_GOOGLE_SSO_TECHNICAL_ISSUE_PATTERN: RegExp;
+/**
+ * Multilingual Google SSO button matcher (EN, KO, JA, ZH, ES, FR, DE, IT, PT, RU, TR, NL, PL, TH; case-insensitive).
+ * Shared as a single source of truth between `INSPECT_WIX_SSO_DIALOG_SCRIPT` and unit tests.
+ */
+export declare const WIX_GOOGLE_SSO_BUTTON_PATTERN: RegExp;
+/** Check whether a visible button label/attribute matches a multilingual Google SSO button. */
+export declare function matchesGoogleSsoButtonLabel(label: string): boolean;
 /** Build plain/HTML comment body: plain text when `url` field exists, HTML `<a>` otherwise. */
 export declare function buildWpCommentContent(commentText: string, websiteUrl: string | undefined, anchorText: string | undefined, hasUrlField: boolean): string;
 /** Strip raw `<a>` markup before typing into a `contenteditable` rich editor. */
@@ -195,6 +203,7 @@ export interface ExecuteCommentPublishOptions {
     readonly wixLazyWaitMaxMs?: number;
     readonly wixDomReadyWaitMs?: number;
     readonly nonWixDomReadyWaitMs?: number;
+    readonly largeWpFormWaitMaxMs?: number;
     readonly wixReloadVerifyWaitMs?: number;
     readonly wixExpandWaitMaxMs?: number;
     readonly wixPostSubmitWaitMs?: number;
@@ -247,13 +256,19 @@ export declare function navigateWixWithCommit(page: Page, url: string, options: 
 }): Promise<void>;
 /**
  * Commit-first navigation for non-Wix `comment_publish` (WordPress / Valine / Typecho / custom blogs):
- * navigates with `waitUntil: 'commit'` (default 15s, respecting higher caller timeoutMs), then polls
- * up to 6-8s for comment form / textarea / `#comment` / `form` / error DOM readiness so slow third-party
- * scripts or 13MB pages do not fail with `domcontentloaded` timeouts.
+ * - Navigates with `waitUntil: 'commit'` (default 15s, respecting higher caller timeoutMs).
+ * - Fast early-exit for normal complete pages, no-form pages, and pages where `#commentform` /
+ *   `textarea#comment` / `textarea[name="comment"]` is already mounted (scrolls it into view immediately
+ *   without waiting for unrelated footer scripts).
+ * - Dynamically relaxes the form-readiness polling ceiling up to 15,000ms (polling every ~450ms) when
+ *   streaming (`document.readyState === 'loading'` with DOM growth or WP markers) or high-comment WordPress
+ *   large-page signals (`wp-content` / `wp-includes` / `.comment-list` / `.commentlist` / >30 `[id^="comment-"]`)
+ *   are detected before `#commentform` / `#comment` mounts.
  */
 export declare function navigateCommentPageWithCommit(page: Page, url: string, options: {
     readonly timeoutMs: number;
     readonly domReadyWaitMs?: number;
+    readonly largeWpFormWaitMaxMs?: number;
     readonly sleep?: SleepLike;
     readonly signal?: AbortSignal;
 }): Promise<void>;

@@ -38,6 +38,11 @@ const PARKING_HOST_SUFFIXES = [
   'undeveloped.com',
 ] as const
 
+export const PAID_REDIRECT_HOST_SUFFIXES = [
+  'cvgorilla.com',
+  'rankwithdaniel.com',
+] as const
+
 const STRONG_DEAD_BODY_PATTERN = new RegExp(
   [
     'vercel deployment paused',
@@ -122,6 +127,27 @@ export interface PreflightToxicItem {
   readonly category: ToxicSiteCategory
   readonly matchedKeyword: string
   readonly matchedIn: 'domain' | 'path' | 'title'
+  readonly reason: string
+}
+
+export type PaidRedirectMatchVia = 'original_url' | 'final_url' | 'meta_refresh' | 'js_redirect'
+
+export interface PaidRedirectDetection {
+  readonly matched: boolean
+  readonly targetHost?: string
+  readonly targetUrl?: string
+  readonly matchedVia?: PaidRedirectMatchVia
+  readonly reason?: string
+}
+
+export interface PreflightPaidRedirectItem {
+  readonly id: number
+  readonly sourceId: number
+  readonly host: string
+  readonly url: string
+  readonly targetHost: string
+  readonly targetUrl?: string
+  readonly matchedVia: PaidRedirectMatchVia
   readonly reason: string
 }
 
@@ -228,6 +254,7 @@ export interface BatchPreflightResult {
   readonly skippedDeadItemIds: readonly number[]
   readonly skippedTaggedItemIds: readonly number[]
   readonly skippedToxicItemIds: readonly number[]
+  readonly skippedPaidRedirectItemIds: readonly number[]
   readonly failedWafItemIds: readonly number[]
   readonly data: {
     readonly batchId: number
@@ -239,6 +266,7 @@ export interface BatchPreflightResult {
       readonly alreadyPublished: number
       readonly taggedBlocked: number
       readonly toxicBlocked: number
+      readonly paidRedirectBlocked: number
       readonly heldForManual: number
       readonly probed: number
       readonly runnable: number
@@ -254,6 +282,7 @@ export interface BatchPreflightResult {
     readonly cautionItems?: readonly PreflightCautionItem[]
     readonly taggedBlocked?: readonly PreflightTaggedBlockedItem[]
     readonly toxicBlocked?: readonly PreflightToxicItem[]
+    readonly paidRedirectBlocked?: readonly PreflightPaidRedirectItem[]
     readonly heldForManual?: readonly PreflightHeldForManualItem[]
     readonly skippedByTag?: {
       readonly hardItemIds: readonly number[]
@@ -295,6 +324,13 @@ type ProbeOutcome =
       readonly category: ToxicSiteCategory
       readonly matchedKeyword: string
       readonly matchedIn: 'domain' | 'path' | 'title'
+      readonly reason: string
+    }
+  | {
+      readonly kind: 'paid_redirect'
+      readonly targetHost: string
+      readonly targetUrl?: string
+      readonly matchedVia: PaidRedirectMatchVia
       readonly reason: string
     }
   | { readonly kind: 'waf_403'; readonly provider: WafProvider }
@@ -479,6 +515,188 @@ export async function readBoundedBodyText(
 function isKnownParkingHostname(hostname: string): boolean {
   const lower = hostname.toLowerCase()
   return PARKING_HOST_SUFFIXES.some(suffix => lower === suffix || lower.endsWith(`.${suffix}`))
+}
+
+/** Match known paid link-seller / PBN redirect domains (root domain and any subdomain). */
+export function matchPaidRedirectHostname(hostname: string): string | undefined {
+  const clean = hostname.trim().toLowerCase().replace(/\.+$/u, '')
+  if (!clean) return undefined
+  for (const suffix of PAID_REDIRECT_HOST_SUFFIXES) {
+    if (clean === suffix || clean.endsWith(`.${suffix}`)) {
+      return clean
+    }
+  }
+  return undefined
+}
+
+function tryResolveUrlHostname(rawUrl: string, baseUrl?: string): { readonly hostname: string; readonly resolvedUrl: string } | undefined {
+  const cleaned = rawUrl
+    .trim()
+    .replace(/&amp;/giu, '&')
+    .replace(/\\\//gu, '/')
+    .replace(/^['"]+|['"]+$/gu, '')
+  if (!cleaned) return undefined
+  try {
+    const parsed = baseUrl ? new URL(cleaned, baseUrl) : new URL(cleaned)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return undefined
+    return { hostname: parsed.hostname.toLowerCase(), resolvedUrl: parsed.toString() }
+  } catch {
+    return undefined
+  }
+}
+
+function extractMetaRefreshTargetUrls(html: string): readonly string[] {
+  const targets: string[] = []
+  const metaRegex = /<meta\b([^>]*)>/giu
+  let match: RegExpExecArray | null
+  while ((match = metaRegex.exec(html)) !== null) {
+    const attrs = match[1] ?? ''
+    if (!/\bhttp-equiv\s*=\s*(?:["']\s*refresh\s*["']|refresh\b)/iu.test(attrs)) continue
+    const contentMatch = /\bcontent\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/iu.exec(attrs)
+    const contentVal = contentMatch?.[1] ?? contentMatch?.[2] ?? contentMatch?.[3] ?? ''
+    if (!contentVal) continue
+    const urlMatch = /(?:^|[;\s])url\s*=\s*(?:'([^']+)'|"([^"]+)"|([^'">\s;]+))/iu.exec(contentVal)
+    const rawUrl = urlMatch?.[1] ?? urlMatch?.[2] ?? urlMatch?.[3]
+    if (rawUrl) targets.push(rawUrl)
+  }
+  return targets
+}
+
+const JS_REDIRECT_ASSIGN_PATTERN =
+  /\b(?:(?:window\.)?(?:top|parent|self)\.|(?:window|document)\.)?location(?:\.href)?\s*=\s*(["'`])((?:https?:|\/\/)[^"'`\s<>]+)\1/giu
+const JS_REDIRECT_CALL_PATTERN =
+  /\b(?:(?:window\.)?(?:top|parent|self)\.|(?:window|document)\.)?location\.(?:replace|assign)\s*\(\s*(["'`])((?:https?:|\/\/)[^"'`\s<>]+)\1\s*\)/giu
+
+function extractJsRedirectTargetUrls(html: string): readonly string[] {
+  const codeBlocks: string[] = []
+  const scriptRegex = /<script\b[^>]*>([\s\S]*?)<\/script>/giu
+  let scriptMatch: RegExpExecArray | null
+  while ((scriptMatch = scriptRegex.exec(html)) !== null) {
+    if (scriptMatch[1]) codeBlocks.push(scriptMatch[1])
+  }
+  const onloadRegex = /\bon(?:load|pageshow)\s*=\s*(?:"([^"]*)"|'([^']*)')/giu
+  let onloadMatch: RegExpExecArray | null
+  while ((onloadMatch = onloadRegex.exec(html)) !== null) {
+    const snippet = onloadMatch[1] ?? onloadMatch[2]
+    if (snippet) codeBlocks.push(snippet)
+  }
+
+  const targets: string[] = []
+  for (const block of codeBlocks) {
+    JS_REDIRECT_ASSIGN_PATTERN.lastIndex = 0
+    let m: RegExpExecArray | null
+    while ((m = JS_REDIRECT_ASSIGN_PATTERN.exec(block)) !== null) {
+      if (m[2]) targets.push(m[2])
+    }
+    JS_REDIRECT_CALL_PATTERN.lastIndex = 0
+    while ((m = JS_REDIRECT_CALL_PATTERN.exec(block)) !== null) {
+      if (m[2]) targets.push(m[2])
+    }
+  }
+  return targets
+}
+
+/**
+ * Detect whether an item URL, its HTTP redirect destination (`finalUrl` / `Location`),
+ * HTML `<meta http-equiv="refresh" ... url=...>`, or JS whole-page redirect
+ * (`window.location` / `location.href` / `location.replace` / `location.assign`)
+ * targets a known paid link-seller / PBN domain.
+ */
+export function detectPaidRedirectTarget(input: {
+  readonly host?: string
+  readonly originalUrl?: string
+  readonly finalUrl?: string
+  readonly locationHeader?: string
+  readonly body?: string
+}): PaidRedirectDetection {
+  if (input.host) {
+    const matchedHost = matchPaidRedirectHostname(input.host)
+    if (matchedHost) {
+      return {
+        matched: true,
+        targetHost: matchedHost,
+        ...(input.originalUrl ? { targetUrl: input.originalUrl } : {}),
+        matchedVia: 'original_url',
+        reason: `paid_redirect: ${matchedHost}`,
+      }
+    }
+  }
+
+  if (input.originalUrl) {
+    const orig = tryResolveUrlHostname(input.originalUrl)
+    const matchedOrig = orig ? matchPaidRedirectHostname(orig.hostname) : undefined
+    if (matchedOrig && orig) {
+      return {
+        matched: true,
+        targetHost: matchedOrig,
+        targetUrl: orig.resolvedUrl,
+        matchedVia: 'original_url',
+        reason: `paid_redirect: ${matchedOrig}`,
+      }
+    }
+  }
+
+  const baseForRelative = input.finalUrl ?? input.originalUrl
+
+  if (input.finalUrl) {
+    const fin = tryResolveUrlHostname(input.finalUrl)
+    const matchedFin = fin ? matchPaidRedirectHostname(fin.hostname) : undefined
+    if (matchedFin && fin) {
+      return {
+        matched: true,
+        targetHost: matchedFin,
+        targetUrl: fin.resolvedUrl,
+        matchedVia: 'final_url',
+        reason: `paid_redirect: ${matchedFin}`,
+      }
+    }
+  }
+
+  if (input.locationHeader) {
+    const loc = tryResolveUrlHostname(input.locationHeader, baseForRelative)
+    const matchedLoc = loc ? matchPaidRedirectHostname(loc.hostname) : undefined
+    if (matchedLoc && loc) {
+      return {
+        matched: true,
+        targetHost: matchedLoc,
+        targetUrl: loc.resolvedUrl,
+        matchedVia: 'final_url',
+        reason: `paid_redirect: ${matchedLoc}`,
+      }
+    }
+  }
+
+  if (input.body) {
+    for (const rawTarget of extractMetaRefreshTargetUrls(input.body)) {
+      const resolved = tryResolveUrlHostname(rawTarget, baseForRelative)
+      const matched = resolved ? matchPaidRedirectHostname(resolved.hostname) : undefined
+      if (matched && resolved) {
+        return {
+          matched: true,
+          targetHost: matched,
+          targetUrl: resolved.resolvedUrl,
+          matchedVia: 'meta_refresh',
+          reason: `paid_redirect: ${matched}`,
+        }
+      }
+    }
+
+    for (const rawTarget of extractJsRedirectTargetUrls(input.body)) {
+      const resolved = tryResolveUrlHostname(rawTarget, baseForRelative)
+      const matched = resolved ? matchPaidRedirectHostname(resolved.hostname) : undefined
+      if (matched && resolved) {
+        return {
+          matched: true,
+          targetHost: matched,
+          targetUrl: resolved.resolvedUrl,
+          matchedVia: 'js_redirect',
+          reason: `paid_redirect: ${matched}`,
+        }
+      }
+    }
+  }
+
+  return { matched: false }
 }
 
 function extractTitleOnly(html: string): string {
@@ -1050,6 +1268,26 @@ async function probeItemUrl(
     const response = attemptResult.response as Response
     const body = attemptResult.body ?? ''
     const finalUrl = response.url || parsed.toString()
+    const locationHeader = response.status >= 300 && response.status < 400
+      ? (response.headers.get('location') ?? undefined)
+      : undefined
+
+    const paidRedirect = detectPaidRedirectTarget({
+      originalUrl: parsed.toString(),
+      finalUrl,
+      ...(locationHeader === undefined ? {} : { locationHeader }),
+      body,
+    })
+    if (paidRedirect.matched && paidRedirect.targetHost && paidRedirect.matchedVia && paidRedirect.reason) {
+      return {
+        kind: 'paid_redirect',
+        targetHost: paidRedirect.targetHost,
+        ...(paidRedirect.targetUrl === undefined ? {} : { targetUrl: paidRedirect.targetUrl }),
+        matchedVia: paidRedirect.matchedVia,
+        reason: paidRedirect.reason,
+      }
+    }
+
     const goHint = detectGoRedirectHint(parsed, finalUrl)
 
     // Outbound `/go/` redirect landed on a third-party host: do not misclassify
@@ -1150,7 +1388,7 @@ interface AutoSkipEntry {
   readonly itemId: number
   readonly sourceId: number
   readonly skipReason: string
-  readonly kind: 'dead' | 'tagged' | 'toxic'
+  readonly kind: 'dead' | 'tagged' | 'toxic' | 'paid_redirect'
 }
 
 const PREFLIGHT_SKIP_CHUNK_SIZE = 100
@@ -1204,6 +1442,7 @@ interface LegacyAutoSkipOutcome {
   readonly skippedDeadItemIds: readonly number[]
   readonly skippedTaggedItemIds: readonly number[]
   readonly skippedToxicItemIds: readonly number[]
+  readonly skippedPaidRedirectItemIds: readonly number[]
   readonly taggedSourceIds: readonly number[]
   readonly errors: readonly PreflightAutoSkipError[]
 }
@@ -1215,14 +1454,23 @@ async function applyLegacyAutoSkips(
   signal?: AbortSignal,
 ): Promise<LegacyAutoSkipOutcome> {
   if (entries.length === 0) {
-    return { skippedDeadItemIds: [], skippedTaggedItemIds: [], skippedToxicItemIds: [], taggedSourceIds: [], errors: [] }
+    return {
+      skippedDeadItemIds: [],
+      skippedTaggedItemIds: [],
+      skippedToxicItemIds: [],
+      skippedPaidRedirectItemIds: [],
+      taggedSourceIds: [],
+      errors: [],
+    }
   }
 
   const skippedDeadItemIds: number[] = []
   const skippedTaggedItemIds: number[] = []
   const skippedToxicItemIds: number[] = []
+  const skippedPaidRedirectItemIds: number[] = []
   const deadSourceIds = new Set<number>()
   const toxicSourceIds = new Set<number>()
+  const paidRedirectSourceIds = new Set<number>()
   const taggedSourceIds: number[] = []
   const errors: PreflightAutoSkipError[] = []
 
@@ -1233,6 +1481,9 @@ async function applyLegacyAutoSkips(
     } else if (entry.kind === 'toxic') {
       skippedToxicItemIds.push(entry.itemId)
       toxicSourceIds.add(entry.sourceId)
+    } else if (entry.kind === 'paid_redirect') {
+      skippedPaidRedirectItemIds.push(entry.itemId)
+      paidRedirectSourceIds.add(entry.sourceId)
     } else {
       skippedTaggedItemIds.push(entry.itemId)
     }
@@ -1320,7 +1571,20 @@ async function applyLegacyAutoSkips(
     }
   }
 
-  return { skippedDeadItemIds, skippedTaggedItemIds, skippedToxicItemIds, taggedSourceIds, errors }
+  for (const sourceId of paidRedirectSourceIds) {
+    const tagRes = await tagSourceNonFatal(batchSource, sourceId, ['paid_only'], signal)
+    if (tagRes.tagged) {
+      if (!taggedSourceIds.includes(sourceId)) taggedSourceIds.push(sourceId)
+    } else if (tagRes.error) {
+      const relatedItem = entries.find(entry => entry.kind === 'paid_redirect' && entry.sourceId === sourceId)
+      errors.push({
+        itemId: relatedItem?.itemId ?? sourceId,
+        error: `tagSource paid_only failed for source ${sourceId}: ${tagRes.error}`,
+      })
+    }
+  }
+
+  return { skippedDeadItemIds, skippedTaggedItemIds, skippedToxicItemIds, skippedPaidRedirectItemIds, taggedSourceIds, errors }
 }
 
 async function applyAutoSkips(
@@ -1333,6 +1597,7 @@ async function applyAutoSkips(
   readonly skippedDeadItemIds: readonly number[]
   readonly skippedTaggedItemIds: readonly number[]
   readonly skippedToxicItemIds: readonly number[]
+  readonly skippedPaidRedirectItemIds: readonly number[]
   readonly unchangedCount: number
   readonly taggedSourceIds: readonly number[]
   readonly downgradeNotice?: string
@@ -1344,6 +1609,7 @@ async function applyAutoSkips(
       skippedDeadItemIds: [],
       skippedTaggedItemIds: [],
       skippedToxicItemIds: [],
+      skippedPaidRedirectItemIds: [],
       unchangedCount: 0,
       taggedSourceIds: [],
       errors: [],
@@ -1354,6 +1620,7 @@ async function applyAutoSkips(
     const skippedDeadItemIds: number[] = []
     const skippedTaggedItemIds: number[] = []
     const skippedToxicItemIds: number[] = []
+    const skippedPaidRedirectItemIds: number[] = []
     const taggedSourceIds = new Set<number>()
     const errors: PreflightAutoSkipError[] = []
     let unchangedCount = 0
@@ -1370,6 +1637,7 @@ async function applyAutoSkips(
           if (itemRes.itemStatus === 'skipped' && itemRes.changed) {
             if (matched?.kind === 'dead') skippedDeadItemIds.push(itemRes.itemId)
             else if (matched?.kind === 'toxic') skippedToxicItemIds.push(itemRes.itemId)
+            else if (matched?.kind === 'paid_redirect') skippedPaidRedirectItemIds.push(itemRes.itemId)
             else skippedTaggedItemIds.push(itemRes.itemId)
           }
           if (itemRes.attachedTags.length > 0) {
@@ -1383,6 +1651,9 @@ async function applyAutoSkips(
             taggedSourceIds.add(entry.sourceId)
           } else if (entry.kind === 'toxic') {
             skippedToxicItemIds.push(entry.itemId)
+            taggedSourceIds.add(entry.sourceId)
+          } else if (entry.kind === 'paid_redirect') {
+            skippedPaidRedirectItemIds.push(entry.itemId)
             taggedSourceIds.add(entry.sourceId)
           } else {
             skippedTaggedItemIds.push(entry.itemId)
@@ -1400,7 +1671,9 @@ async function applyAutoSkips(
           ? { tags: ['dead_site'] }
           : entry.kind === 'toxic'
             ? { tags: ['low_quality'] }
-            : {}),
+            : entry.kind === 'paid_redirect'
+              ? { tags: ['paid_only'] }
+              : {}),
       }))
       try {
         const res = await batchSource.preflightSkip(batchId, payload, signal)
@@ -1412,6 +1685,7 @@ async function applyAutoSkips(
           for (const id of fallback.skippedDeadItemIds) skippedDeadItemIds.push(id)
           for (const id of fallback.skippedTaggedItemIds) skippedTaggedItemIds.push(id)
           for (const id of fallback.skippedToxicItemIds) skippedToxicItemIds.push(id)
+          for (const id of fallback.skippedPaidRedirectItemIds) skippedPaidRedirectItemIds.push(id)
           for (const sid of fallback.taggedSourceIds) taggedSourceIds.add(sid)
           for (const err of fallback.errors) errors.push(err)
           return {
@@ -1419,16 +1693,18 @@ async function applyAutoSkips(
             skippedDeadItemIds,
             skippedTaggedItemIds,
             skippedToxicItemIds,
+            skippedPaidRedirectItemIds,
             unchangedCount,
             taggedSourceIds: [...taggedSourceIds],
             downgradeNotice: 'Supermanager returned 404/405 for /preflight-skip; downgraded to legacy item_result/ephemeral lease flow.',
             errors,
           }
         }
-        // If Supermanager rejects `low_quality` tag with 5xx, retry skipping without `low_quality` so skip never fails,
+        // If Supermanager rejects `low_quality` / `paid_only` tags with 5xx, retry skipping without those tags so skip never fails,
         // then attempt non-fatal source_tags fallback separately.
         const toxicInChunk = chunk.filter(entry => entry.kind === 'toxic')
-        if (isSupermanager5xxError(error) && toxicInChunk.length > 0) {
+        const paidRedirectInChunk = chunk.filter(entry => entry.kind === 'paid_redirect')
+        if (isSupermanager5xxError(error) && (toxicInChunk.length > 0 || paidRedirectInChunk.length > 0)) {
           const retryPayload: BacklinkPreflightSkipItem[] = chunk.map(entry => ({
             itemId: entry.itemId,
             skipReason: entry.skipReason,
@@ -1447,6 +1723,19 @@ async function applyAutoSkips(
                 errors.push({
                   itemId: rel?.itemId ?? sourceId,
                   error: `tagSource low_quality failed for source ${sourceId}: ${tagRes.error}`,
+                })
+              }
+            }
+            const paidSourceIds = new Set(paidRedirectInChunk.map(e => e.sourceId))
+            for (const sourceId of paidSourceIds) {
+              const tagRes = await tagSourceNonFatal(batchSource, sourceId, ['paid_only'], signal)
+              if (tagRes.tagged) {
+                taggedSourceIds.add(sourceId)
+              } else if (tagRes.error) {
+                const rel = paidRedirectInChunk.find(e => e.sourceId === sourceId)
+                errors.push({
+                  itemId: rel?.itemId ?? sourceId,
+                  error: `tagSource paid_only failed for source ${sourceId}: ${tagRes.error}`,
                 })
               }
             }
@@ -1478,6 +1767,7 @@ async function applyAutoSkips(
       skippedDeadItemIds,
       skippedTaggedItemIds,
       skippedToxicItemIds,
+      skippedPaidRedirectItemIds,
       unchangedCount,
       taggedSourceIds: [...taggedSourceIds],
       errors,
@@ -1490,6 +1780,7 @@ async function applyAutoSkips(
     skippedDeadItemIds: legacy.skippedDeadItemIds,
     skippedTaggedItemIds: legacy.skippedTaggedItemIds,
     skippedToxicItemIds: legacy.skippedToxicItemIds,
+    skippedPaidRedirectItemIds: legacy.skippedPaidRedirectItemIds,
     unchangedCount: 0,
     taggedSourceIds: legacy.taggedSourceIds,
     errors: legacy.errors,
@@ -1623,6 +1914,7 @@ export async function runBatchPreflight(
   const timeoutMs = options.timeoutMs ?? DEFAULT_PREFLIGHT_TIMEOUT_MS
   const concurrency = options.concurrency ?? DEFAULT_PREFLIGHT_CONCURRENCY
   const autoSkip = options.autoSkip === true
+  const autoSkipPaidRedirect = options.autoSkip !== false
   const autoSkipTagged = options.autoSkipTagged === true
   const autoSkipToxic = options.autoSkipToxic !== false
   const autoFailWaf = options.autoFailWaf === true
@@ -1640,6 +1932,7 @@ export async function runBatchPreflight(
   const alreadyPublishedItemIds: number[] = []
   const taggedBlocked: PreflightTaggedBlockedItem[] = []
   const toxicBlocked: PreflightToxicItem[] = []
+  const paidRedirectBlocked: PreflightPaidRedirectItem[] = []
   const heldForManual: PreflightHeldForManualItem[] = []
   const probeQueue: Array<{ readonly item: BacklinkBatchItem; readonly url: string; readonly softTags: readonly string[] }> = []
 
@@ -1683,6 +1976,22 @@ export async function runBatchPreflight(
     const targetUrl = item.submitUrl !== null && item.submitUrl.trim().length > 0
       ? item.submitUrl.trim()
       : item.sourceUrl.trim()
+
+    // Zero-HTTP pre-filter for known paid link-seller / PBN domains.
+    const prePaidRedirect = detectPaidRedirectTarget({ host: item.sourceHost, originalUrl: targetUrl })
+    if (prePaidRedirect.matched && prePaidRedirect.targetHost && prePaidRedirect.matchedVia && prePaidRedirect.reason) {
+      paidRedirectBlocked.push({
+        id: item.id,
+        sourceId: item.sourceId,
+        host: item.sourceHost,
+        url: targetUrl,
+        targetHost: prePaidRedirect.targetHost,
+        ...(prePaidRedirect.targetUrl === undefined ? {} : { targetUrl: prePaidRedirect.targetUrl }),
+        matchedVia: prePaidRedirect.matchedVia,
+        reason: prePaidRedirect.reason,
+      })
+      continue
+    }
 
     // Zero-HTTP pre-filter for high-confidence toxic (adult/gambling) domains and URL paths.
     const preToxic = detectToxicSite({ host: item.sourceHost, url: targetUrl })
@@ -1781,6 +2090,18 @@ export async function runBatchPreflight(
           reason: outcome.reason,
         })
         break
+      case 'paid_redirect':
+        paidRedirectBlocked.push({
+          id: item.id,
+          sourceId: item.sourceId,
+          host: item.sourceHost,
+          url,
+          targetHost: outcome.targetHost,
+          ...(outcome.targetUrl === undefined ? {} : { targetUrl: outcome.targetUrl }),
+          matchedVia: outcome.matchedVia,
+          reason: outcome.reason,
+        })
+        break
       case 'waf_403':
         wafBlocked.push({
           id: item.id,
@@ -1836,16 +2157,28 @@ export async function runBatchPreflight(
       })
     }
   }
+  if (autoSkipPaidRedirect) {
+    for (const paid of paidRedirectBlocked) {
+      autoSkipEntries.push({
+        itemId: paid.id,
+        sourceId: paid.sourceId,
+        skipReason: paid.reason,
+        kind: 'paid_redirect',
+      })
+    }
+  }
 
   const skipEffect = await applyAutoSkips(batchSource, detail.batch.id, autoSkipEntries, signal)
   const totalAutoSkipped =
     skipEffect.skippedDeadItemIds.length
     + skipEffect.skippedTaggedItemIds.length
     + skipEffect.skippedToxicItemIds.length
+    + skipEffect.skippedPaidRedirectItemIds.length
   const combinedSkippedIds = [
     ...skipEffect.skippedDeadItemIds,
     ...skipEffect.skippedTaggedItemIds,
     ...skipEffect.skippedToxicItemIds,
+    ...skipEffect.skippedPaidRedirectItemIds,
   ]
 
   const wafFailEntries: AutoFailWafEntry[] = []
@@ -1877,6 +2210,7 @@ export async function runBatchPreflight(
 
   const summary = `preflight batch ${detail.batch.id}: ${runnableItemIds.length} runnable, ${deadItems.length} dead, ${taggedBlocked.length} tagged-blocked`
     + (toxicBlocked.length > 0 ? `, ${toxicBlocked.length} toxic` : '')
+    + (paidRedirectBlocked.length > 0 ? `, ${paidRedirectBlocked.length} paid_redirect` : '')
     + `, ${wafBlocked.length} waf_403, ${retryableItems.length} retryable`
     + (heldForManual.length > 0 ? `, ${heldForManual.length} held-manual` : '')
     + (timeoutClusters.length > 0 ? `, ${timeoutClusters.length} timeout-cluster(s)` : '')
@@ -1889,6 +2223,7 @@ export async function runBatchPreflight(
     skippedDeadItemIds: skipEffect.skippedDeadItemIds,
     skippedTaggedItemIds: skipEffect.skippedTaggedItemIds,
     skippedToxicItemIds: skipEffect.skippedToxicItemIds,
+    skippedPaidRedirectItemIds: skipEffect.skippedPaidRedirectItemIds,
     failedWafItemIds: wafFailEffect.failedItemIds,
     data: {
       batchId: detail.batch.id,
@@ -1900,6 +2235,7 @@ export async function runBatchPreflight(
         alreadyPublished: alreadyPublishedItemIds.length,
         taggedBlocked: taggedBlocked.length,
         toxicBlocked: toxicBlocked.length,
+        paidRedirectBlocked: paidRedirectBlocked.length,
         heldForManual: heldForManual.length,
         probed: probeQueue.length,
         runnable: runnableItemIds.length,
@@ -1915,6 +2251,7 @@ export async function runBatchPreflight(
       ...(cautionItems.length > 0 ? { cautionItems } : {}),
       ...(taggedBlocked.length > 0 ? { taggedBlocked } : {}),
       ...(toxicBlocked.length > 0 ? { toxicBlocked } : {}),
+      ...(paidRedirectBlocked.length > 0 ? { paidRedirectBlocked } : {}),
       ...(heldForManual.length > 0 ? { heldForManual } : {}),
       ...(hardItemIds.length > 0 || softItemIds.length > 0
         ? { skippedByTag: { hardItemIds, softItemIds } }
@@ -1924,7 +2261,7 @@ export async function runBatchPreflight(
       ...(retryableItems.length > 0 ? { retryableItems } : {}),
       ...(timeoutClusters.length > 0 ? { timeoutClusters } : {}),
       ...(alreadyPublishedItemIds.length > 0 ? { alreadyPublishedItemIds } : {}),
-      ...(autoSkip || autoSkipTagged || (autoSkipToxic && toxicBlocked.length > 0)
+      ...(autoSkip || autoSkipTagged || (autoSkipToxic && toxicBlocked.length > 0) || (autoSkipPaidRedirect && paidRedirectBlocked.length > 0)
         ? {
             autoSkipResult: {
               mode: skipEffect.mode,

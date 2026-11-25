@@ -155,7 +155,7 @@ export const BACKLINKS_TOOL_DEFINITION: Tool = {
       },
       autoSkip: {
         type: 'boolean',
-        description: 'For batch_preflight: when true, automatically report skipped and tag dead_site for definitive dead/paused/parked sites (default false).',
+        description: 'For batch_preflight: when true, automatically report skipped and tag dead_site for definitive dead/paused/parked sites (default false for dead sites). Known paid PBN redirects (cvgorilla.com, rankwithdaniel.com) auto-skip with paid_redirect and non-fatally tag paid_only unless autoSkip=false.',
       },
       autoSkipTagged: {
         type: 'boolean',
@@ -512,7 +512,7 @@ export function createBacklinksToolHandler(deps: BacklinksToolDependencies) {
             {
               timeoutMs,
               concurrency,
-              autoSkip: args.autoSkip === true,
+              ...(args.autoSkip === undefined ? {} : { autoSkip: args.autoSkip }),
               autoSkipTagged: args.autoSkipTagged === true,
               ...(args.autoSkipToxic === undefined ? {} : { autoSkipToxic: args.autoSkipToxic }),
               ...(args.skipSoftTagged === undefined ? {} : { skipSoftTagged: args.skipSoftTagged }),
@@ -524,7 +524,12 @@ export function createBacklinksToolHandler(deps: BacklinksToolDependencies) {
             },
             signal,
           )
-          for (const id of [...preflight.skippedDeadItemIds, ...preflight.skippedTaggedItemIds, ...preflight.skippedToxicItemIds]) {
+          for (const id of [
+            ...preflight.skippedDeadItemIds,
+            ...preflight.skippedTaggedItemIds,
+            ...preflight.skippedToxicItemIds,
+            ...preflight.skippedPaidRedirectItemIds,
+          ]) {
             sessionGuard.markItemTerminal(id, 'skipped')
           }
           for (const id of preflight.failedWafItemIds) {

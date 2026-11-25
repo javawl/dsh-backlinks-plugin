@@ -32,6 +32,7 @@ export const DEFAULT_WIX_NAV_TIMEOUT_MS = 20_000
 export const DEFAULT_COMMENT_NAV_TIMEOUT_MS = 15_000
 export const DEFAULT_WIX_DOM_READY_WAIT_MS = 6_000
 export const DEFAULT_NON_WIX_DOM_READY_WAIT_MS = 7_000
+export const DEFAULT_LARGE_WP_FORM_WAIT_MAX_MS = 15_000
 export const DEFAULT_WIX_RELOAD_VERIFY_WAIT_MS = 10_000
 export const DEFAULT_WIX_EXPAND_WAIT_MAX_MS = 4_000
 export const DEFAULT_WIX_POST_SUBMIT_WAIT_MS = 2_500
@@ -39,6 +40,8 @@ export const DEFAULT_CONTEXT_DESTROYED_RETRY_MS = 2_000
 export const DEFAULT_WIX_SSO_POPUP_TIMEOUT_MS = 4_000
 export const DEFAULT_WIX_SSO_COMPLETE_WAIT_MS = 8_000
 const LAZY_POLL_INTERVAL_MS = 400
+const NON_WIX_POLL_INTERVAL_MS = 450
+const LARGE_WP_COMMENT_NODE_THRESHOLD = 30
 const POST_SUBMIT_POLL_INTERVAL_MS = 500
 const FRAME_INSPECT_TIMEOUT_MS = 1_000
 const BOTTOM_SNAPSHOT_MAX_CHARS = 1_200
@@ -252,6 +255,42 @@ export function shouldAbortCommentPublishRequest(url: string, resourceType: stri
 
 export const WIX_GOOGLE_SSO_TECHNICAL_ISSUE_PATTERN =
   /looks\s+like\s+there\s+was\s+a\s+technical\s+issue|there\s+was\s+a\s+technical\s+issue|something\s+went\s+wrong[\s\S]{0,80}try\s+again\s+later/iu
+
+/**
+ * Multilingual Google SSO button matcher (EN, KO, JA, ZH, ES, FR, DE, IT, PT, RU, TR, NL, PL, TH; case-insensitive).
+ * Shared as a single source of truth between `INSPECT_WIX_SSO_DIALOG_SCRIPT` and unit tests.
+ */
+export const WIX_GOOGLE_SSO_BUTTON_PATTERN = new RegExp(
+  [
+    '(?:log\\s*in|sign\\s*in|sign\\s*up|continue)\\s+with\\s+google',
+    'google\\s*로그인',
+    'google(?:으?로|\\s*계정으로)\\s*(?:로그인|계속(?:하기)?|(?:회원\\s*)?가입)',
+    'google\\s*(?:회원\\s*)?가입',
+    '구글(?:으?로|\\s*계정으로)?\\s*(?:로그인|계속(?:하기)?|(?:회원\\s*)?가입)',
+    'google\\s*(?:アカウント)?で(?:ログイン|続行|登録|サインイン)',
+    '(?:使用|通过|通過|用|继续使用|繼續使用)\\s*google\\s*(?:账号|帳號|账户|帳戶)?(?:登录|登入|注册|註冊)?',
+    'google\\s*(?:账号|帳號)(?:登录|登入)',
+    '(?:continuar|iniciar\\s+sesi[oó]n|registrarse|acceder)\\s+con\\s+google',
+    '(?:continuer|se\\s+connecter|s[\'’]inscrire|connexion)\\s+avec\\s+google',
+    'mit\\s+google\\s+(?:anmelden|fortfahren|einloggen|registrieren)',
+    '(?:accedi|continua|registrati)\\s+con\\s+google',
+    '(?:continuar|entrar|fazer\\s+login|inscrever-se)\\s+com\\s+(?:o\\s+)?google',
+    '(?:войти|продолжить)\\s+(?:через|с(?:\\s+помощью)?)\\s+google',
+    'google\\s+ile\\s+(?:devam|giriş|oturum)',
+    '(?:inloggen|doorgaan)\\s+met\\s+google',
+    '(?:zaloguj\\s+si[eę]|kontynuuj)\\s+(?:przez|z)\\s+google',
+    '(?:เข้าสู่ระบบ|ดำเนินการต่อ)ด้วย\\s*google',
+  ].join('|'),
+  'i',
+)
+
+/** Check whether a visible button label/attribute matches a multilingual Google SSO button. */
+export function matchesGoogleSsoButtonLabel(label: string): boolean {
+  const clean = label.replace(/\s+/gu, ' ').trim()
+  if (clean.length === 0) return false
+  return WIX_GOOGLE_SSO_BUTTON_PATTERN.test(clean)
+    || /(?:google[-_]?sso|google[-_]?login|google[-_]?sign|socialAuth.*google)/iu.test(clean)
+}
 
 /** Build plain/HTML comment body: plain text when `url` field exists, HTML `<a>` otherwise. */
 export function buildWpCommentContent(
@@ -836,7 +875,9 @@ export const INSPECT_COMMENT_PAGE_SCRIPT = String.raw`(() => {
     const isInteractiveItself = el.localName === 'button'
       || el.localName === 'textarea'
       || isContentEditableEl(el)
-      || el.getAttribute('role') === 'textbox';
+      || el.getAttribute('role') === 'textbox'
+      || el.getAttribute('role') === 'button'
+      || /comment-box-placeholder/i.test(h);
     return !!(text || hasInteractiveChild || isInteractiveItself);
   });
 
@@ -919,7 +960,11 @@ export const INSPECT_COMMENT_PAGE_SCRIPT = String.raw`(() => {
   );
 
   // Detect visible Wix comment editor FIRST so already-logged-in Wix blogs (e.g. visible
-  // comment-box-rce-wrapper + Publish) are never blocked by leftover comment-count or placeholders.
+  // comment-box-rce-wrapper + Publish) are never blocked by leftover comment-count or placeholders,
+  // while strictly excluding collapsed [data-hook="comment-box-placeholder"] nodes or readOnly fakes.
+  const isInsideCommentBoxPlaceholder = (el) => !!(
+    el && el.closest && el.closest('[data-hook="comment-box-placeholder"], [data-hook*="comment-box-placeholder" i], [data-hook="open-comment-box"]')
+  );
   const wixEditorEl = isWix ? Array.from(document.querySelectorAll([
     '[data-hook="comment-box-rce-wrapper"][contenteditable="true"]',
     '[data-hook="comment-box-rce-wrapper"][contenteditable=""]',
@@ -948,11 +993,16 @@ export const INSPECT_COMMENT_PAGE_SCRIPT = String.raw`(() => {
     '[placeholder*="Leave a comment" i]',
     'form textarea[placeholder*="comment" i]',
     'form textarea[aria-label*="comment" i]',
-  ].join(', '))).find(el => isVisible(el) && (isContentEditableEl(el) || el.localName === 'textarea' || el.getAttribute('role') === 'textbox')) : null;
+  ].join(', '))).find(el => {
+    if (!isVisible(el) || isInsideCommentBoxPlaceholder(el)) return false;
+    if (el.readOnly || el.disabled || el.getAttribute('aria-readonly') === 'true') return false;
+    if (isContentEditableEl(el) || el.localName === 'textarea') return true;
+    return el.getAttribute('role') === 'textbox' && el.localName !== 'button' && el.localName !== 'a';
+  }) : null;
 
   const wixHasCommentSection = isWix && (wixCommentRoots.length > 0 || !!wixEditorEl);
-  const wixLoginRegex = /\b(?:log\s*in|sign\s*in)\s+to\s+(?:comment|publish|reply|post)\b|\b(?:log\s*in|sign\s*in)\s+to\s+publish\s+as\s+a\s+member\b|\bsign\s*up\s+to\s+comment\b|faça\s+login\s+para\s+(?:comentar|publicar)|inicia(?:r)?\s+sesi[oó]n\s+para\s+(?:comentar|publicar)|connectez-vous\s+pour\s+(?:commenter|publier)|登录.*(?:评论|发表)/i;
-  const wixShortLoginBtnRegex = /^\s*(?:log\s*in|sign\s*in|sign\s*up|faça\s+login|fazer\s+login|iniciar\s+sesi[oó]n|inicia\s+sesi[oó]n|se\s+connecter|connexion|anmelden|einloggen|kirjaudu(?:\s+sisään)?|登录|登入)\b/i;
+  const wixLoginRegex = /\b(?:log\s*in|sign\s*in)\s+to\s+(?:comment|publish|reply|post)\b|\b(?:log\s*in|sign\s*in)\s+to\s+publish\s+as\s+a\s+member\b|\bsign\s*up\s+to\s+comment\b|faça\s+login\s+para\s+(?:comentar|publicar)|inicia(?:r)?\s+sesi[oó]n\s+para\s+(?:comentar|publicar)|connectez-vous\s+pour\s+(?:commenter|publier)|댓글.*로그인|로그인.*댓글|회원으로\s*로그인|登录.*(?:评论|发表)/i;
+  const wixShortLoginBtnRegex = /^\s*(?:log\s*in|sign\s*in|sign\s*up|faça\s+login|fazer\s+login|entrar|iniciar\s+sesi[oó]n|inicia\s+sesi[oó]n|se\s+connecter|connexion|anmelden|einloggen|accedi|войти|kirjaudu(?:\s+sisään)?|google\s*(?:으?로\s*)?로그인|구글\s*로그인|로그인|회원\s*가입|가입|ログイン|登录|登入)\b/i;
 
   const wixContainerText = wixCommentRoots.map(r => extractVisibleText(r)).join(' ');
   const pageVisibleCaptcha = !!document.querySelector(
@@ -967,7 +1017,7 @@ export const INSPECT_COMMENT_PAGE_SCRIPT = String.raw`(() => {
     const t = extractVisibleText(el);
     return !!(
       el.querySelector('input[type="password"], [data-testid*="signUp" i], [data-testid*="login" i], iframe[src*="recaptcha" i]')
-      || /\b(?:log\s*in\s+to|sign\s*up\s+to|continue\s+with\s+google|sign\s+up\s+with\s+google|sign\s+in\s+with\s+google|already\s+a\s+member)\b/i.test(t)
+      || /\b(?:log\s*in\s+to|sign\s*up\s+to|continue\s+with\s+google|sign\s+up\s+with\s+google|sign\s+in\s+with\s+google|already\s+a\s+member|iniciar\s+sesi[oó]n\s+con\s+google|continuar\s+con\s+google|se\s+connecter\s+avec\s+google|continuer\s+avec\s+google|mit\s+google\s+(?:anmelden|fortfahren)|accedi\s+con\s+google|entrar\s+com\s+(?:o\s+)?google)\b|google\s*(?:으?로|\s*계정으로)?\s*(?:로그인|계속)|войти\s+через\s+google/i.test(t)
     );
   });
 
@@ -1068,10 +1118,11 @@ export const INSPECT_COMMENT_PAGE_SCRIPT = String.raw`(() => {
   if (isWix && !wixLoginRequired) {
     const editorEl = wixEditorEl;
 
-    const triggerTextRegex = /write\s+a\s+comment|leave\s+a\s+comment|add\s+a\s+comment|post\s+a\s+comment|escribir|escribe\s+un\s+coment|escreva|kirjoita|kommentar|écrire|ecrire|写评论|发表评论|留下评论|เขียนความคิดเห็น/i;
+    const triggerTextRegex = /write\s+a\s+comment|leave\s+a\s+comment|add\s+a\s+comment|post\s+a\s+comment|escribir|escribe\s+un\s+coment|escreva|kirjoita|kommentar|écrire|ecrire|댓글\s*(?:작성|쓰기|남기기)|댓글을\s*작성|写评论|发表评论|留下评论|เขียนความคิดเห็น/i;
+    const visibleBoxPlaceholder = Array.from(document.querySelectorAll('button[data-hook="comment-box-placeholder"], [data-hook="comment-box-placeholder"], [data-hook="open-comment-box"], [data-hook*="comment-box-placeholder" i]'))
+      .find(el => isVisible(el) && el !== editorEl);
     const triggerEl = editorEl ? null : (
-      Array.from(document.querySelectorAll('button[data-hook="comment-box-placeholder"], [data-hook="comment-box-placeholder"], [data-hook="open-comment-box"], [data-hook*="comment-box-placeholder"]'))
-        .find(el => isVisible(el) && el !== editorEl)
+      visibleBoxPlaceholder
       || Array.from(document.querySelectorAll('[data-hook*="comment" i] button, [data-hook*="comment" i] [role="button"], [data-testid*="comment" i] button, [data-testid*="comment" i] [role="button"], #comments button, [placeholder*="Write a comment" i], [placeholder*="comment" i]'))
         .find(el => {
           if (!isVisible(el) || el === editorEl) return false;
@@ -1082,7 +1133,7 @@ export const INSPECT_COMMENT_PAGE_SCRIPT = String.raw`(() => {
       || Array.from(document.querySelectorAll('main button, article button, main [role="button"], article [role="button"], button'))
         .find(el => {
           if (!isVisible(el) || el === editorEl || el.closest('header, nav, [role="navigation"]')) return false;
-          return /^\s*(?:write|leave|add|post)\s+a\s+comment\b|^\s*(?:escribir|escribe|escreva|kirjoita|kommentar|écrire|ecrire|写评论|เขียนความคิดเห็น)/i.test(clean(el.innerText || el.textContent || el.getAttribute('aria-label')));
+          return /^\s*(?:write|leave|add|post)\s+a\s+comment\b|^\s*(?:escribir|escribe|escreva|kirjoita|kommentar|écrire|ecrire|댓글\s*(?:작성|쓰기|남기기)|写评论|เขียนความคิดเห็น)/i.test(clean(el.innerText || el.textContent || el.getAttribute('aria-label')));
         })
     );
 
@@ -1104,7 +1155,7 @@ export const INSPECT_COMMENT_PAGE_SCRIPT = String.raw`(() => {
         const hook = clean(el.getAttribute('data-hook'));
         if (hook === 'submit-comment-button' || hook === 'publish-comment-button') return true;
         if (hook === 'primary-btn' && el.closest('[data-hook*="comment-box"], [data-hook*="comments-section"], [data-hook*="comment"]')) return true;
-        return /^(?:publish(?:\s+comment)?|post(?:\s+comment)?|submit(?:\s+comment)?|comment|reply|publicar|enviar|publier|veröffentlichen|julkaise|เผยแพร่|โพสต์|ส่ง|公開|게시|发布|提交|评论)$/i.test(
+        return /^(?:publish(?:\s+comment)?|post(?:\s+comment)?|submit(?:\s+comment)?|comment|reply|publicar|enviar|publier|veröffentlichen|julkaise|เผยแพร่|โพสต์|ส่ง|公開|게시|등록|댓글\s*등록|发布|提交|评论)$/i.test(
           clean(el.innerText || el.textContent || el.getAttribute('aria-label') || el.getAttribute('title'))
         );
       });
@@ -1117,20 +1168,34 @@ export const INSPECT_COMMENT_PAGE_SCRIPT = String.raw`(() => {
 
       const resolvedEditorSelector = selectorFor(editorEl, boxScope) || safeFallbackSelectorFor(editorEl);
       const resolvedSubmitSelector = submitEl ? (selectorFor(submitEl, submitScope) || safeFallbackSelectorFor(submitEl)) : '';
-      wix = {
-        ...wix,
-        hasCommentSection: true,
-        loginRequired: false,
-        hasGuestEditor: true,
-        hasCommentCountOnly: false,
-        editorSelector: resolvedEditorSelector,
-        editorIsContentEditable: isContentEditableEl(editorEl) || editorEl.getAttribute('role') === 'textbox',
-        ...(nameEl ? { nameSelector: selectorFor(nameEl, boxScope) || safeFallbackSelectorFor(nameEl) } : {}),
-        ...(emailEl ? { emailSelector: selectorFor(emailEl, boxScope) || safeFallbackSelectorFor(emailEl) } : {}),
-        ...(websiteEl ? { websiteSelector: selectorFor(websiteEl, boxScope) || safeFallbackSelectorFor(websiteEl) } : {}),
-        ...(linkBtn ? { linkButtonSelector: selectorFor(linkBtn, linkBtnScope) || safeFallbackSelectorFor(linkBtn) } : {}),
-        ...(resolvedSubmitSelector ? { submitSelector: resolvedSubmitSelector } : {}),
-      };
+      const collapsedPlaceholderFallback = !resolvedSubmitSelector && visibleBoxPlaceholder
+        ? (selectorFor(visibleBoxPlaceholder) || safeFallbackSelectorFor(visibleBoxPlaceholder))
+        : '';
+      if (collapsedPlaceholderFallback) {
+        wix = {
+          ...wix,
+          hasCommentSection: true,
+          loginRequired: false,
+          hasGuestEditor: false,
+          hasCommentCountOnly: false,
+          triggerSelector: collapsedPlaceholderFallback,
+        };
+      } else {
+        wix = {
+          ...wix,
+          hasCommentSection: true,
+          loginRequired: false,
+          hasGuestEditor: true,
+          hasCommentCountOnly: false,
+          editorSelector: resolvedEditorSelector,
+          editorIsContentEditable: isContentEditableEl(editorEl) || editorEl.getAttribute('role') === 'textbox',
+          ...(nameEl ? { nameSelector: selectorFor(nameEl, boxScope) || safeFallbackSelectorFor(nameEl) } : {}),
+          ...(emailEl ? { emailSelector: selectorFor(emailEl, boxScope) || safeFallbackSelectorFor(emailEl) } : {}),
+          ...(websiteEl ? { websiteSelector: selectorFor(websiteEl, boxScope) || safeFallbackSelectorFor(websiteEl) } : {}),
+          ...(linkBtn ? { linkButtonSelector: selectorFor(linkBtn, linkBtnScope) || safeFallbackSelectorFor(linkBtn) } : {}),
+          ...(resolvedSubmitSelector ? { submitSelector: resolvedSubmitSelector } : {}),
+        };
+      }
     } else if (triggerEl) {
       const resolvedTriggerSelector = selectorFor(triggerEl) || safeFallbackSelectorFor(triggerEl);
       wix = {
@@ -1322,7 +1387,7 @@ export const INSPECT_WIX_POST_SUBMIT_SCRIPT = String.raw`(() => {
     .filter(isVisible);
 
   const moderationRegex = /awaiting\s+moderation|pending\s+approval|pending\s+review|held\s+for\s+moderation|submitted\s+for\s+review|under\s+review|moderation|waiting\s+for\s+approval|will\s+appear\s+(?:once|after)\s+(?:it\s+is\s+)?approved|aguardando\s+(?:modera[çc][ãa]o|aprova[çc][ãa]o)|pendiente\s+de\s+(?:moderaci[oó]n|aprobaci[oó]n)|en\s+attente\s+de\s+(?:mod[ée]ration|validation|approbation)|wartet\s+auf\s+(?:freischaltung|moderation)|in\s+attesa\s+di\s+(?:moderazione|approvazione)|wacht\s+op\s+goedkeuring|oczekuje\s+na\s+(?:moderacj[ęe]|zatwierdzenie)|onay\s+bekliyor|ожидает\s+модерации|на\s+модерации|รอการอนุมัติ|รอการตรวจสอบ|รอตรวจสอบ|กำลังรอการอนุมัติ|อยู่ระหว่างการตรวจสอบ|ได้รับการอนุมัติ|ความคิดเห็นของคุณ.*อนุมัติ|承認待ち|審査中|승인\s*대기|검토\s*중|đang\s+chờ\s+(?:duyệt|kiểm\s+duyệt)|menunggu\s+(?:persetujuan|moderasi)|等待审核|待审核|审核通过后显示/i;
-  const loginRegex = /\b(?:sign\s*up|log\s*in|sign\s*in|continue\s+with\s+google|sign\s+up\s+with\s+google|sign\s+in\s+with\s+google|already\s+a\s+member|faça\s+login|iniciar\s+sesi[oó]n|se\s+connecter|anmelden|kirjaudu)\b|เข้าสู่ระบบ|ลงทะเบียน|登录|注册/i;
+  const loginRegex = /\b(?:sign\s*up|log\s*in|sign\s*in|continue\s+with\s+google|sign\s+up\s+with\s+google|sign\s+in\s+with\s+google|already\s+a\s+member|faça\s+login|entrar\s+com\s+(?:o\s+)?google|iniciar\s+sesi[oó]n|se\s+connecter|anmelden|accedi|kirjaudu)\b|google\s*(?:으?로|\s*계정으로)?\s*(?:로그인|계속)|로그인|회원\s*가입|войти|ログイン|เข้าสู่ระบบ|ลงทะเบียน|登录|注册/i;
   const errorDialogRegex = /\b(?:error|failed|invalid|cannot\s+post|unable\s+to\s+post|try\s+again\s+later)\b|เกิดข้อผิดพลาด|ไม่สามารถ/i;
   const ackButtonRegex = /^(?:got\s*it|ok|okay|done|close|understood|entendido|compris|verstanden|รับทราบ|ตกลง|知道了|好的|确定|了解|확인)$/i;
   const thaiAckRegex = /^รับทราบ$/i;
@@ -1838,6 +1903,7 @@ export interface ExecuteCommentPublishOptions {
   readonly wixLazyWaitMaxMs?: number
   readonly wixDomReadyWaitMs?: number
   readonly nonWixDomReadyWaitMs?: number
+  readonly largeWpFormWaitMaxMs?: number
   readonly wixReloadVerifyWaitMs?: number
   readonly wixExpandWaitMaxMs?: number
   readonly wixPostSubmitWaitMs?: number
@@ -2376,11 +2442,36 @@ export async function navigateWixWithCommit(
   }
 }
 
+async function scrollWpCommentFormIntoView(page: Page, timeoutMs: number): Promise<void> {
+  if (typeof page.locator !== 'function') return
+  const targetSelector = 'form#commentform, textarea#comment, textarea[name="comment"], form[action*="wp-comments-post.php"]'
+  try {
+    const loc = await resolveFirstVisibleLocator(page, targetSelector)
+    const probeLoc = loc as unknown as {
+      isVisible?: () => Promise<boolean>
+      scrollIntoViewIfNeeded?: (opts?: { timeout?: number }) => Promise<void>
+    }
+    const canScroll = typeof probeLoc.isVisible === 'function'
+      ? await probeLoc.isVisible().catch(() => false)
+      : true
+    if (canScroll && typeof probeLoc.scrollIntoViewIfNeeded === 'function') {
+      await probeLoc.scrollIntoViewIfNeeded({ timeout: Math.min(2_000, timeoutMs) }).catch(() => undefined)
+    }
+  } catch {
+    // Non-fatal: proceed directly to inspection/filling if locator scroll is unavailable.
+  }
+}
+
 /**
  * Commit-first navigation for non-Wix `comment_publish` (WordPress / Valine / Typecho / custom blogs):
- * navigates with `waitUntil: 'commit'` (default 15s, respecting higher caller timeoutMs), then polls
- * up to 6-8s for comment form / textarea / `#comment` / `form` / error DOM readiness so slow third-party
- * scripts or 13MB pages do not fail with `domcontentloaded` timeouts.
+ * - Navigates with `waitUntil: 'commit'` (default 15s, respecting higher caller timeoutMs).
+ * - Fast early-exit for normal complete pages, no-form pages, and pages where `#commentform` /
+ *   `textarea#comment` / `textarea[name="comment"]` is already mounted (scrolls it into view immediately
+ *   without waiting for unrelated footer scripts).
+ * - Dynamically relaxes the form-readiness polling ceiling up to 15,000ms (polling every ~450ms) when
+ *   streaming (`document.readyState === 'loading'` with DOM growth or WP markers) or high-comment WordPress
+ *   large-page signals (`wp-content` / `wp-includes` / `.comment-list` / `.commentlist` / >30 `[id^="comment-"]`)
+ *   are detected before `#commentform` / `#comment` mounts.
  */
 export async function navigateCommentPageWithCommit(
   page: Page,
@@ -2388,12 +2479,18 @@ export async function navigateCommentPageWithCommit(
   options: {
     readonly timeoutMs: number
     readonly domReadyWaitMs?: number
+    readonly largeWpFormWaitMaxMs?: number
     readonly sleep?: SleepLike
     readonly signal?: AbortSignal
   },
 ): Promise<void> {
   const navTimeoutMs = Math.max(options.timeoutMs, DEFAULT_COMMENT_NAV_TIMEOUT_MS)
   const domReadyWaitMs = Math.min(options.domReadyWaitMs ?? DEFAULT_NON_WIX_DOM_READY_WAIT_MS, navTimeoutMs)
+  const largeWpCeiling = Math.max(navTimeoutMs, DEFAULT_LARGE_WP_FORM_WAIT_MAX_MS)
+  const largeWpWaitMs = Math.max(
+    domReadyWaitMs,
+    Math.min(options.largeWpFormWaitMaxMs ?? DEFAULT_LARGE_WP_FORM_WAIT_MAX_MS, largeWpCeiling),
+  )
   const sleep = options.sleep ?? defaultSleep
 
   throwIfAborted(options.signal)
@@ -2408,58 +2505,173 @@ export async function navigateCommentPageWithCommit(
     )
   }
 
-  const probeReady = async (): Promise<{
+  interface NonWixDomProbe {
     readonly ready: boolean
+    readonly hasDirectWpForm: boolean
     readonly hasContent: boolean
     readonly emptyDocument: boolean
     readonly urlError: boolean
-  }> => {
+    readonly isLoading: boolean
+    readonly hasWpLargePageSignals: boolean
+    readonly commentItemCount: number
+    readonly hasCommentsClosedBanner: boolean
+    readonly textLen: number
+    readonly nodeCount: number
+  }
+
+  const probeReady = async (): Promise<NonWixDomProbe> => {
     const liveUrl = typeof page.url === 'function' ? page.url() : ''
     if (isBrowserErrorPageUrl(liveUrl)) {
-      return { ready: false, hasContent: false, emptyDocument: true, urlError: true }
+      return {
+        ready: false,
+        hasDirectWpForm: false,
+        hasContent: false,
+        emptyDocument: true,
+        urlError: true,
+        isLoading: false,
+        hasWpLargePageSignals: false,
+        commentItemCount: 0,
+        hasCommentsClosedBanner: false,
+        textLen: 0,
+        nodeCount: 0,
+      }
     }
     if (typeof page.evaluate !== 'function') {
-      return { ready: true, hasContent: true, emptyDocument: false, urlError: false }
+      return {
+        ready: true,
+        hasDirectWpForm: false,
+        hasContent: true,
+        emptyDocument: false,
+        urlError: false,
+        isLoading: false,
+        hasWpLargePageSignals: false,
+        commentItemCount: 0,
+        hasCommentsClosedBanner: false,
+        textLen: 1,
+        nodeCount: 1,
+      }
     }
     try {
-      const probe = await page.evaluate(() => {
+      const probe = await page.evaluate((commentNodeThreshold: number) => {
         const g = globalThis as unknown as {
           document?: {
             readyState?: string
             title?: string
+            head?: { innerHTML?: string } | null
             body?: { innerText?: string; textContent?: string; children?: { length: number } } | null
             documentElement?: { innerHTML?: string } | null
             querySelector?: (sel: string) => unknown
+            querySelectorAll?: (sel: string) => ArrayLike<{ innerText?: string; textContent?: string }>
+            getElementsByTagName?: (tag: string) => { length: number }
           }
         }
         const doc = g.document
-        const hasCommentDom = Boolean(
-          doc?.querySelector?.('form#commentform, form[action*="wp-comments-post.php"], textarea#comment, textarea[name="comment"], textarea.veditor, textarea, form, #comments, #respond, iframe[src*="blogger.com/comment"], #error-page, .wp-die-message'),
+        const hasDirectWpForm = Boolean(
+          doc?.querySelector?.('form#commentform, form[action*="wp-comments-post.php"], textarea#comment, textarea[name="comment"]'),
+        )
+        const hasOtherTerminalDom = Boolean(
+          doc?.querySelector?.('textarea.veditor, textarea[name="text"], .verbum-comments [contenteditable="true"], .jetpack-comments [contenteditable="true"], iframe[src*="blogger.com/comment"], iframe[src*="blogspot.com/comment"], #error-page, .wp-die-message'),
         )
         const readyState = String(doc?.readyState ?? 'complete')
+        const isLoading = readyState === 'loading'
         const body = doc?.body
-        const textLen = String(body?.innerText || body?.textContent || '').replace(/\s+/gu, ' ').trim().length
         const childCount = body?.children ? body.children.length : 0
-        const htmlLen = doc?.documentElement?.innerHTML ? doc.documentElement.innerHTML.length : 0
+        const nodeCount = doc?.getElementsByTagName ? doc.getElementsByTagName('*').length : childCount
+        const rawText = nodeCount > 800
+          ? String(body?.textContent ?? '')
+          : String(body?.innerText || body?.textContent || '')
+        const textLen = rawText.trim().length
         const titleLen = String(doc?.title ?? '').trim().length
+        const htmlLen = textLen === 0 && childCount === 0
+          ? (doc?.documentElement?.innerHTML ? doc.documentElement.innerHTML.length : 0)
+          : 256
+
+        const commentItemCount = doc?.querySelectorAll
+          ? doc.querySelectorAll('[id^="comment-"]').length
+          : 0
+        const hasWpMarkers = Boolean(
+          doc?.querySelector?.(
+            'link[href*="wp-content"], script[src*="wp-content"], link[href*="wp-includes"], script[src*="wp-includes"], .comment-list, .commentlist, meta[name="generator"][content*="WordPress" i]',
+          ),
+        ) || /wp-content|wp-includes/iu.test(String(doc?.head?.innerHTML ?? '').slice(0, 16_384))
+        const hasWpLargePageSignals = hasWpMarkers || commentItemCount > commentNodeThreshold
+
+        let hasCommentsClosedBanner = false
+        if (!hasDirectWpForm && !isLoading && commentItemCount > commentNodeThreshold && doc?.querySelectorAll) {
+          const closedRegex = /\bcomments\s+are\s+closed\b|\bcommenting\s+(?:is|has\s+been)\s+closed\b|\bcomments\s+(?:have\s+been\s+)?disabled\b|评论已关闭|评论功能已关闭|已关闭评论/iu
+          const closedNodes = doc.querySelectorAll('.nocomments, #respond, .comments-area .no-comments')
+          for (let i = 0; i < closedNodes.length; i++) {
+            const node = closedNodes[i]
+            const t = String(node?.innerText || node?.textContent || '')
+            if (closedRegex.test(t)) {
+              hasCommentsClosedBanner = true
+              break
+            }
+          }
+        }
+
         return {
-          hasCommentDom,
-          readyState,
+          hasDirectWpForm,
+          hasOtherTerminalDom,
+          isLoading,
           textLen,
           childCount,
+          nodeCount,
           htmlLen,
           titleLen,
+          commentItemCount,
+          hasWpLargePageSignals,
+          hasCommentsClosedBanner,
         }
-      })
+      }, LARGE_WP_COMMENT_NODE_THRESHOLD)
       const hasContent = probe.textLen > 0 || probe.childCount > 0 || probe.htmlLen > 128
       const emptyDocument = probe.textLen === 0 && probe.childCount === 0 && probe.titleLen === 0 && probe.htmlLen < 32
-      const ready = probe.hasCommentDom || (hasContent && probe.readyState !== 'loading')
-      return { ready, hasContent, emptyDocument, urlError: false }
+      const highCommentPending = probe.commentItemCount > LARGE_WP_COMMENT_NODE_THRESHOLD && !probe.hasCommentsClosedBanner
+      const ready = probe.hasDirectWpForm
+        || probe.hasOtherTerminalDom
+        || (hasContent && !probe.isLoading && !highCommentPending)
+      return {
+        ready,
+        hasDirectWpForm: probe.hasDirectWpForm,
+        hasContent,
+        emptyDocument,
+        urlError: false,
+        isLoading: probe.isLoading,
+        hasWpLargePageSignals: probe.hasWpLargePageSignals,
+        commentItemCount: probe.commentItemCount,
+        hasCommentsClosedBanner: probe.hasCommentsClosedBanner,
+        textLen: probe.textLen,
+        nodeCount: probe.nodeCount,
+      }
     } catch (error) {
       if (isNavigationContextError(error)) {
-        return { ready: false, hasContent: false, emptyDocument: false, urlError: false }
+        return {
+          ready: false,
+          hasDirectWpForm: false,
+          hasContent: false,
+          emptyDocument: false,
+          urlError: false,
+          isLoading: true,
+          hasWpLargePageSignals: false,
+          commentItemCount: 0,
+          hasCommentsClosedBanner: false,
+          textLen: 0,
+          nodeCount: 0,
+        }
       }
-      return { ready: false, hasContent: false, emptyDocument: true, urlError: false }
+      return {
+        ready: false,
+        hasDirectWpForm: false,
+        hasContent: false,
+        emptyDocument: true,
+        urlError: false,
+        isLoading: false,
+        hasWpLargePageSignals: false,
+        commentItemCount: 0,
+        hasCommentsClosedBanner: false,
+        textLen: 0,
+        nodeCount: 0,
+      }
     }
   }
 
@@ -2472,13 +2684,26 @@ export async function navigateCommentPageWithCommit(
   }
 
   if (!health.ready && domReadyWaitMs > 0) {
-    const deadline = Date.now() + domReadyWaitMs
-    const maxPolls = Math.max(1, Math.ceil(domReadyWaitMs / 350))
+    const startAt = Date.now()
+    let usingExtendedWait = Boolean(
+      !health.hasDirectWpForm
+      && (
+        (health.isLoading && health.hasWpLargePageSignals)
+        || (health.commentItemCount > LARGE_WP_COMMENT_NODE_THRESHOLD && !health.hasCommentsClosedBanner)
+      ),
+    )
+    let activeWaitMs = usingExtendedWait ? largeWpWaitMs : domReadyWaitMs
+    let deadline = startAt + activeWaitMs
+    let maxPolls = Math.max(1, Math.ceil(activeWaitMs / NON_WIX_POLL_INTERVAL_MS))
+    let prevTextLen = health.textLen
+    let prevNodeCount = health.nodeCount
+    let prevCommentCount = health.commentItemCount
+
     for (let poll = 0; poll < maxPolls && Date.now() < deadline && !health.ready; poll++) {
       throwIfAborted(options.signal)
       const remaining = deadline - Date.now()
       if (remaining <= 0) break
-      await sleep(Math.min(350, remaining), options.signal)
+      await sleep(Math.min(NON_WIX_POLL_INTERVAL_MS, remaining), options.signal)
       health = await probeReady()
       if (health.urlError) {
         throw new BrowserError(
@@ -2486,7 +2711,36 @@ export async function navigateCommentPageWithCommit(
           'BROWSER_ACTION_FAILED',
         )
       }
+      if (health.ready) break
+
+      const domGrew =
+        health.textLen > prevTextLen
+        || health.nodeCount > prevNodeCount
+        || health.commentItemCount > prevCommentCount
+      prevTextLen = Math.max(prevTextLen, health.textLen)
+      prevNodeCount = Math.max(prevNodeCount, health.nodeCount)
+      prevCommentCount = Math.max(prevCommentCount, health.commentItemCount)
+
+      const shouldExtend = Boolean(
+        !usingExtendedWait
+        && !health.hasDirectWpForm
+        && (
+          (health.isLoading && (domGrew || health.hasWpLargePageSignals))
+          || (health.commentItemCount > LARGE_WP_COMMENT_NODE_THRESHOLD && !health.hasCommentsClosedBanner)
+        ),
+      )
+      if (shouldExtend) {
+        usingExtendedWait = true
+        activeWaitMs = largeWpWaitMs
+        deadline = startAt + activeWaitMs
+        maxPolls = Math.max(1, Math.ceil(activeWaitMs / NON_WIX_POLL_INTERVAL_MS))
+      }
     }
+  }
+
+  if (health.hasDirectWpForm) {
+    await scrollWpCommentFormIntoView(page, navTimeoutMs)
+    return
   }
 
   if (health.emptyDocument && !health.hasContent) {
@@ -2975,7 +3229,7 @@ const INSPECT_WIX_SSO_DIALOG_SCRIPT = String.raw`(() => {
   const techRegex = /looks\s+like\s+there\s+was\s+a\s+technical\s+issue|there\s+was\s+a\s+technical\s+issue|something\s+went\s+wrong[\s\S]{0,80}try\s+again\s+later/i;
   const techMatch = techRegex.exec(bodyText);
 
-  const googleBtnRegex = /(?:log\s*in|sign\s*in|sign\s*up|continue)\s+with\s+google|google\s*でログイン|使用\s*google\s*(?:账号|帳號)?登录|通过\s*google\s*登录|google\s*账号登录|continuar\s+con\s+google|iniciar\s+sesi[oó]n\s+con\s+google|continuer\s+avec\s+google|se\s+connecter\s+avec\s+google|mit\s+google\s+anmelden|continuar\s+com\s+(?:o\s+)?google|google\s+ile\s+(?:devam|giriş)|войти\s+(?:через|с)\s+google/i;
+  const googleBtnRegex = new RegExp(${JSON.stringify(WIX_GOOGLE_SSO_BUTTON_PATTERN.source)}, 'i');
   const dialogScopes = Array.from(document.querySelectorAll('[id^="SM_ROOT_COMP"], [role="dialog"], [aria-modal="true"]')).filter(isVisible);
   const searchScopes = dialogScopes.length > 0
     ? dialogScopes
@@ -2998,7 +3252,7 @@ const INSPECT_WIX_SSO_DIALOG_SCRIPT = String.raw`(() => {
     if (googleBtn) break;
   }
 
-  const loginTriggerRegex = /\b(?:log\s*in|sign\s*in|sign\s*up)(?:\s+to\s+(?:comment|publish|reply|post))?\b|faça\s+login|iniciar\s+sesi[oó]n|se\s+connecter|anmelden|kirjaudu|登录|登入/i;
+  const loginTriggerRegex = /\b(?:log\s*in|sign\s*in|sign\s*up)(?:\s+to\s+(?:comment|publish|reply|post))?\b|faça\s+login|fazer\s+login|iniciar\s+sesi[oó]n|se\s+connecter|anmelden|accedi|kirjaudu|войти|로그인|회원\s*가입|ログイン|登录|登入/i;
   const loginTrigger =
     Array.from(document.querySelectorAll('[data-hook="login-as-member-text-button"], [data-hook*="login" i]'))
       .find(el => isVisible(el) && el !== googleBtn)
@@ -3120,7 +3374,7 @@ const INSPECT_GOOGLE_OAUTH_POPUP_SCRIPT = String.raw`(() => {
   }
 
   const isConsentPage = /accounts\.google\.com\/.*(?:consent|oauth\/id|signin\/oauth|o\/oauth2)/i.test(url);
-  const consentBtnRegex = /^(?:continue|allow|confirm|accept|继续|允许|授权|続行|許可|continuar|continuer|weiter|devam\s+et|продолжить)$/i;
+  const consentBtnRegex = /^(?:continue|allow|confirm|accept|继续|允许|授权|続行|許可|계속|허용|확인|continuar|continuer|continua|consenti|weiter|devam\s+et|продолжить)$/i;
   let consentEl = null;
   if (!hasPasswordOrMfa && !accountChoiceEl && (isConsentPage || !!document.querySelector('#submit_approve_access'))) {
     consentEl = Array.from(document.querySelectorAll('#submit_approve_access, button, [role="button"], input[type="submit"]'))
@@ -4707,6 +4961,7 @@ export async function executeCommentPublish(
       await navigateCommentPageWithCommit(page, command.url, {
         timeoutMs: navTimeoutMs,
         ...(options.nonWixDomReadyWaitMs === undefined ? {} : { domReadyWaitMs: options.nonWixDomReadyWaitMs }),
+        ...(options.largeWpFormWaitMaxMs === undefined ? {} : { largeWpFormWaitMaxMs: options.largeWpFormWaitMaxMs }),
         sleep,
         ...(options.signal === undefined ? {} : { signal: options.signal }),
       })
@@ -4918,7 +5173,12 @@ export async function executeCommentPublish(
         }
       }
 
-      if (!inspection.wix.hasGuestEditor && inspection.wix.triggerSelector) {
+      // Helper to expand a collapsed `[data-hook="comment-box-placeholder"]` / trigger ONLY when not behind a login wall.
+      // Strictly enforces logged-out redline: never touches editor if clicking reveals a login wall or CAPTCHA.
+      const expandWixCommentPlaceholder = async (): Promise<BrowserCommentPublishResult | null> => {
+        if (inspection.wix.loginRequired || inspection.wix.hasGuestEditor || !inspection.wix.triggerSelector) {
+          return null
+        }
         await dismissBlockingOverlays(page, timeoutMs)
 
         const triggerLocator = await resolveFirstVisibleLocator(page, inspection.wix.triggerSelector)
@@ -4990,9 +5250,7 @@ export async function executeCommentPublish(
             if (loginHandled !== null) {
               return loginHandled
             }
-            if (inspection.wix.hasGuestEditor && inspection.wix.editorSelector) {
-              break
-            }
+            break
           }
           if (inspection.wix.hasGuestEditor && inspection.wix.editorSelector) {
             break
@@ -5021,6 +5279,19 @@ export async function executeCommentPublish(
             return loginHandled
           }
         }
+        return null
+      }
+
+      for (let expandPass = 0; expandPass < 2; expandPass++) {
+        if (inspection.wix.loginRequired || inspection.wix.hasGuestEditor || !inspection.wix.triggerSelector) {
+          break
+        }
+        const expandHandled = await expandWixCommentPlaceholder()
+        if (expandHandled !== null) {
+          return expandHandled
+        }
+        // Only run a second pass if autoGoogleSso just logged us in and left a collapsed placeholder behind.
+        if (!wixSsoAttempted) break
       }
 
     if (inspection.childFrames?.hasActionableCommentFrame && (!inspection.wix.hasGuestEditor || !inspection.wix.editorSelector)) {

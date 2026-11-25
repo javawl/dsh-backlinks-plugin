@@ -29,7 +29,7 @@ description: 本工作区所有"发外链/发布外链/发布批次/跑批次/�
 | `browser batch_fill` | `fields: [{ target, op?, value?, nth? }]`, `submitTarget?`, `submitNth?`, `page?` |
 
 1. **前置预检（1 次）**：`backlinks action="batch_preflight"`（`batchId`、`autoSkip: true`、`autoSkipTagged: true`、`autoSkipToxic: true`、`autoFailWaf: true`）。
-   - **毒性外链前置拦截（`autoSkipToxic: true` 默认开启）**：基于域名、URL 路径与页面 `<title>` 精准拦截成人/赌博高危站（严格单词边界，不误伤 `vue slot` / `essex`），统计在 `toxicBlocked` 并自动 `skipped(toxic_site: ...)` + 容错打标 `low_quality`。
+   - **毒性外链与付费 PBN 跳转前置拦截**：`autoSkipToxic: true`（默认开启）拦截高危成人/赌博站（`toxicBlocked` + 容错打标 `low_quality`）；已知付费卖链/PBN 跳转目标域（`cvgorilla.com`、`rankwithdaniel.com` 及子域，覆盖原始 URL、`finalUrl`、`<meta http-equiv="refresh">` 与 JS 跳转）归入 `paidRedirectBlocked`，默认自动 `skipped(paid_redirect: <targetHost>)` + 容错打标 `paid_only`（传 `autoSkip: false` 可关闭自动跳过）。
    - HTML 嗅探全读 ≤128KB 或首 32KB + 尾 64KB；识别 `/go/` 外跳（`rootSubmitHint`）、HTTP 507 死站、`wixSignupRecaptchaAlways` 与同路径前缀/中段 slug 词元超时聚类（`timeoutClusters`）。
    - 默认隔离已带 `waf_403` 条目（`heldForManual`），`autoFailWaf: true` 自动标新老 `waf_403` 为 `failed(manual_required)`。
    - 拿到存活清单 `runnableItems: [{ itemId, domain, siteHint, rootSubmitHint?, wixSignupRecaptchaAlways? }]`。
@@ -38,9 +38,9 @@ description: 本工作区所有"发外链/发布外链/发布批次/跑批次/�
 3. **分片认领**：仅从 `runnableItemIds` 挑 **5–6 条** `batch_claim`（同域 `sourceHost` 串行；单会话 10–12 条 / 2 片，允许低存活小批接力）。
 4. **博客与目录确定性快路径（`comment_publish` / `directory_autofill`）**：
    - 博客评论（`wordpress_comment` / `typecho_comment` / `wix_blog` / `comments_closed_hint` / Valine / Blogger / 自定义博客）：**直接调用 `browser action="comment_publish"`**。
-     - **非 Wix `commit` 导航 + 轻量资源拦截**：非 Wix 站改为 `waitUntil: 'commit'`（默认 15s，尊重更高 `timeoutMs`）并拦截 `image`/`media`/`font`/广告统计域（严禁拦截 `document`/`stylesheet`/`xhr`/`fetch` 与 Wix/OAuth/CAPTCHA 域，`finally` 自动解除）。首探遇 `Execution context was destroyed` 自动等 2000ms 重试 1 次。
+     - **非 Wix `commit` 导航 + 万级评论 WP 流式容错 + 轻量资源拦截**：非 Wix 站使用 `waitUntil: 'commit'`（默认 15s，尊重更高 `timeoutMs`）并拦截 `image`/`media`/`font`/广告统计域（严禁拦截 `document`/`stylesheet`/`xhr`/`fetch` 与 Wix/OAuth/CAPTCHA 域，`finally` 自动解除）。检测到流式加载或高评论 WP 大页（`readyState === 'loading'` 且 DOM 增长，或 `wp-content`/`.comment-list`/>30 个 `#comment-*`）时动态延长表单等待至最多 15s，一旦 `#commentform`/`#comment` 挂载立刻 `scrollIntoViewIfNeeded()` 进入填表（普通无表单页仍快速早退）。首探遇 `Execution context was destroyed` 自动等 2000ms 重试 1 次。
      - **WordPress 新 `#comment-ID` 判定与 `wp_die` 403 区分**：提交前采集页面最大 `#comment-ID`，提交后若分配全新更大 `#comment-<newId>` 且无报错（即便受全页缓存或审核队列影响），返回 `submitted`（`wp_new_comment_id_assigned`，保留 `#comment-<newId>` 链接），并扩展英/法/西/德/意/葡/土/俄/日/中/波斯/泰语待审词库与轻量 cache-bust 复检。若 HTTP 403 为 `wp_die` 表单校验（如缺评分），返回 `needs_llm_fallback`（`wp_die_validation_error`）而非 `blocked_waf`。
-     - **Wix 一键 Google SSO（`autoGoogleSso: true` 默认开启）**：无 CAPTCHA / `signupRecaptchaOption=ALWAYS` 的 Wix `needs_login` 自动点击登录 → 复检 CAPTCHA → 点多语言 Google SSO → 自动接管账号选择/授权同意弹窗 → 登录成功后自动填评发布与重载核验。遇 `"Looks like there was a technical issue"` 立即返回 `manual_required`（`templateSignature: "wix:google_sso_technical_issue"`，快速熔断严禁重试）。
+     - **Wix 一键 Google SSO（`autoGoogleSso: true` 默认开启）与已登录占位展开**：无 CAPTCHA / `signupRecaptchaOption=ALWAYS` 的 Wix `needs_login` 自动点击登录 → 复检 CAPTCHA → 点多语言 Google SSO（含韩语 `Google 로그인` 及英/日/中/西/法/德/意/葡/俄）→ 自动接管账号选择/授权同意弹窗 → 登录成功后自动填评发布与重载核验。已登录态（无可见 `login-as-member-text-button`）遇折叠 `[data-hook="comment-box-placeholder"]` 自动先点开展开编辑器再填评（若点开弹出登录墙则立刻转未登录分支，严守未登录禁填红线）。遇 `"Looks like there was a technical issue"` 立即返回 `manual_required`（`templateSignature: "wix:google_sso_technical_issue"`，快速熔断严禁重试）。
      - **Valine 与多语言提交按钮**：支持 Valine（`input.vnick`/`vmail`/`vlink`、`textarea.veditor`、`button.vsubmit`，捕获 LeanCloud `POST .../classes/Comment` 201 或重载 `.first()` 核验 `a.vnick`）及土/西/法/德/意/葡/俄/日/中提交按钮（如 `GÖNDER`）。
    - 返回 `outcome` 映射：
      - `live` → `item_result(live, publicUrl)`

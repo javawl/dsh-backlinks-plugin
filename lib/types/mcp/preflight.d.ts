@@ -8,6 +8,7 @@ export declare const PREFLIGHT_HEAD_BYTES = 32768;
 export declare const PREFLIGHT_TAIL_BYTES = 65536;
 export declare const PREFLIGHT_FULL_READ_CAP_BYTES = 131072;
 export declare const PREFLIGHT_STREAM_SCAN_CAP_BYTES = 524288;
+export declare const PAID_REDIRECT_HOST_SUFFIXES: readonly ["cvgorilla.com", "rankwithdaniel.com"];
 export type PreflightDeadReason = 'invalid_url' | 'http_404' | 'http_410' | 'http_507' | 'http_5xx_persistent' | 'dns_error' | 'tls_error' | 'connection_error' | 'parked_or_suspended';
 export type PreflightRetryableReason = 'timeout' | 'http_408' | 'http_429' | 'network_error';
 export type ToxicSiteCategory = 'adult' | 'gambling';
@@ -26,6 +27,24 @@ export interface PreflightToxicItem {
     readonly category: ToxicSiteCategory;
     readonly matchedKeyword: string;
     readonly matchedIn: 'domain' | 'path' | 'title';
+    readonly reason: string;
+}
+export type PaidRedirectMatchVia = 'original_url' | 'final_url' | 'meta_refresh' | 'js_redirect';
+export interface PaidRedirectDetection {
+    readonly matched: boolean;
+    readonly targetHost?: string;
+    readonly targetUrl?: string;
+    readonly matchedVia?: PaidRedirectMatchVia;
+    readonly reason?: string;
+}
+export interface PreflightPaidRedirectItem {
+    readonly id: number;
+    readonly sourceId: number;
+    readonly host: string;
+    readonly url: string;
+    readonly targetHost: string;
+    readonly targetUrl?: string;
+    readonly matchedVia: PaidRedirectMatchVia;
     readonly reason: string;
 }
 export type WafProvider = 'cloudfront' | 'cloudflare' | 'waf';
@@ -113,6 +132,7 @@ export interface BatchPreflightResult {
     readonly skippedDeadItemIds: readonly number[];
     readonly skippedTaggedItemIds: readonly number[];
     readonly skippedToxicItemIds: readonly number[];
+    readonly skippedPaidRedirectItemIds: readonly number[];
     readonly failedWafItemIds: readonly number[];
     readonly data: {
         readonly batchId: number;
@@ -124,6 +144,7 @@ export interface BatchPreflightResult {
             readonly alreadyPublished: number;
             readonly taggedBlocked: number;
             readonly toxicBlocked: number;
+            readonly paidRedirectBlocked: number;
             readonly heldForManual: number;
             readonly probed: number;
             readonly runnable: number;
@@ -139,6 +160,7 @@ export interface BatchPreflightResult {
         readonly cautionItems?: readonly PreflightCautionItem[];
         readonly taggedBlocked?: readonly PreflightTaggedBlockedItem[];
         readonly toxicBlocked?: readonly PreflightToxicItem[];
+        readonly paidRedirectBlocked?: readonly PreflightPaidRedirectItem[];
         readonly heldForManual?: readonly PreflightHeldForManualItem[];
         readonly skippedByTag?: {
             readonly hardItemIds: readonly number[];
@@ -177,6 +199,21 @@ export declare function readBoundedBodyText(response: Response, options?: {
     readonly fullReadCapBytes?: number;
     readonly streamScanCapBytes?: number;
 }): Promise<string>;
+/** Match known paid link-seller / PBN redirect domains (root domain and any subdomain). */
+export declare function matchPaidRedirectHostname(hostname: string): string | undefined;
+/**
+ * Detect whether an item URL, its HTTP redirect destination (`finalUrl` / `Location`),
+ * HTML `<meta http-equiv="refresh" ... url=...>`, or JS whole-page redirect
+ * (`window.location` / `location.href` / `location.replace` / `location.assign`)
+ * targets a known paid link-seller / PBN domain.
+ */
+export declare function detectPaidRedirectTarget(input: {
+    readonly host?: string;
+    readonly originalUrl?: string;
+    readonly finalUrl?: string;
+    readonly locationHeader?: string;
+    readonly body?: string;
+}): PaidRedirectDetection;
 /**
  * High-confidence Toxic Backlink detector covering adult/porn and gambling/betting
  * domains, URL paths, and page `<title>` strings with strict word-boundary guards
