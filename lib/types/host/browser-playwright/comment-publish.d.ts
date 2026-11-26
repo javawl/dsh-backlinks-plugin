@@ -75,6 +75,7 @@ export interface GenericCommentInspection {
 }
 export interface WixInspection {
     readonly hasCommentSection: boolean;
+    readonly hasNativeWixCommentContainer?: boolean;
     readonly loginRequired: boolean;
     readonly captchaDetected: boolean;
     readonly signupRecaptchaAlways?: boolean;
@@ -102,9 +103,13 @@ export interface WixInspection {
 export interface ChildFramesInspection {
     readonly frames: readonly string[];
     readonly hasActionableCommentFrame: boolean;
+    readonly hasThirdPartyCommentFrame?: boolean;
+    readonly hasNonThirdPartyCommentFrame?: boolean;
     readonly hasUnknownInteractiveFrame: boolean;
     readonly captchaDetected: boolean;
+    readonly directCaptchaFrameDetected?: boolean;
     readonly commentsClosedPhrase?: string;
+    readonly nonThirdPartyCommentsClosedPhrase?: string;
     readonly bloggerFrameUrl?: string;
 }
 export interface CommentPageInspection {
@@ -182,6 +187,26 @@ export declare function matchesGoogleSsoButtonLabel(label: string): boolean;
 export declare const WIX_LOGIN_TRIGGER_BUTTON_PATTERN: RegExp;
 /** Check whether a visible Wix login-wall button label matches a multilingual login trigger. */
 export declare function matchesWixLoginTriggerLabel(label: string): boolean;
+/**
+ * CSS selector matching existing Wix comment list / item / content / body containers.
+ * Links and text inside these containers belong to user-generated comments (including spam
+ * anchor links like "DM play login" / "Jai Club Login") and MUST NEVER trigger Wix login detection.
+ */
+export declare const WIX_COMMENT_CONTENT_SELECTOR: string;
+export declare const WIX_AUTH_HOST_PATTERN: RegExp;
+/**
+ * Determine whether an `<a href>` is permitted as a Wix login trigger.
+ * Strictly rejects external third-party domains and non-HTTP schemes like `mailto:`/`tel:`,
+ * allowing only empty/`#`/`javascript:`, same-host URLs, or official Wix / Google auth hosts.
+ */
+export declare function isAllowedWixLoginHref(href: string | null | undefined, pageUrl: string): boolean;
+/**
+ * Multilingual comment submit button label matcher shared between WordPress, OpenCart
+ * (including Journal2/Journal3 themes), and custom blog comment forms.
+ */
+export declare const MULTILINGUAL_SUBMIT_BUTTON_PATTERN: RegExp;
+/** Check whether a visible button label matches a supported multilingual comment submit label. */
+export declare function matchesMultilingualSubmitLabel(label: string): boolean;
 /** Multilingual Wix RCE toolbar Link button matcher (matches camelCase/underscore hooks like `LinkButton`/`textInlineStyleButton_LINK` & localized aria-labels). */
 export declare const WIX_RCE_LINK_BUTTON_PATTERN: RegExp;
 export declare const WIX_RCE_UNLINK_BUTTON_PATTERN: RegExp;
@@ -246,8 +271,15 @@ export interface ExecuteCommentPublishOptions {
     readonly signal?: AbortSignal;
 }
 export declare const CAPTCHA_FRAME_URL_PATTERN: RegExp;
+export declare const THIRD_PARTY_COMMENT_FRAME_URL_PATTERN: RegExp;
+export declare const WIX_NATIVE_FRAME_URL_PATTERN: RegExp;
 export declare const KNOWN_COMMENT_FRAME_URL_PATTERN: RegExp;
 export declare const NON_COMMENT_FRAME_URL_PATTERN: RegExp;
+/**
+ * Determine whether a child iframe URL belongs to a third-party non-Wix comment widget
+ * (e.g. `commentsplugin.com`, `disqus.com`, etc.) rather than Wix-native/same-origin/Blogger/CAPTCHA frames.
+ */
+export declare function isThirdPartyNonWixCommentFrameUrl(frameUrl: string, pageUrl?: string): boolean;
 export declare const POST_SUBMIT_WAF_FINGERPRINT_PATTERN: RegExp;
 /** Detect whether an HTTP 403 response is a WordPress `wp_die` form-validation error (e.g. missing rating) rather than a WAF block. */
 export declare function isWpDieFormValidationError(text: string, rawHtml?: string, hasWpDieDom?: boolean): boolean;

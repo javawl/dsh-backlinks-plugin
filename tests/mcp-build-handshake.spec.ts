@@ -88,7 +88,7 @@ describe('built MCP server artifact & stdio handshake', () => {
     expect(initResp.error).toBeUndefined()
     expect(initResp.result?.serverInfo).toEqual({
       name: 'backlinks-publisher',
-      version: '2.3.2',
+      version: '2.3.3',
     })
 
     send({ jsonrpc: '2.0', method: 'notifications/initialized' })

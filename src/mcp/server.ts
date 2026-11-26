@@ -25,7 +25,7 @@ import {
 import { resolveMcpConfig, type McpConfig } from './config.ts'
 
 export const MCP_SERVER_NAME = 'backlinks-publisher'
-export const MCP_SERVER_VERSION = '2.3.2'
+export const MCP_SERVER_VERSION = '2.3.3'
 
 export interface BacklinksMcpServerOptions {
   readonly config?: McpConfig
